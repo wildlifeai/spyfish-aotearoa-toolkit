@@ -1,0 +1,119 @@
+csv_mapping:
+  drop_id_column: "DropID"
+  survey_id_column: "SurveyID"
+  site_id_column: "SiteID"
+  is_bad_deployment_column: "IsBadDeployment"
+  video_file_link_column: "LinkToVideoFile"
+
+storage:
+  mode: "aws"
+  bucket_name: "marine-buv-kalindi"
+  sharepoint_deployment_csv_key: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
+  local_video_dir: "/Users/kalindi/spyfish/videos"
+  local_deployment_csv_key: "/Users/kalindi/spyfish/metadata/BUV Deployment.csv"
+
+validation_rules:
+  deployments:
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
+    required: ["DropID", "SurveyID", "SiteID","SamplingStart", "SamplingEnd"]
+    unique: ["DropID"]
+    info_columns: ["SurveyID", "SiteID"]
+    foreign_keys:
+      surveys: "SurveyID"
+      sites: "SiteID"
+    relationships:
+      - column: "DropID"
+        rule: "equals"
+        template: "{SurveyID}_{SiteID}_{ReplicateWithinSite:02}"
+      - column: "FileName"
+        rule: "equals"
+        template: "{DropID}.mp4"
+        allowed_values: ["NO VIDEO BAD DEPLOYMENT"]
+        allow_null: true
+      - column: "LinkToVideoFile"
+        rule: "equals"
+        template: "media/{SurveyID}/{DropID}/{DropID}.mp4"
+        allowed_values: ["NO VIDEO BAD DEPLOYMENT"]
+        allow_null: true
+    values:
+      - column: "Latitude"
+        rule: "value_range"
+        range: [-46, -36]
+        allowed_values: [0]
+      - column: "Longitude"
+        rule: "value_range"
+        range: [170, 178.5]
+        allowed_values: [0]
+  surveys:
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    required: ["SurveyID"]
+    unique: ["SurveyID"]
+    info_columns: ["SurveyName"]
+    formats: ["SurveyID"]
+    foreign_keys: {}
+    relationships: []
+  sites:
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
+    required: ["SiteID", "LinkToMarineReserve"]
+    unique: ["SiteID"]
+    info_columns: ["SiteName", "LinkToMarineReserve"]
+    formats: ["SiteID"]
+    foreign_keys: {}
+    relationships: []
+  species:
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
+    required: ["AphiaID", "CommonName", "ScientificName"]
+    unique: ["AphiaID", "ScientificName", "CommonName"]
+    info_columns: ["AphiaID", "CommonName", "ScientificName"]
+    foreign_keys: {}
+    relationships: []
+  reserves:
+    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
+    required: []
+    unique: []
+    info_columns: []
+    foreign_keys: {}
+    relationships: []
+
+ml_inference:
+  limit_processing: 2  # SAFEGUARD: Only process 2 videos per run while building
+  test_drop_id_1: "KSF_20240124_BUV_KSF_085_01"
+  test_drop_key_1: "media/KSF_20240124_BUV/KSF_20240124_BUV_KSF_085_01/KSF_20240124_BUV_KSF_085_01.mp4"
+  test_drop_sampling_start_1: 1
+  test_drop_sampling_end_1: 29
+  test_drop_id_2: "KSF_20240124_BUV_KSF_085_02"
+  test_drop_key_2: "media/KSF_20240124_BUV/KSF_20240124_BUV_KSF_085_02/KSF_20240124_BUV_KSF_085_02.mp4"
+  test_drop_sampling_start_2: 1
+  test_drop_sampling_end_2: 29
+  # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
+  frame_skip: 10
+  confidence_threshold: 0.25       # Base YOLO inference threshold
+  maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
+  model_s3_key: "models/cfd_binary_water_20260301.pt" # TODO thinnk where to put this
+  model_path: "/nesi/project/wildlife03546/models/cfd_binary_water_20260301.pt"
+  mock_model_path: "/Users/kalindi/code/spyfish-aotearoa-toolkit/mock_model/cfd_binary_water_20260301.pt"
+  remote_host: "mahuika"
+  remote_user: "kalindi"
+  extraction:
+    interval_seconds: 10
+    annotated_by_prefix: "ml"
+
+orchestrator:
+  is_test_run: true
+  is_local: true
+  mock_video_dir: "mock_media"
+  s3_db_key: "db/spyfish_pipeline.db"
+  local_manifest_dir_path: "process_files/annotations"
+  local_data_quality_dir: "process_files/data_quality"
+  local_manifest_name: "videos_to_ml.csv"
+  local_logs_dir: "process_files/logs"
+  s3_annotations_dir: "process_files/annotations"
+  nesi_video_dir: "/nesi/project/wildlife03546/spyfish/media"
+
+biigle:
+  project_id: 3711        # Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  disk_id: 134            # S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  # Report type IDs
+  annotation_report_type_video: 8          # Video annotation CSV report
+  annotation_report_type_images: 3   # Image annotation CSV report
+  volume_report_type: 10             # Volume overview report
