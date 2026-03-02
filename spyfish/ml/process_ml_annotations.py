@@ -92,13 +92,13 @@ def process_maxn(raw_df, output_csv_path, drop_id,
             'AnnotatedBy': model_name,
             'Interval_annotation': interval_seconds,
             'ConfidenceAgreement': round(best_confidence, 4),
-            'time_of_max_seconds': best_second
+            'time_of_maxn_ms': best_second   # float seconds of the MaxN peak frame (sub-second precision)
         })
 
     maxn_df = pd.DataFrame(maxn_results)
 
     if not maxn_df.empty:
-        maxn_df = maxn_df.sort_values(['time_of_max_seconds', 'ScientificName'])
+        maxn_df = maxn_df.sort_values(['time_of_maxn_ms', 'ScientificName'])
 
     Path(output_csv_path).parent.mkdir(parents=True, exist_ok=True)
     maxn_df.to_csv(output_csv_path, index=False)
@@ -173,9 +173,9 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         # 2. Draw lowest-confidence frames for QA review
         review_df = maxn_df.sort_values('ConfidenceAgreement').head(10)
 
-        # Map time_of_max_seconds back to raw CSV frame numbers
+        # Map time_of_maxn_ms back to raw CSV frame numbers
         frame_indices = []
-        for t_sec in review_df['time_of_max_seconds']:
+        for t_sec in review_df['time_of_maxn_ms']:
             closest = raw_df.iloc[(raw_df['time_seconds'] - t_sec).abs().argsort()[:1]]
             frame_indices.append(int(closest['frame'].iloc[0]))
 

@@ -73,7 +73,7 @@ def select_zooniverse_clips(
     interval_sec = config.interval_seconds
 
     # Use sub-second precise timing from the raw ML output if available.
-    df["TimeSeconds"] = df["time_of_max_seconds"].astype(float)
+    df["TimeOfMaxnMs"] = df["time_of_maxn_ms"].astype(float)
     df["ConfidenceAgreement"] = df["ConfidenceAgreement"].replace(0, 0.001)
     df["ConfusionScore"] = df["MaxInterval"] / df["ConfidenceAgreement"]
 
@@ -81,7 +81,7 @@ def select_zooniverse_clips(
     selection_rows: list = []
 
     def _add_interval(row, reason: str, species: str = "All") -> bool:
-        clip_start = int((row["TimeSeconds"] // interval_sec) * interval_sec)
+        clip_start = int((row["TimeOfMaxnMs"] // interval_sec) * interval_sec)
         if clip_start in selected_clip_starts:
             return False
         selected_clip_starts.add(clip_start)
@@ -90,7 +90,7 @@ def select_zooniverse_clips(
             "SamplingStart": sampling_start,
             "ClipStartRelative": clip_start,                       # seconds since SamplingStart (snapped to interval)
             "ClipEndRelative": clip_start + interval_sec,
-            "TimeOfMaxSeconds": float(row.get("TimeSeconds", clip_start)),  # exact ML peak — for frame extraction
+            "TimeOfMaxnMs": float(row.get("TimeOfMaxnMs", clip_start)),  # exact ML peak seconds (sub-second precision)
             "StartTime": _seconds_to_time(clip_start),            # HH:MM:SS relative
             "EndTime": _seconds_to_time(clip_start + interval_sec),
             "TargetSpecies": species,
