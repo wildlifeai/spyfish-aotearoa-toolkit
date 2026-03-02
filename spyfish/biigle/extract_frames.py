@@ -2,7 +2,7 @@
 Extract frames at MaxN peak times from source videos using ffmpeg.
 
 Reads the selections CSV output from select_clips.py and extracts one clean JPEG
-per row at the exact TimeOfMax moment (sampling_start + time_of_max_seconds).
+per row at the exact TimeOfMax moment (sampling_start + time_of_maxn_ms).
 
 Also converts the corresponding YOLO bounding boxes from the raw ML CSV into
 COCO-format JSON alongside the frames — ready for Biigle upload.
@@ -68,16 +68,11 @@ def extract_frame(video_path: str, seek_seconds: float, out_path: Path, fast: bo
 
 # ── YOLO → COCO conversion ───────────────────────────────────────────────────
 
-def yolo_to_coco_bbox(cx: float, cy: float, w: float, h: float,
-                      img_w: int, img_h: int) -> list[float]:
+def yolo_to_coco_bbox(cx: float, cy: float, w: float, h: float) -> list[float]:
     """
-    Convert YOLO center-format (normalised 0-1) bbox to COCO [x, y, width, height] (pixels).
+    Convert YOLO center-format pixel bbox [cx, cy, w, h] to COCO [x, y, width, height] (pixels).
     """
-    px = cx * img_w
-    py = cy * img_h
-    pw = w * img_w
-    ph = h * img_h
-    return [round(px - pw / 2, 2), round(py - ph / 2, 2), round(pw, 2), round(ph, 2)]
+    return [round(cx - w / 2, 2), round(cy - h / 2, 2), round(w, 2), round(h, 2)]
 
 
 def build_coco_from_raw_csv(
@@ -136,10 +131,9 @@ def build_coco_from_raw_csv(
             if cls_name not in categories:
                 categories[cls_name] = len(categories)
 
-            bbox = yolo_to_coco_bbox(
-                row["x"], row["y"], row["w"], row["h"],
-                rec.get("img_w", 1920), rec.get("img_h", 1080)
-            )
+            # YOLO centers are absolute pixels from Ultralytics xywh
+            bbox = yolo_to_coco_bbox(row["x"], row["y"], row["w"], row["h"])
+
             ann_id += 1
             annotations.append({
                 "id": ann_id,
@@ -149,6 +143,7 @@ def build_coco_from_raw_csv(
                 "area": round(bbox[2] * bbox[3], 2),
                 "iscrowd": 0,
                 "score": round(float(row.get("confidence", 0.0)), 4),
+                # TODO check if it works with this
             })
 
     return {
@@ -215,12 +210,19 @@ def extract_frames_from_selections(
 
         seek_seconds = sampling_start + time_of_max_relative
 
-        out_filename = f"{drop_id}__frame_{time_of_max_relative:.1f}s.jpg"
+        out_filename = f"{drop_id}__frame_{time_of_max_relative:.3f}s.jpg"
         out_path = out_dir / out_filename
 
-        logging.info(f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.1f}s → {out_filename}")
+        logging.info(f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s → {out_filename}")
         success = extract_frame(video_path, seek_seconds, out_path, fast=fast)
         frame_paths.append(str(out_path) if success else None)
+
+        img_w, img_h = 0, 0
+        if success:
+            import cv2
+            img = cv2.imread(str(out_path))
+            if img is not None:
+                img_h, img_w = img.shape[:2]
 
         frame_records.append({
             "image_id": img_id,
@@ -228,6 +230,8 @@ def extract_frames_from_selections(
             "time_of_max": time_of_max_relative,
             "drop_id": drop_id,
             "selection_reason": row.get("SelectionReason", ""),
+            "img_w": img_w,
+            "img_h": img_h,
         })
 
     df["FramePath"] = frame_paths

@@ -8,16 +8,19 @@ from pathlib import Path
 
 from spyfish.config import config
 from spyfish.database.manager import DatabaseManager
+from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.orchestrator.ingest_legacy import sync_annotations_to_main_db
 from spyfish.ml.draw_frames import draw_boxes_on_frames
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
 
 def seconds_to_time(seconds):
-    """Converts seconds to HH:MM:SS format."""
+    """Converts seconds to HH:MM:SS.mmm format."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
 def process_maxn(raw_df, output_csv_path, drop_id,
@@ -151,8 +154,30 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         )
 
         if maxn_df.empty:
-            logging.warning(f"No MaxN results for {drop_id}, skipping frame drawing and plot")
+            logging.warning(f"No MaxN results for {drop_id}, skipping ingestion and QA drawing")
             continue
+
+        # 2. Ingest into detailed annotations database
+        ann_db = AnnotationDatabaseManager()
+        annotations_to_add = []
+        for _, row in maxn_df.iterrows():
+            annotations_to_add.append({
+                "drop_id": drop_id,
+                "scientific_name": row["ScientificName"],
+                "timestamp": row["TimeOfMax"],
+                "count": row["MaxInterval"],
+                "source": "ml",
+                "confidence": row["ConfidenceAgreement"],
+                "external_id": model_name
+            })
+
+        if annotations_to_add:
+            with ann_db.get_connection() as conn:
+                # TODO do we want this? maybe some comparison?
+                # Clear previous ML syncs for this drop
+                conn.execute("DELETE FROM annotations WHERE drop_id = ? AND source = 'ml'", (drop_id,))
+                ann_db.add_annotations(annotations_to_add)
+            logging.info(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
 
         if not draw_images:
             logging.info(f"Post-ML processing complete for {drop_id} (frame & plot drawing skipped)")
@@ -196,3 +221,8 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         )
 
         logging.info(f"Post-ML processing complete for {drop_id}")
+
+    # 3. Finally sync all updated drops to the main pipeline DB
+    if drop_ids:
+        sync_annotations_to_main_db(drop_ids)
+        logging.info(f"Synchronized annotation counts for {len(drop_ids)} drops to main pipeline DB")

@@ -9,6 +9,8 @@ from pathlib import Path
 
 from spyfish.config import config, PipelineStatus, get_required
 from spyfish.storage.s3_handler import S3Handler
+from spyfish.database.manager import DatabaseManager
+from spyfish.storage.db_sync import download_db, upload_db
 
 class MLRunner:
     def __init__(self):
@@ -19,6 +21,7 @@ class MLRunner:
         self.bucket = get_required(config.storage, "bucket_name", "storage")
         self.s3_db_key = get_required(config.orchestrator, "s3_db_key", "orchestrator")
         self.s3 = S3Handler(bucket=self.bucket)
+        self.db = DatabaseManager()
 
         # Local state properties
         self.local_db_path = config.db_path
@@ -34,9 +37,9 @@ class MLRunner:
 
     def sync_down(self):
         """Downloads the master pipeline database from S3."""
-        logging.info(f"Downloading master state db from s3://{self.bucket}/{self.s3_db_key}")
-        if not self.is_test_run:
-            self.s3.download_object_from_s3(self.s3_db_key, self.local_db_path)
+        if self.is_test_run:
+            return
+        download_db()
 
     def generate_manifest(self) -> List[str]:
         """Queries the local sqlite DB for videos READY_FOR_ML and creates the target CSV manifest."""
@@ -67,22 +70,21 @@ class MLRunner:
             """
             df = pd.read_sql_query(query, conn, params=test_drop_ids)
         else:
-            query = f"""
-                SELECT drop_id as {drop_id_col},
-                       video_path as {video_link_col},
-                       sampling_start as SamplingStart,
-                       sampling_end as SamplingEnd
-                FROM deployments
-                WHERE status = ?
-                LIMIT ?
-            """
-            df = pd.read_sql_query(query, conn, params=(PipelineStatus.READY_FOR_ML, self.limit))
-
-        conn.close()
+            df = pd.DataFrame(self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML))
+            if not df.empty:
+                df = df.head(self.limit)
 
         if df.empty:
             logging.info("No drops available for ML processing. Exiting.")
             return []
+
+        # Rename columns to match what the rest of the method expects (BUV Deployment CSV style)
+        df = df.rename(columns={
+            "drop_id": drop_id_col,
+            "video_path": video_link_col,
+            "sampling_start": "SamplingStart",
+            "sampling_end": "SamplingEnd"
+        })
 
         # On NeSI, it is significantly faster and more robust to rsync the files natively
         # using the aws cli instead of generating presigned URLs (since Slurm jobs may sit in queue for days)
@@ -140,16 +142,13 @@ class MLRunner:
             return []
 
         logging.info(f"Setting {len(targets)} targets to {PipelineStatus.PROCESSING_ML}...")
+        logging.info(f"Setting {len(targets)} targets to {PipelineStatus.PROCESSING_ML}...")
         if not self.is_test_run:
-            conn = sqlite3.connect(self.local_db_path)
-            cursor = conn.cursor()
-            placeholders = ','.join(['?'] * len(targets))
-            query = f"UPDATE deployments SET status = ? WHERE drop_id IN ({placeholders})"
-            cursor.execute(query, [PipelineStatus.PROCESSING_ML] + targets)
-            conn.commit()
-            conn.close()
-            # Upload immediately to lock the state on S3
-            self.s3.upload_file_to_s3(self.local_db_path, self.s3_db_key)
+            # Batch update status to PROCESSING_ML
+            download_db()
+            for target in targets:
+                self.db.update_status(target, PipelineStatus.PROCESSING_ML, auto_sync=False)
+            upload_db()
 
         logging.info(f"Starting Snakemake orchestrator for {len(targets)} drops...")
 
@@ -240,40 +239,21 @@ class MLRunner:
                 logging.warning(f"Expected to find ML output at {local_csv} but file is missing.")
 
         # Re-download the DB to ensure we don't overwrite UI changes while Snakemake ran
-        logging.info("Re-downloading master state db from S3 to prevent data stomping...")
-        self.s3.download_object_from_s3(self.s3_db_key, self.local_db_path)
+        download_db()
 
-        # Apply the updates, BUT ONLY if the video is STILL marked as READY_FOR_ML.
+        # Apply the updates, BUT ONLY if the video is STILL marked as PROCESSING_ML.
         # This protects against cases where a user might have manually excluded or deleted
         # the run from the dashboard while the long ML queue was executing!
-        conn = sqlite3.connect(self.local_db_path)
-        cursor = conn.cursor()
-
-        # SQLite IN clause builder
-        placeholders = ','.join(['?'] * len(successful_drops))
-        query = f"""
-            UPDATE deployments
-            SET status = ?
-            WHERE drop_id IN ({placeholders})
-            AND status = ?
-        """
-
-        params = [PipelineStatus.ML_COMPLETED] + successful_drops + [PipelineStatus.PROCESSING_ML]
-        cursor.execute(query, params)
-        conn.commit()
-
-        rows_updated = cursor.rowcount
-        conn.close()
-
-        if rows_updated != len(successful_drops):
-            logging.warning(f"Only {rows_updated} of {len(successful_drops)} drops were updated. "
-                            f"Some were likely modified manually in the UI mid-run.")
-        else:
-            logging.info(f"Successfully updated {rows_updated} rows in local DB to ML_COMPLETED.")
+        updated_count = 0
+        for drop_id in successful_drops:
+            record = self.db.get_deployment(drop_id)
+            if record and record['status'] == PipelineStatus.PROCESSING_ML:
+                self.db.update_status(drop_id, PipelineStatus.ML_COMPLETE, auto_sync=False)
+                updated_count += 1
 
         # Upload back up
-        logging.info("Uploading locally updated state DB back to S3...")
-        self.s3.upload_file_to_s3(self.local_db_path, self.s3_db_key)
+        upload_db()
+        logging.info(f"Successfully updated {updated_count} rows in local DB to ML_COMPLETE.")
         logging.info("State Sync Complete.")
 
 def main():

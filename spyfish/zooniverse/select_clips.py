@@ -18,19 +18,23 @@ from spyfish.config import config
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def _time_to_seconds(time_str: str) -> int:
+def _time_to_seconds(time_str: str) -> float:
     if pd.isna(time_str):
-        return 0
-    h, m, s = map(int, time_str.split(":"))
+        return 0.0
+    # Handle both HH:MM:SS and HH:MM:SS.mmm
+    parts = time_str.split(":")
+    h = int(parts[0])
+    m = int(parts[1])
+    s = float(parts[2])
     return h * 3600 + m * 60 + s
 
 
 def _seconds_to_time(seconds: float) -> str:
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
 # ── main function ────────────────────────────────────────────────────────────
@@ -123,7 +127,7 @@ def select_zooniverse_clips(
         for _, row in df.sort_values("ConfusionScore", ascending=False).iterrows():
             if added >= n_confusing:
                 break
-            if _temporal_ok(row["TimeSeconds"], spacing):
+            if _temporal_ok(row["TimeOfMaxnMs"], spacing):
                 if _add_interval(row, "Confusing (high count, low conf)", row["ScientificName"]):
                     added += 1
 
@@ -132,7 +136,7 @@ def select_zooniverse_clips(
             for _, row in empty_df.sample(min(n_empty, len(empty_df))).iterrows():
                 _add_interval(row, "Empty (false-negative check)", row["ScientificName"])
 
-        start_df = df[df["TimeSeconds"] < 60]
+        start_df = df[df["TimeOfMaxnMs"] < 60]
         if not start_df.empty:
             for _, row in start_df.sample(min(n_start, len(start_df))).iterrows():
                 _add_interval(row, "Video Start", row["ScientificName"])
@@ -153,19 +157,19 @@ def select_zooniverse_clips(
             for _, row in sp_df.sort_values("ConfusionScore", ascending=False).iterrows():
                 if added >= n_conf_per_sp:
                     break
-                if _temporal_ok(row["TimeSeconds"], spacing):
+                if _temporal_ok(row["TimeOfMaxnMs"], spacing):
                     if _add_interval(row, f"Confusing ({species})", species):
                         added += 1
 
-        global_counts = df.groupby("TimeSeconds")["MaxInterval"].sum().reset_index()
-        empty_times = global_counts[global_counts["MaxInterval"] == 0]["TimeSeconds"]
+        global_counts = df.groupby("TimeOfMaxnMs")["MaxInterval"].sum().reset_index()
+        empty_times = global_counts[global_counts["MaxInterval"] == 0]["TimeOfMaxnMs"]
         for t in empty_times.sample(min(n_empty, len(empty_times))):
-            _add_interval({"TimeSeconds": t, "MaxInterval": 0, "ConfidenceAgreement": 1.0},
+            _add_interval({"TimeOfMaxnMs": t, "MaxInterval": 0, "ConfidenceAgreement": 1.0},
                           "Global Empty", "All")
 
-        start_times = pd.Series([t for t in df["TimeSeconds"].unique() if t < 60])
+        start_times = pd.Series([t for t in df["TimeOfMaxnMs"].unique() if t < 60])
         for t in start_times.sample(min(n_start, len(start_times))):
-            _add_interval({"TimeSeconds": t, "MaxInterval": -1, "ConfidenceAgreement": -1.0},
+            _add_interval({"TimeOfMaxnMs": t, "MaxInterval": -1, "ConfidenceAgreement": -1.0},
                           "Global Video Start", "All")
 
     if not selection_rows:

@@ -24,8 +24,11 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
     # Helper function to convert HH:MM:SS to seconds
     def time_to_seconds(time_str):
         if pd.isna(time_str):
-            return 0
-        h, m, s = map(int, time_str.split(':'))
+            return 0.0
+        parts = time_str.split(':')
+        h = int(parts[0])
+        m = int(parts[1])
+        s = float(parts[2])
         return h * 3600 + m * 60 + s
 
     # Helper function to convert seconds to HH:MM:SS
