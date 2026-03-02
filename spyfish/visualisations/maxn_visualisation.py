@@ -29,7 +29,7 @@ def plot_maxn_timeline(
 
     Args:
         raw_df: Raw YOLO detections DataFrame (columns: time_seconds, confidence).
-        maxn_df: MaxN results DataFrame (columns: time_of_max_seconds, MaxInterval, ConfidenceAgreement).
+        maxn_df: MaxN results DataFrame (columns: time_of_maxn_ms, MaxInterval, ConfidenceAgreement).
         drop_id: Deployment identifier used for the title and output filename.
         output_dir: Directory to save the PNG into (created if absent).
         base_conf: Base inference confidence threshold (shown as light grey line).
@@ -68,7 +68,7 @@ def plot_maxn_timeline(
 
     # 2. Green highlight: MaxN clip windows
     for _, row in maxn_df.iterrows():
-        t = row["time_of_max_seconds"]
+        t = row["time_of_maxn_ms"]
         interval_start = (t // interval_seconds) * interval_seconds
         ax.axvspan(interval_start, interval_start + interval_seconds,
                    alpha=0.15, color="#2ecc71", zorder=1)
@@ -90,7 +90,7 @@ def plot_maxn_timeline(
 
     # 5. Red dots: MaxN peaks with annotation
     for _, row in maxn_df.iterrows():
-        t = row["time_of_max_seconds"]
+        t = row["time_of_maxn_ms"]
         count = row["MaxInterval"]
         ax.scatter(t, count, color="#e74c3c", s=120, zorder=6,
                    edgecolors="white", linewidth=1.5)

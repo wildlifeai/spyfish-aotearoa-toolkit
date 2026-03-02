@@ -63,11 +63,37 @@ class BiigleHandler:
             logging.error(f"Failed to get volumes for project {project_id}: {e}")
             raise
 
-    def create_pending_volume(
-        self, project_id: Optional[int] = None, media_type: str = "video"
-    ) -> Dict[str, Any]:
-        """Create a pending volume in a project."""
+    def get_pending_volumes(self, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get all pending volumes for a project."""
         project_id = project_id or config.biigle_project_id
+        try:
+            # Try project-specific endpoint first
+            response = self.api.get(f"projects/{project_id}/pending-volumes")
+            return response.json()
+        except HTTPError as e:
+            if e.response.status_code == 405:
+                logging.info(f"GET projects/{project_id}/pending-volumes returned 405, trying GET pending-volumes...")
+                try:
+                    # Fallback to global endpoint
+                    response = self.api.get("pending-volumes")
+                    pending = response.json()
+                    logging.info(f"Global fallback returned {len(pending)} pending volumes.")
+                    return pending
+                except Exception as e2:
+                    logging.error(f"Failed to get pending volumes from fallback: {e2}")
+            else:
+                logging.error(f"Failed to get pending volumes (project {project_id}): {e}")
+            raise
+        except Exception as e:
+            logging.error(f"Failed to get pending volumes: {e}")
+            raise
+
+    def create_pending_volume(
+        self, project_id: int, media_type: str) -> Dict[str, Any]:
+        """
+        Create a pending volume in a project.
+        If a pending volume already exists, returns the existing one.
+        """
         try:
             response = self.api.post(
                 f"projects/{project_id}/pending-volumes",
@@ -77,6 +103,26 @@ class BiigleHandler:
             logging.info(f"Created pending volume with ID: {pending_volume['id']}")
             return pending_volume
         except Exception as e:
+            # Handle "Only a single pending volume can be created at a time"
+            if "Only a single pending volume" in str(e):
+                logging.info("Pending volume already exists. Attempting to fetch existing one...")
+                try:
+                    existing_pending = self.get_pending_volumes(project_id)
+                    logging.info(f"Found {len(existing_pending)} existing pending volumes.")
+                    for pv in existing_pending:
+                        logging.info(f"Checking pending volume: id={pv.get('id')}, media_type={pv.get('media_type')}")
+                        if pv.get("media_type") == media_type:
+                            logging.info(f"Re-using existing pending volume ID: {pv['id']} (media_type={media_type})")
+                            return pv
+                    if existing_pending:
+                        logging.warning(f"Found pending volume {existing_pending[0]['id']} but media_type differs ({existing_pending[0].get('media_type')} != {media_type}).")
+                        return existing_pending[0]
+                except Exception as list_err:
+                    logging.warning(f"Could not list pending volumes: {list_err}")
+
+                logging.error("Could not find existing pending volume to reuse.")
+                raise RuntimeError("A pending volume already exists in Biigle for this user/project, and I could not retrieve its ID. Please delete it in the Biigle UI (under Projects > Pending Volumes) and try again.") from e
+
             logging.error(f"Failed to create pending volume: {e}")
             raise
 
@@ -99,8 +145,8 @@ class BiigleHandler:
         volume_name: str,
         s3_url: str,
         files: List[str],
-        project_id: Optional[int] = None,
-        media_type: str = "video",
+        project_id: int,
+        media_type: str,
     ) -> Dict[str, Any]:
         """
         Convenience method: create_pending_volume + setup_volume_with_files in one call.
@@ -128,9 +174,6 @@ class BiigleHandler:
         """
         Build a Biigle-compatible S3 URL from an S3 path.
 
-        Example:
-            handler.build_s3_url("biigle_frames/KSF_20240601/")
-            → "disk-42://biigle_frames/KSF_20240601/"
         """
         disk_id = disk_id or config.biigle_disk_id
         s3_path = s3_path.rstrip("/") + "/"

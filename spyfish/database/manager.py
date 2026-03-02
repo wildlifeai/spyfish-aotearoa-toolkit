@@ -12,7 +12,18 @@ class DatabaseManager:
     """
     def __init__(self, db_path: str = None):
         self.db_path = str(config.db_path) if db_path is None else str(Path(db_path).absolute())
+        self.mode = config.storage.get("mode", "local")
         self.init_db()
+
+    def _download_if_aws(self):
+        if self.mode == "aws":
+            from spyfish.storage.db_sync import download_db
+            download_db()
+
+    def _upload_if_aws(self):
+        if self.mode == "aws":
+            from spyfish.storage.db_sync import upload_db
+            upload_db()
 
     def get_connection(self):
         """Returns a configured SQLite connection."""
@@ -38,6 +49,7 @@ class DatabaseManager:
                     ml_annotations INTEGER DEFAULT 0,
                     citsci_annotations INTEGER DEFAULT 0,
                     expert_annotations INTEGER DEFAULT 0,
+                    biigle_volume_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -70,6 +82,13 @@ class DatabaseManager:
                 )
             ''')
 
+            # Migration: Ensure biigle_volume_id exists (Legacy databases might be missing it)
+            cursor.execute("PRAGMA table_info(deployments)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if 'biigle_volume_id' not in columns:
+                logging.info("Migrating database: Adding biigle_volume_id column to deployments table")
+                cursor.execute('ALTER TABLE deployments ADD COLUMN biigle_volume_id TEXT')
+
             # Create a trigger to automatically update updated_at
             cursor.execute('''
                 CREATE TRIGGER IF NOT EXISTS update_deployments_timestamp
@@ -80,13 +99,14 @@ class DatabaseManager:
             ''')
             conn.commit()
 
-    def add_or_update_deployment(self, drop_id: str, status: str, video_path: str = "", is_bad_deployment: bool = False, error_message: str = "", sampling_start: int = None, sampling_end: int = None, ml_annotations: int = 0, citsci_annotations: int = 0, expert_annotations: int = 0):
+    def add_or_update_deployment(self, drop_id: str, status: str, video_path: str = "", is_bad_deployment: bool = False, error_message: str = "", sampling_start: int = None, sampling_end: int = None, ml_annotations: int = 0, citsci_annotations: int = 0, expert_annotations: int = 0, biigle_volume_id: str = None, auto_sync: bool = True):
         """Upserts a deployment record."""
+        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO deployments (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO deployments (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
                     status=excluded.status,
@@ -96,16 +116,20 @@ class DatabaseManager:
                     sampling_end=excluded.sampling_end,
                     ml_annotations=excluded.ml_annotations,
                     citsci_annotations=excluded.citsci_annotations,
-                    expert_annotations=excluded.expert_annotations
-            ''', (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations))
+                    expert_annotations=excluded.expert_annotations,
+                    biigle_volume_id=excluded.biigle_volume_id
+            ''', (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id))
             conn.commit()
+        if auto_sync: self._upload_if_aws()
 
-    def update_status(self, drop_id: str, new_status: str):
+    def update_status(self, drop_id: str, new_status: str, auto_sync: bool = True):
         """Updates the status of a specific deployment."""
+        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE deployments SET status = ? WHERE drop_id = ?', (new_status, drop_id))
             conn.commit()
+        if auto_sync: self._upload_if_aws()
 
     def get_deployments_by_status(self, status: str) -> List[Dict[str, Any]]:
         """Returns all deployments currently in the given status."""
@@ -122,16 +146,19 @@ class DatabaseManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def clear_validation_errors(self):
+    def clear_validation_errors(self, auto_sync: bool = True):
         """Clears all validation errors from the database."""
+        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM validation_errors')
             conn.commit()
+        if auto_sync: self._upload_if_aws()
 
-    def add_validation_errors(self, errors: List[Dict[str, Any]]):
+    def add_validation_errors(self, errors: List[Dict[str, Any]], auto_sync: bool = True):
         """Bulk inserts validation errors."""
         if not errors: return
+        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.executemany('''
@@ -139,6 +166,7 @@ class DatabaseManager:
                 VALUES (:SurveyID, :DropID, :ErrorType, :FileName, :ColumnName, :ErrorMessage, :InvalidValue)
             ''', errors)
             conn.commit()
+        if auto_sync: self._upload_if_aws()
 
     def get_all_validation_errors(self) -> List[Dict[str, Any]]:
         """Returns all stored validation errors."""

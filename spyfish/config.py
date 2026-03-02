@@ -57,10 +57,17 @@ def load_config() -> dict:
 class ConfigWrapper:
     def __init__(self):
         self._yaml_config = load_config()
+        # Absolute path to the project root (where config.yaml lives)
+        self._project_root = Path(__file__).parent.parent.resolve()
+
+    @property
+    def project_root(self) -> Path:
+        """Absolute path to the project root directory."""
+        return self._project_root
 
     @property
     def db_path(self) -> Path:
-        return Path(__file__).parent.parent / "spyfish_pipeline.db"
+        return self._project_root / "spyfish_pipeline.db"
 
     @property
     def csv_mapping(self):
@@ -128,6 +135,16 @@ class ConfigWrapper:
     @property
     def biigle_volume_report_type(self) -> int:
         return self._yaml_config.get("biigle", {}).get("volume_report_type", 10)
+
+    @property
+    def biigle_s3_images_prefix(self) -> str:
+        """S3 prefix for Biigle JPEG frames — append /{survey_id}/{drop_id}/ at runtime."""
+        return self._yaml_config.get("biigle", {}).get("s3_images_prefix", "process_files/media/biigle_images")
+
+    @property
+    def biigle_s3_clips_prefix(self) -> str:
+        """S3 prefix for Biigle video clips — append /{survey_id}/{drop_id}/ at runtime."""
+        return self._yaml_config.get("biigle", {}).get("s3_clips_prefix", "process_files/media/biigle_clips")
 
     @property
     def export_local(self):
@@ -410,6 +427,10 @@ class ConfigWrapper:
     @property
     def nesi_video_dir(self):
         return self.orchestrator.get("nesi_video_dir")
+
+    @property
+    def s3_db_key(self) -> str:
+        return self.orchestrator.get("s3_db_key", "process_files/spyfish_pipeline.db")
 
 config = ConfigWrapper()
 

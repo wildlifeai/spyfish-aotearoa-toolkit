@@ -13,6 +13,10 @@ else:
 
 def check_pending_arrivals():
     db = DatabaseManager()
+    if config.storage.get("mode") == "aws":
+        from spyfish.storage.db_sync import download_db, upload_db
+        download_db()
+
     pending = db.get_deployments_by_status(PipelineStatus.PENDING_ARRIVAL)
 
     if not pending:
@@ -38,8 +42,12 @@ def check_pending_arrivals():
         # Only check against known files if video_path is truthy
         if video_path and video_path in known_files:
             logging.info(f"✅ Video confirmed for {drop_id}. Updating status to VIDEO_PRESENT.")
-            db.update_status(drop_id, PipelineStatus.VIDEO_PRESENT)
+            db.update_status(drop_id, PipelineStatus.VIDEO_PRESENT, auto_sync=False)
             updated_count += 1
+
+    if config.storage.get("mode") == "aws":
+        from spyfish.storage.db_sync import upload_db
+        upload_db()
 
     logging.info(f"Loop complete. Advanced {updated_count} drops to VIDEO_PRESENT.")
 

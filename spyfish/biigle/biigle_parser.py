@@ -33,7 +33,12 @@ class BiigleParser:
         cache_dir: Optional[str] = None,
     ):
         self.biigle_handler = BiigleHandler(email=email, token=token)
-        self.cache_dir = Path(cache_dir) if cache_dir else Path(config.local_data_quality_dir) / "biigle_cache"
+        if cache_dir:
+            self.cache_dir = Path(cache_dir)
+        else:
+            # Resolve absolute path so the cache works regardless of the working directory
+            # (Streamlit is launched from app/ so relative paths would be wrong)
+            self.cache_dir = config.project_root / config.local_data_quality_dir / "biigle_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Biigle cache directory: {self.cache_dir}")
 

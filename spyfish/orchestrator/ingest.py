@@ -72,8 +72,8 @@ def run_ingestion():
     logging.info(f"Found {len(structural_error_drops)} DropIDs with structural CSV errors.")
 
     logging.info(f"Logging {len(structured_errors)} validation errors to SQLite...")
-    db.clear_validation_errors()
-    db.add_validation_errors(structured_errors)
+    db.clear_validation_errors(auto_sync=False)
+    db.add_validation_errors(structured_errors, auto_sync=False)
 
     logging.info(f"4. Batch mapping known media files in {mode} storage...")
     if mode == "aws":
@@ -114,7 +114,16 @@ def run_ingestion():
 
     # 6. Synchronize into SQLite
     logging.info("6. Synchronizing all deployment records into SQLite...")
+    from spyfish.storage.db_sync import download_db, upload_db
+    if config.storage.get("mode") == "aws":
+        download_db()
+
     _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_files, expert_counts, mapping)
+
+    if config.storage.get("mode") == "aws":
+        upload_db()
+
+    logging.info(f"Ingestion complete. Synchronized {len(deployments_df)} records into the pipeline database.")
 
 def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_files, expert_counts, mapping):
     drop_col = mapping.get("drop_id_column")
@@ -139,14 +148,14 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             sampling_start = int(pd.to_numeric(row.get("SamplingStart")))
             sampling_end = int(pd.to_numeric(row.get("SamplingEnd")))
         except (ValueError, TypeError) as e:
-            if drop_id in structural_error_drops:
-                continue
-            else:
-                logging.warning(
-                    f"Missing or invalid SamplingStart/SamplingEnd for {drop_id}. "
-                    f"Got SamplingStart={row.get('SamplingStart')}, SamplingEnd={row.get('SamplingEnd')}. "
-                    f"This deployment will be flagged as ERROR."
-                )
+            # We no longer skip deployments with sampling errors. We keep them for visibility
+            # but mark them as ERROR so the user knows they need attention.
+            if drop_id not in structural_error_drops:
+                # logging.warning(
+                #     f"Missing or invalid SamplingStart/SamplingEnd for {drop_id}. "
+                #     f"Got SamplingStart={row.get('SamplingStart')}, SamplingEnd={row.get('SamplingEnd')}. "
+                #     f"This deployment will be flagged as ERROR."
+                # )
                 structural_error_drops.add(drop_id)
             sampling_start = None
             sampling_end = None
@@ -179,7 +188,6 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
                 else:
                     status = PipelineStatus.PENDING_ARRIVAL
 
-
         db.add_or_update_deployment(
             drop_id=drop_id,
             status=status,
@@ -190,7 +198,8 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             sampling_end=sampling_end,
             expert_annotations=expert_anns,
             ml_annotations=ml_anns,
-            citsci_annotations=citsci_anns
+            citsci_annotations=citsci_anns,
+            auto_sync=False
         )
         new_count += 1
         expt_count += expert_anns
