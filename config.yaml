@@ -102,7 +102,7 @@ orchestrator:
   is_test_run: true
   is_local: true
   mock_video_dir: "mock_media"
-  s3_db_key: "db/spyfish_pipeline.db"
+  s3_db_key: "process_files/spyfish_pipeline.db"
   local_manifest_dir_path: "process_files/annotations"
   local_data_quality_dir: "process_files/data_quality"
   local_manifest_name: "videos_to_ml.csv"
@@ -111,9 +111,13 @@ orchestrator:
   nesi_video_dir: "/nesi/project/wildlife03546/spyfish/media"
 
 biigle:
-  project_id: 3711        # Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
-  disk_id: 134            # S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  project_id: 4081        # 3711 Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  disk_id: 98             # 134  S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
-  annotation_report_type_images: 3   # Image annotation CSV report
-  volume_report_type: 10             # Volume overview report
+  annotation_report_type_images: 3         # Image annotation CSV report
+  volume_report_type_video: 10                   # Volume overview report
+  volume_report_type_image: 10                   # TODO Volume overview report
+  # S3 paths — appended with {survey_id}/{drop_id}/ at runtime
+  s3_images_prefix: "process_files/media/biigle_images"  # extracted JPEG frames
+  s3_clips_prefix: "process_files/media/biigle_clips"    # video clips (for future use)

@@ -15,10 +15,19 @@ VIDEO_PRESENT_STATUSES = [
 ]
 
 # --- Load SQLite deployment status data ---
-@st.cache_data(ttl=1)  # Refresh instantly
+@st.cache_data(ttl=900)  # Check S3 at most every 5 minutes
+def sync_db_if_needed():
+    """Helper to sync database from S3 if in AWS mode or missing locally."""
+    from spyfish.storage.db_sync import download_db
+    if config.storage.get("mode") == "aws" or not config.db_path.exists():
+        download_db()
+    return True
+
+@st.cache_data(ttl=1)  # Refresh UI instantly
 def load_deployment_status():
-    """Load deployment status natively from local spyfish_pipeline.db"""
+    """Load deployment status natively from local spyfish_pipeline.db, syncing from S3 if needed."""
     try:
+        sync_db_if_needed()
         conn = sqlite3.connect(config.db_path)
         df = pd.read_sql("SELECT * FROM deployments", conn)
 
@@ -160,7 +169,7 @@ def main():
 
     st.divider()
 
-    tab1, tab2 = st.tabs([ "📋 All Deployments", "📊 Survey Overview"])
+    tab1, tab2, tab3 = st.tabs([ "📋 Deployments Overview", "📊 Survey Overview",  "🐟 Annotations Overview"])
 
     with tab2:
         st.subheader("Survey Overview")
@@ -249,6 +258,45 @@ def main():
             f"Filtered Results ({len(filtered_df)} deployments)",
             "Use filters above to narrow down results"
         )
+
+    with tab3:
+
+        # --- Detailed Annotation View ---
+        st.header("🔍 Detailed Annotation View")
+        st.caption("Select a deployment to view individual annotation records from the annotations database")
+
+        selected_drop_id = st.selectbox(
+            "Select DropID to view details",
+            options=["None"] + sorted(deployment_df["DropID"].tolist()),
+            index=0
+        )
+
+        if selected_drop_id != "None":
+            from spyfish.database.annotation_manager import AnnotationDatabaseManager
+            ann_db = AnnotationDatabaseManager()
+
+            # Load detailed annotations
+            detailed_anns = ann_db.get_annotations_for_drop(selected_drop_id)
+
+            if detailed_anns:
+                ann_df = pd.DataFrame(detailed_anns)
+                st.write(f"Showing {len(ann_df)} annotations for **{selected_drop_id}**")
+
+                # Group by source for mini metrics
+                s_cols = st.columns(3)
+                with s_cols[0]: st.metric("Expert", len(ann_df[ann_df["source"] == "expert"]))
+                with s_cols[1]: st.metric("ML", len(ann_df[ann_df["source"] == "ml"]))
+                with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["source"] == "citsci"]))
+
+                st.dataframe(
+                    ann_df[["scientific_name", "timestamp", "count", "source", "confidence", "external_id"]],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")
+
+    st.divider()
 
     st.divider()
 
