@@ -210,9 +210,8 @@ def extract_frames_from_selections(
     frame_paths = []
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # TimeOfMaxSeconds is the exact ML detection moment, relative to SamplingStart.
-
-        time_of_max_relative = float(row["TimeOfMaxSeconds"])
+        # TimeOfMaxnMs: exact ML peak in seconds (sub-second precision from raw CSV).
+        time_of_max_relative = float(row["TimeOfMaxnMs"])
 
         seek_seconds = sampling_start + time_of_max_relative
 
