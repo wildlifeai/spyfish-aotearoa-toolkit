@@ -421,6 +421,14 @@ class ConfigWrapper:
     def s3_db_key(self) -> str:
         return self.orchestrator.get("s3_db_key", "process_files/spyfish_pipeline.db")
 
+    @property
+    def annotations_db_path(self) -> Path:
+        return self.project_root / "process_files" / "spyfish_annotations.db"
+
+    @property
+    def s3_annotations_db_key(self) -> str:
+        return "process_files/spyfish_annotations.db"
+
 config = ConfigWrapper()
 
 class PipelineStatus:
@@ -445,3 +453,28 @@ class PipelineStatus:
     PROCESSING_EXPERT = "PROCESSING_EXPERT"
     EXPERT_COMPLETE = "EXPERT_COMPLETE"
     PIPELINE_COMPLETE = "PIPELINE_COMPLETE"
+
+    VIDEO_PRESENT_STATUSES = [
+        READY_FOR_ML, PROCESSING_ML, ML_COMPLETE,
+        READY_FOR_CITSCI, PROCESSING_CITSCI, CITSCI_COMPLETE,
+        READY_FOR_EXPERT, PROCESSING_EXPERT, EXPERT_COMPLETE,
+        PIPELINE_COMPLETE
+    ]
+
+    STAGE_ORDER = [
+        ("PENDING_ARRIVAL",      "⏳ Pending Arrival",       "Waiting for video to arrive in S3"),
+        ("READY_FOR_ML",         "🤖 Ready for ML",          "Video present, queued for ML inference"),
+        ("PROCESSING_ML",        "⚙️ Processing ML",         "ML inference actively running"),
+        ("ML_COMPLETE",          "✅ ML Complete",            "ML done, awaiting Zooniverse/Biigle"),
+        ("READY_FOR_CITSCI",     "🌍 Ready for CitSci",      "Queued for citizen science upload"),
+        ("PROCESSING_CITSCI",    "⚙️ Processing CitSci",    "CitSci workflow running"),
+        ("CITSCI_COMPLETE",      "✅ CitSci Complete",       "CitSci done, awaiting expert review"),
+        ("READY_FOR_EXPERT",     "🔬 Ready for Expert",      "Queued for expert annotation in Biigle"),
+        ("PROCESSING_EXPERT",    "⚙️ Processing Expert",    "Expert annotation in progress"),
+        ("EXPERT_COMPLETE",      "✅ Expert Complete",       "Expert done, syncing annotations"),
+        ("PIPELINE_COMPLETE",    "🎉 Pipeline Complete",     "Fully processed"),
+        ("ON_HOLD",              "⏸️ On Hold",               "Paused for investigation"),
+        ("EXCLUDED",             "🚫 Excluded",              "Bad deployment, not processing"),
+        ("ERROR",                "❌ Error",                 "Failed a pipeline step"),
+        ("MISSING_METADATA",     "⚠️ Missing Metadata",     "Required metadata absent"),
+    ]

@@ -156,3 +156,63 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute('SELECT SurveyID, DropID, ErrorType, FileName, ColumnName, ErrorMessage, InvalidValue FROM validation_errors')
             return [dict(row) for row in cursor.fetchall()]
+
+    def sync_annotation_counts(self, drop_ids: Optional[List[str]] = None):
+        """
+        Aggregates counts from spyfish_annotations.db and updates the deployments table in spyfish_pipeline.db.
+        If drop_ids is provided, only updates those specific deployments.
+        """
+        logging.info(f"Syncing annotation counts to main pipeline database{' (incremental)' if drop_ids else ''}...")
+
+        # Import to avoid circular dependencies if any
+        from spyfish.database.annotation_manager import AnnotationDatabaseManager
+        ann_db = AnnotationDatabaseManager()
+
+        query = '''
+            SELECT drop_id, annotated_by as source, SUM(max_interval) as total
+            FROM annotations
+        '''
+        params = []
+        if drop_ids:
+            placeholders = ', '.join(['?'] * len(drop_ids))
+            query += f" WHERE drop_id IN ({placeholders})"
+            params.extend(drop_ids)
+
+        query += " GROUP BY drop_id, annotated_by"
+
+        with ann_db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+
+        # Group results by drop_id
+        counts_by_drop = {d: {"ml": 0, "expert": 0, "citsci": 0} for d in (drop_ids or [])}
+        for row in results:
+            drop_id = row['drop_id']
+            source = row['source']
+            count = row['total']
+
+            if drop_id not in counts_by_drop:
+                counts_by_drop[drop_id] = {"ml": 0, "expert": 0, "citsci": 0}
+
+            if source == "ml":
+                counts_by_drop[drop_id]["ml"] = count
+            elif source == "expert":
+                counts_by_drop[drop_id]["expert"] = count
+            elif source == "citsci":
+                counts_by_drop[drop_id]["citsci"] = count
+
+        # Update main DB
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for drop_id, counts in counts_by_drop.items():
+                cursor.execute('''
+                    UPDATE deployments
+                    SET ml_annotations = ?,
+                        expert_annotations = ?,
+                        citsci_annotations = ?
+                    WHERE drop_id = ?
+                ''', (counts["ml"], counts["expert"], counts["citsci"], drop_id))
+            conn.commit()
+
+        logging.info(f"Updated annotation counts for {len(counts_by_drop)} deployments.")

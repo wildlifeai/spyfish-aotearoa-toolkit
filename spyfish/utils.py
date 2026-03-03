@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from spyfish.config import config
+from spyfish.config import PipelineStatus
 
 
 def delete_file(filename: str):
@@ -134,3 +135,26 @@ def seconds_to_time(seconds: float) -> str:
                 m = 0
                 h += 1
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+def get_survey_summary(deployment_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregates deployment data to summarize status and progress by Survey."""
+    if deployment_df.empty:
+        return pd.DataFrame()
+
+    survey_summary = deployment_df.groupby("SurveyID").agg(
+        TotalDeployments=("DropID", "nunique"),
+        CompleteDeployments=("Complete", "sum"),
+        BadDeployments=("IsBadDeployment", "sum"),
+        NeedsAction=("NeedsAction", "sum"),
+        VideosPresent=("Status", lambda x: x.isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()),
+        MLAnnotated=("MlAnnotations", lambda x: (x > 0).sum()),
+        CitSciAnnotated=("CitSciAnnotations", lambda x: (x > 0).sum()),
+        ExpertAnnotated=("ExpertAnnotations", lambda x: (x > 0).sum())
+    ).reset_index()
+
+    # Calculate percentages cleanly: (Bad + Expert) / Total
+    survey_summary["CompletionPct"] = (
+        ((survey_summary["BadDeployments"] + survey_summary["ExpertAnnotated"]) / survey_summary["TotalDeployments"]) * 100
+    ).round(1).astype(str) + "%"
+
+    return survey_summary

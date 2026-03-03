@@ -1,14 +1,88 @@
 import re
 import logging
 import pandas as pd
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 
 from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
-from spyfish.orchestrator.ingest_legacy import sync_annotations_to_main_db
 from spyfish.config import PipelineStatus, config
 from spyfish.utils import seconds_to_time
+
+def _extract_timestamp_from_filename(row: pd.Series, fname_col: str) -> Optional[str]:
+    """Helper to parse timestamps from Biigle's image or video snippet filenames."""
+    if not fname_col or fname_col not in row:
+        return None
+
+    fname = str(row[fname_col])
+    try:
+        secs = None
+        # Image frame formatting from biigle test
+        if '__frame_' in fname:
+            match = re.search(r'__frame_([\d\.]+)s\.jpg', fname)
+            if match:
+                secs = float(match.group(1))
+        # Video clip format from biigle video annotations
+        elif '_clip_' in fname:
+            match = re.search(r'_clip_([\d\.]+)s\.', fname)
+            if match:
+                secs = float(match.group(1))
+
+            if 'frames' in row:
+                frame_str = str(row['frames']).strip("[]")
+                if frame_str and frame_str != 'nan':
+                    secs += float(frame_str)
+
+        if secs is not None:
+            return seconds_to_time(secs)
+    except (ValueError, IndexError) as e:
+        logging.warning(f"Could not parse timestamp from filename '{fname}': {e}")
+
+    return None
+
+def _map_biigle_to_spyfish_schema(row: pd.Series, label_col: str, drop_id: str, timestamp: Optional[str]) -> Tuple[Tuple[str, str], Dict[str, Any]]:
+    """Maps a single Biigle annotation row to the Spyfish schema and returns (aggregation_key, mapped_dict)."""
+    species = str(row.get(label_col, 'unknown_species')).strip()
+    # Clean up "Kina - Evechinus chloroticus" to "Evechinus chloroticus"
+    if " - " in species:
+        species = species.split(" - ")[1]
+
+    # Use empty string instead of None to allow sorting
+    sortable_time = timestamp or ""
+
+    key = (sortable_time, species)
+
+    mapped_item = {
+        "drop_id": drop_id,
+        "scientific_name": species,
+        "time_of_max": timestamp,
+        "max_interval": 0,  # Will be incremented during aggregation
+        "annotated_by": "expert",
+        "interval_annotation": "",
+        "confidence_agreement": 1.0,
+        "external_id": str(row.get('annotation_id', row.get('id', ''))) # Prefer video annotation ID, fallback to image annotation ID
+    }
+    return key, mapped_item
+
+def _aggregate_annotations(fish_annotations_df: pd.DataFrame, drop_id: str) -> List[Dict[str, Any]]:
+    """Aggregates raw DataFrame rows from Biigle into MaxN counts per timestamp and species."""
+    label_col = "label_name"
+    fname_col = "filename"
+
+    aggregated_annotations = {}
+    for _, row in fish_annotations_df.iterrows():
+        timestamp = _extract_timestamp_from_filename(row, fname_col)
+        key, mapped_item = _map_biigle_to_spyfish_schema(row, label_col, drop_id, timestamp)
+
+        if key not in aggregated_annotations:
+            aggregated_annotations[key] = mapped_item
+
+        aggregated_annotations[key]["max_interval"] += 1
+
+    # Convert to list and sort by drop_id (already same) and time_of_max
+    annotations_to_add = list(aggregated_annotations.values())
+    annotations_to_add.sort(key=lambda x: (x["drop_id"], x["time_of_max"] or ""))
+    return annotations_to_add
 
 def sync_biigle_annotations():
     """
@@ -49,23 +123,16 @@ def sync_biigle_annotations():
         logging.info(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
-            # 2. Check 'Done' label via file-level labels (NOT from annotation report)
-            # In Biigle, "Done" is a whole-file label applied via the label panel,
-            # which lives at GET /api/v1/images/{id}/labels or /videos/{id}/labels.
-            # volume_is_done also detects whether this is an image or video volume.
+            # 2. Check presence of labels that define the volume as done via file-level labels
             is_done, media_type = handler.volume_is_done(volume_id)
-
             if not is_done:
                 logging.info(f"  Volume {volume_id} for {drop_id} not marked 'Done' yet. Skipping.")
                 continue
 
             logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report...")
 
-            # 3. Download annotation report using the correct type for this volume's media
-            if media_type == "video":
-                report_type = config.biigle_annotation_report_type_video
-            else:
-                report_type = config.biigle_annotation_report_type_images
+            # 3. Download annotation report
+            report_type = config.biigle_annotation_report_type_video if media_type == "video" else config.biigle_annotation_report_type_images
             fish_annotations_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
 
             if fish_annotations_df.empty:
@@ -73,74 +140,11 @@ def sync_biigle_annotations():
                 db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 continue
 
-
-            label_col = "label_name"
-            fname_col = "filename"
-
-
-            # Aggregate by (timestamp, scientific_name) to sum counts
-            aggregated_annotations = {}
-            for _, row in fish_annotations_df.iterrows():
-                timestamp = None
-                if fname_col and fname_col in row:
-                    fname = str(row[fname_col])
-
-                    try:
-
-
-                        secs = None
-                        # Image frame formatting from biigle test
-                        if '__frame_' in fname:
-                            match = re.search(r'__frame_([\d\.]+)s\.jpg', fname)
-                            if match:
-                                secs = float(match.group(1))
-                        # Video clip format from biigle video annotations
-                        elif '_clip_' in fname:
-
-                            match = re.search(r'_clip_([\d\.]+)s\.', fname)
-                            if match:
-                                secs = float(match.group(1))
-
-                            if 'frames' in row:
-                                frame_str = str(row['frames']).strip("[]")
-                                if frame_str and frame_str != 'nan':
-                                    secs += float(frame_str)
-
-
-                        if secs is not None:
-                            timestamp = seconds_to_time(secs)
-                    except (ValueError, IndexError) as e:
-                        logging.warning(f"Could not parse timestamp from filename '{fname}': {e}")
-
-                species = str(row.get(label_col, 'unknown_species')).strip()
-                # Clean up "Kina - Evechinus chloroticus" to "Evechinus chloroticus"
-                if " - " in species:
-                    species = species.split(" - ")[1]
-
-                # Use empty string instead of None to allow sorting
-                sortable_time = timestamp or ""
-
-                key = (sortable_time, species)
-                if key not in aggregated_annotations:
-                    aggregated_annotations[key] = {
-                        "drop_id": drop_id,
-                        "scientific_name": species,
-                        "time_of_max": timestamp,
-                        "max_interval": 0,
-                        "annotated_by": "expert",
-                        "interval_annotation": "",
-                        "confidence_agreement": 1.0,
-                        "external_id": str(row.get('annotation_id', row.get('id', ''))) # Prefer video annotation ID, fallback to image annotation ID
-                    }
-
-                aggregated_annotations[key]["max_interval"] += 1
-
-            # Convert to list and sort by drop_id (already same) and time_of_max
-            annotations_to_add = list(aggregated_annotations.values())
-            annotations_to_add.sort(key=lambda x: (x["drop_id"], x["time_of_max"] or ""))
+            # 4. Process and aggregate annotations
+            annotations_to_add = _aggregate_annotations(fish_annotations_df, drop_id)
 
             if annotations_to_add:
-                # Clear previous syncs for this drop (using a distinct connection to avoid locks)
+                # Clear previous syncs for this drop
                 with ann_db.get_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND annotated_by = 'expert' AND external_id IS NOT NULL", (drop_id,))
@@ -161,7 +165,7 @@ def sync_biigle_annotations():
 
     # 5. Final sync of counts to main DB
     if processed_drops:
-        sync_annotations_to_main_db(processed_drops)
+        db.sync_annotation_counts(processed_drops)
         logging.info(f"Biigle sync complete. Processed {len(processed_drops)} drops.")
     else:
         logging.info("No new 'Done' volumes found to process.")

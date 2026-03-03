@@ -16,8 +16,7 @@ class AnnotationDatabaseManager:
         if db_path:
             self.db_path = str(Path(db_path).absolute())
         else:
-            # Use the same directory as the main pipeline DB (process_files/)
-            self.db_path = str(config.project_root / "process_files" / "spyfish_annotations.db")
+            self.db_path = str(config.annotations_db_path)
 
         self.init_db()
 

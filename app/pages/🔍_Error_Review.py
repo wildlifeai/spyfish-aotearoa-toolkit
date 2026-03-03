@@ -2,10 +2,8 @@ import pandas as pd
 import streamlit as st
 
 from spyfish.database.manager import DatabaseManager
-from utils import check_password
+from utils import check_password, sync_db_if_needed
 
-
-from utils import sync_db_if_needed
 @st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
 def load_error_data():
     """Load validation errors from native SQLite DB, syncing from S3 if needed."""

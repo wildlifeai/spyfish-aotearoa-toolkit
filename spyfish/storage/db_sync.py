@@ -73,8 +73,8 @@ def download_annotations_db() -> bool:
     Downloads the annotations database from S3 if it doesn't exist locally or S3 is newer.
     Returns True if successful or not needed.
     """
-    s3_key = "process_files/spyfish_annotations.db"
-    local_path = config.project_root / "process_files" / "spyfish_annotations.db"
+    s3_key = config.s3_annotations_db_key
+    local_path = config.annotations_db_path
 
     try:
         from botocore.exceptions import ClientError
@@ -111,8 +111,8 @@ def upload_annotations_db() -> bool:
     """
     Uploads the annotations database to S3.
     """
-    s3_key = "process_files/spyfish_annotations.db"
-    local_path = config.project_root / "process_files" / "spyfish_annotations.db"
+    s3_key = config.s3_annotations_db_key
+    local_path = config.annotations_db_path
 
     if not local_path.exists():
         logging.warning(f"Annotations database {local_path} does not exist. Skipping upload.")
