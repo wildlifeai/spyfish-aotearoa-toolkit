@@ -2,6 +2,7 @@ import sqlite3
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from contextlib import closing
 
 from spyfish.config import PipelineStatus, config
 
@@ -12,24 +13,13 @@ class DatabaseManager:
     """
     def __init__(self, db_path: str = None):
         self.db_path = str(config.db_path) if db_path is None else str(Path(db_path).absolute())
-        self.mode = config.storage.get("mode", "local")
         self.init_db()
 
-    def _download_if_aws(self):
-        if self.mode == "aws":
-            from spyfish.storage.db_sync import download_db
-            download_db()
-
-    def _upload_if_aws(self):
-        if self.mode == "aws":
-            from spyfish.storage.db_sync import upload_db
-            upload_db()
-
     def get_connection(self):
-        """Returns a configured SQLite connection."""
-        conn = sqlite3.connect(self.db_path)
+        """Returns a configured SQLite connection wrapped in contextlib.closing."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row  # Access columns by name
-        return conn
+        return closing(conn)
 
     def init_db(self):
         """Creates the core 'deployments' table if it does not exist."""
@@ -82,13 +72,6 @@ class DatabaseManager:
                 )
             ''')
 
-            # Migration: Ensure biigle_volume_id exists (Legacy databases might be missing it)
-            cursor.execute("PRAGMA table_info(deployments)")
-            columns = [info[1] for info in cursor.fetchall()]
-            if 'biigle_volume_id' not in columns:
-                logging.info("Migrating database: Adding biigle_volume_id column to deployments table")
-                cursor.execute('ALTER TABLE deployments ADD COLUMN biigle_volume_id TEXT')
-
             # Create a trigger to automatically update updated_at
             cursor.execute('''
                 CREATE TRIGGER IF NOT EXISTS update_deployments_timestamp
@@ -99,9 +82,8 @@ class DatabaseManager:
             ''')
             conn.commit()
 
-    def add_or_update_deployment(self, drop_id: str, status: str, video_path: str = "", is_bad_deployment: bool = False, error_message: str = "", sampling_start: int = None, sampling_end: int = None, ml_annotations: int = 0, citsci_annotations: int = 0, expert_annotations: int = 0, biigle_volume_id: str = None, auto_sync: bool = True):
+    def add_or_update_deployment(self, drop_id: str, status: str, video_path: str = "", is_bad_deployment: bool = False, error_message: str = "", sampling_start: int = None, sampling_end: int = None, ml_annotations: int = 0, citsci_annotations: int = 0, expert_annotations: int = 0, biigle_volume_id: str = None):
         """Upserts a deployment record."""
-        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -120,16 +102,20 @@ class DatabaseManager:
                     biigle_volume_id=excluded.biigle_volume_id
             ''', (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id))
             conn.commit()
-        if auto_sync: self._upload_if_aws()
 
-    def update_status(self, drop_id: str, new_status: str, auto_sync: bool = True):
+    def update_status(self, drop_id: str, new_status: str):
         """Updates the status of a specific deployment."""
-        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE deployments SET status = ? WHERE drop_id = ?', (new_status, drop_id))
             conn.commit()
-        if auto_sync: self._upload_if_aws()
+
+    def update_biigle_volume_id(self, drop_id: str, volume_id: str):
+        """Sets the biigle_volume_id for a specific deployment."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('UPDATE deployments SET biigle_volume_id = ? WHERE drop_id = ?', (str(volume_id), drop_id))
+            conn.commit()
 
     def get_deployments_by_status(self, status: str) -> List[Dict[str, Any]]:
         """Returns all deployments currently in the given status."""
@@ -146,19 +132,16 @@ class DatabaseManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def clear_validation_errors(self, auto_sync: bool = True):
+    def clear_validation_errors(self):
         """Clears all validation errors from the database."""
-        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM validation_errors')
             conn.commit()
-        if auto_sync: self._upload_if_aws()
 
-    def add_validation_errors(self, errors: List[Dict[str, Any]], auto_sync: bool = True):
+    def add_validation_errors(self, errors: List[Dict[str, Any]]):
         """Bulk inserts validation errors."""
         if not errors: return
-        if auto_sync: self._download_if_aws()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.executemany('''
@@ -166,7 +149,6 @@ class DatabaseManager:
                 VALUES (:SurveyID, :DropID, :ErrorType, :FileName, :ColumnName, :ErrorMessage, :InvalidValue)
             ''', errors)
             conn.commit()
-        if auto_sync: self._upload_if_aws()
 
     def get_all_validation_errors(self) -> List[Dict[str, Any]]:
         """Returns all stored validation errors."""
@@ -174,3 +156,63 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute('SELECT SurveyID, DropID, ErrorType, FileName, ColumnName, ErrorMessage, InvalidValue FROM validation_errors')
             return [dict(row) for row in cursor.fetchall()]
+
+    def sync_annotation_counts(self, drop_ids: Optional[List[str]] = None):
+        """
+        Aggregates counts from spyfish_annotations.db and updates the deployments table in spyfish_pipeline.db.
+        If drop_ids is provided, only updates those specific deployments.
+        """
+        logging.info(f"Syncing annotation counts to main pipeline database{' (incremental)' if drop_ids else ''}...")
+
+        # Import to avoid circular dependencies if any
+        from spyfish.database.annotation_manager import AnnotationDatabaseManager
+        ann_db = AnnotationDatabaseManager()
+
+        query = '''
+            SELECT drop_id, annotated_by as source, SUM(max_interval) as total
+            FROM annotations
+        '''
+        params = []
+        if drop_ids:
+            placeholders = ', '.join(['?'] * len(drop_ids))
+            query += f" WHERE drop_id IN ({placeholders})"
+            params.extend(drop_ids)
+
+        query += " GROUP BY drop_id, annotated_by"
+
+        with ann_db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+
+        # Group results by drop_id
+        counts_by_drop = {d: {"ml": 0, "expert": 0, "citsci": 0} for d in (drop_ids or [])}
+        for row in results:
+            drop_id = row['drop_id']
+            source = row['source']
+            count = row['total']
+
+            if drop_id not in counts_by_drop:
+                counts_by_drop[drop_id] = {"ml": 0, "expert": 0, "citsci": 0}
+
+            if source == "ml":
+                counts_by_drop[drop_id]["ml"] = count
+            elif source == "expert":
+                counts_by_drop[drop_id]["expert"] = count
+            elif source == "citsci":
+                counts_by_drop[drop_id]["citsci"] = count
+
+        # Update main DB
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for drop_id, counts in counts_by_drop.items():
+                cursor.execute('''
+                    UPDATE deployments
+                    SET ml_annotations = ?,
+                        expert_annotations = ?,
+                        citsci_annotations = ?
+                    WHERE drop_id = ?
+                ''', (counts["ml"], counts["expert"], counts["citsci"], drop_id))
+            conn.commit()
+
+        logging.info(f"Updated annotation counts for {len(counts_by_drop)} deployments.")

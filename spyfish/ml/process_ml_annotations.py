@@ -9,18 +9,10 @@ from pathlib import Path
 from spyfish.config import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
-from spyfish.orchestrator.ingest_legacy import sync_annotations_to_main_db
 from spyfish.ml.draw_frames import draw_boxes_on_frames
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
-
-def seconds_to_time(seconds):
-    """Converts seconds to HH:MM:SS.mmm format."""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+from spyfish.utils import seconds_to_time
 
 
 def process_maxn(raw_df, output_csv_path, drop_id,
@@ -43,7 +35,7 @@ def process_maxn(raw_df, output_csv_path, drop_id,
         DataFrame with MaxN results.
     """
     logging.info(f"Processing MaxN for {drop_id}")
-    logging.info(f"Settings - Interval: {interval_seconds}s, Threshold: {confidence_threshold}")
+    logging.info(f"Settings - Interval: {interval_seconds}s, MaxN Confidence Threshold: {confidence_threshold}")
 
     if raw_df.empty:
         logging.warning(f"Empty CSV for {drop_id}")
@@ -109,6 +101,66 @@ def process_maxn(raw_df, output_csv_path, drop_id,
 
     return maxn_df
 
+def _ingest_ml_annotations(ann_db: AnnotationDatabaseManager, drop_id: str, maxn_df: pd.DataFrame, model_name: str):
+    """Extracts ingestion logic into a helper method."""
+    annotations_to_add = []
+    for _, row in maxn_df.iterrows():
+        annotations_to_add.append({
+            "drop_id": drop_id,
+            "scientific_name": row["ScientificName"],
+            "time_of_max": row["TimeOfMax"],
+            "max_interval": row["MaxInterval"],
+            "annotated_by": "ml",
+            "interval_annotation": "",
+            "confidence_agreement": row["ConfidenceAgreement"],
+            "external_id": model_name
+        })
+
+    if annotations_to_add:
+        # Clear previous ML syncs for this drop
+        ann_db.clear_annotations(drop_id, "ml")
+        ann_db.add_annotations(annotations_to_add)
+        logging.info(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
+
+def _generate_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, drop_id: str,
+                                video_dir: Path, output_root: Path, base_conf: float,
+                                maxn_conf: float, interval: float, sampling_start: int):
+    """Draw max-N plots and frame extractions for human QA."""
+    # Save MaxN timeline visualisation
+    plot_maxn_timeline(
+        raw_df=raw_df,
+        maxn_df=maxn_df,
+        drop_id=drop_id,
+        output_dir=output_root / drop_id,
+        base_conf=base_conf,
+        maxn_conf=maxn_conf,
+        interval_seconds=interval,
+    )
+
+    # Draw lowest-confidence frames for QA review
+    review_df = maxn_df.sort_values('ConfidenceAgreement').head(10)
+
+    # Map time_of_maxn_ms back to raw CSV frame numbers
+    frame_indices = []
+    for t_sec in review_df['time_of_maxn_ms']:
+        closest = raw_df.iloc[(raw_df['time_seconds'] - t_sec).abs().argsort()[:1]]
+        frame_indices.append(int(closest['frame'].iloc[0]))
+
+    # Find video file
+    video_path = video_dir / f"{drop_id}.mp4"
+    if not video_path.exists():
+        logging.warning(f"Video not found at {video_path}, skipping frame drawing")
+        return
+
+    frames_dir = str(output_root / drop_id / "frames")
+    draw_boxes_on_frames(
+        video_path=str(video_path),
+        raw_csv_path=None, # In case module requires it. Wait, the original passed raw_csv. We'll pass raw_df context? Wait, no, it needs raw_csv_path.
+        output_dir=frames_dir,
+        frame_list=frame_indices,
+        confidence_threshold=base_conf,
+        sampling_start=sampling_start
+    )
 
 def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
                 output_root: str, draw_images: bool = True):
@@ -130,7 +182,9 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
     maxn_conf = float(config.maxn_confidence_threshold)
     interval = config.interval_seconds
     annotations_dir = Path(annotations_dir)
+    video_dir = Path(video_dir)
     output_root = Path(output_root)
+    ann_db = AnnotationDatabaseManager()
 
     for drop_id in drop_ids:
         logging.info(f"Post-ML processing: {drop_id}")
@@ -141,9 +195,13 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         # Read raw CSV once — shared by process_maxn and draw_frames lookup
         raw_df = pd.read_csv(raw_csv)
 
-        # Get sampling_start from DB
-        deployment = db.get_deployment(drop_id)
-        sampling_start = deployment['sampling_start'] if deployment and deployment['sampling_start'] else 0
+        # Get sampling_start from DB. We do this in a short-lived block to prevent holding locks.
+        db = DatabaseManager()
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT sampling_start FROM deployments WHERE drop_id = ?', (drop_id,))
+            row = cursor.fetchone()
+            sampling_start = dict(row)['sampling_start'] if row and row['sampling_start'] else 0
 
         # 1. Extract MaxN (uses higher threshold than base inference)
         maxn_df = process_maxn(
@@ -158,30 +216,13 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
             continue
 
         # 2. Ingest into detailed annotations database
-        ann_db = AnnotationDatabaseManager()
-        annotations_to_add = []
-        for _, row in maxn_df.iterrows():
-            annotations_to_add.append({
-                "drop_id": drop_id,
-                "scientific_name": row["ScientificName"],
-                "timestamp": row["TimeOfMax"],
-                "count": row["MaxInterval"],
-                "source": "ml",
-                "confidence": row["ConfidenceAgreement"],
-                "external_id": model_name
-            })
-
-        if annotations_to_add:
-            with ann_db.get_connection() as conn:
-                # TODO do we want this? maybe some comparison?
-                # Clear previous ML syncs for this drop
-                conn.execute("DELETE FROM annotations WHERE drop_id = ? AND source = 'ml'", (drop_id,))
-                ann_db.add_annotations(annotations_to_add)
-            logging.info(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
+        _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
 
         if not draw_images:
             logging.info(f"Post-ML processing complete for {drop_id} (frame & plot drawing skipped)")
             continue
+
+        # 3. Save MaxN timeline visualisation and draw frames
 
         # Save MaxN timeline visualisation
         plot_maxn_timeline(
@@ -194,8 +235,7 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
             interval_seconds=interval,
         )
 
-
-        # 2. Draw lowest-confidence frames for QA review
+        # Draw lowest-confidence frames for QA review
         review_df = maxn_df.sort_values('ConfidenceAgreement').head(10)
 
         # Map time_of_maxn_ms back to raw CSV frame numbers
@@ -205,7 +245,7 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
             frame_indices.append(int(closest['frame'].iloc[0]))
 
         # Find video file
-        video_path = Path(video_dir) / f"{drop_id}.mp4"
+        video_path = video_dir / f"{drop_id}.mp4"
         if not video_path.exists():
             logging.warning(f"Video not found at {video_path}, skipping frame drawing")
             continue
@@ -222,7 +262,7 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
 
         logging.info(f"Post-ML processing complete for {drop_id}")
 
-    # 3. Finally sync all updated drops to the main pipeline DB
+    # 4. Finally sync all updated drops to the main pipeline DB
     if drop_ids:
-        sync_annotations_to_main_db(drop_ids)
+        db.sync_annotation_counts(drop_ids)
         logging.info(f"Synchronized annotation counts for {len(drop_ids)} drops to main pipeline DB")

@@ -6,7 +6,6 @@ csv_mapping:
   video_file_link_column: "LinkToVideoFile"
 
 storage:
-  mode: "aws"
   bucket_name: "marine-buv-kalindi"
   sharepoint_deployment_csv_key: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
   local_video_dir: "/Users/kalindi/spyfish/videos"
@@ -77,16 +76,8 @@ validation_rules:
 
 ml_inference:
   limit_processing: 2  # SAFEGUARD: Only process 2 videos per run while building
-  test_drop_id_1: "KSF_20240124_BUV_KSF_085_01"
-  test_drop_key_1: "media/KSF_20240124_BUV/KSF_20240124_BUV_KSF_085_01/KSF_20240124_BUV_KSF_085_01.mp4"
-  test_drop_sampling_start_1: 1
-  test_drop_sampling_end_1: 29
-  test_drop_id_2: "KSF_20240124_BUV_KSF_085_02"
-  test_drop_key_2: "media/KSF_20240124_BUV/KSF_20240124_BUV_KSF_085_02/KSF_20240124_BUV_KSF_085_02.mp4"
-  test_drop_sampling_start_2: 1
-  test_drop_sampling_end_2: 29
   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
-  frame_skip: 10
+  frame_skip: 120
   confidence_threshold: 0.25       # Base YOLO inference threshold
   maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
   model_s3_key: "models/cfd_binary_water_20260301.pt" # TODO thinnk where to put this
@@ -118,6 +109,8 @@ biigle:
   annotation_report_type_images: 3         # Image annotation CSV report
   volume_report_type_video: 10                   # Volume overview report
   volume_report_type_image: 10                   # TODO Volume overview report
+  # Done labels — whole-file labels that signal a volume is ready for ingestion
+  done_labels: ["Done Volume", "Done QA Review"]
   # S3 paths — appended with {survey_id}/{drop_id}/ at runtime
   s3_images_prefix: "process_files/media/biigle_images"  # extracted JPEG frames
   s3_clips_prefix: "process_files/media/biigle_clips"    # video clips (for future use)

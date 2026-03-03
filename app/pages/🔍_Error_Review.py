@@ -1,19 +1,8 @@
-import hmac
 import pandas as pd
 import streamlit as st
 
 from spyfish.database.manager import DatabaseManager
-
-
-# --- Load error data ---
-@st.cache_data(ttl=300)  # Check S3 at most every 5 minutes
-def sync_db_if_needed():
-    """Helper to sync database from S3 if in AWS mode or missing locally."""
-    from spyfish.config import config
-    from spyfish.storage.db_sync import download_db
-    if config.storage.get("mode") == "aws" or not config.db_path.exists():
-        download_db()
-    return True
+from utils import check_password, sync_db_if_needed
 
 @st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
 def load_error_data():
@@ -34,23 +23,6 @@ def load_file_differences():
     """Returns empty lists since File Presence is handled via pipeline Status."""
     return [], []
 
-# --- Password protection ---
-def check_password():
-    """Returns True if the user entered the correct password."""
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-
-    if not st.session_state.password_correct:
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            app_password = st.secrets.get("APP_PASSWORD")
-            if app_password is not None and hmac.compare_digest(password, app_password):
-                st.session_state.password_correct = True
-                st.rerun()
-            else:
-                st.error("❌ Incorrect password")
-        return False
-    return True
 
 # --- Display functions ---
 def display_error_summary(errors_df: pd.DataFrame):

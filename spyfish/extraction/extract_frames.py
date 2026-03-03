@@ -12,6 +12,7 @@ Separation of concerns:
   - extract_clips.py → cut 10-second video clips for Zooniverse
   - extract_frames.py (THIS FILE) → grab the single decisive frame for Biigle
 """
+import cv2
 import json
 import logging
 import os
@@ -201,6 +202,14 @@ def extract_frames_from_selections(
     drop_id = df["DropID"].iloc[0]
     sampling_start = int(df["SamplingStart"].iloc[0]) if "SamplingStart" in df.columns else 0
 
+    # Read video dimensions once from metadata — no need to re-read every extracted frame
+    cap = cv2.VideoCapture(str(video_path))
+    vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if vid_w == 0 or vid_h == 0:
+        logging.warning(f"Could not read video dimensions for {video_path}. COCO image sizes will default to 0.")
+
     frame_records = []
     frame_paths = []
 
@@ -217,12 +226,7 @@ def extract_frames_from_selections(
         success = extract_frame(video_path, seek_seconds, out_path, fast=fast)
         frame_paths.append(str(out_path) if success else None)
 
-        img_w, img_h = 0, 0
-        if success:
-            import cv2
-            img = cv2.imread(str(out_path))
-            if img is not None:
-                img_h, img_w = img.shape[:2]
+        img_w, img_h = vid_w, vid_h
 
         frame_records.append({
             "image_id": img_id,

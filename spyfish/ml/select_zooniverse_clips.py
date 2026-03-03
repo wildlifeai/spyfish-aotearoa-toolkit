@@ -5,6 +5,7 @@ import os
 import time
 import logging
 from spyfish.config import config
+from spyfish.utils import time_to_seconds, seconds_to_time
 
 def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, config):
     """
@@ -21,22 +22,6 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
         logging.warning(f"Empty MaxN CSV for {drop_id}, no clips to extract.")
         return
 
-    # Helper function to convert HH:MM:SS to seconds
-    def time_to_seconds(time_str):
-        if pd.isna(time_str):
-            return 0.0
-        parts = time_str.split(':')
-        h = int(parts[0])
-        m = int(parts[1])
-        s = float(parts[2])
-        return h * 3600 + m * 60 + s
-
-    # Helper function to convert seconds to HH:MM:SS
-    def seconds_to_time(seconds):
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
-        return f"{int(hours):02d}:{int(minutes):02d}:{int(secs):02d}"
 
     # We need the time in seconds to do temporal spacing checks
     df['TimeSeconds'] = df['TimeOfMax'].apply(time_to_seconds)
@@ -205,19 +190,17 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
     return selections_df
 
 def main():
-    if "snakemake" in globals():
-        pass
-    else:
-        logging.info("Running Zooniverse extraction in standalone test mode.")
-        drop_id = config.test_drops[0][0]
-        model_name = Path(config.model_path or config.mock_model_path).stem
 
-        annotations_dir = repo_root / config.local_manifest_dir_path
+    logging.info("Running Zooniverse extraction in standalone test mode.")
+    drop_id = config.test_drops[0][0]
+    model_name = Path(config.model_path or config.mock_model_path).stem
 
-        input_maxn = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
-        output_selections = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
+    annotations_dir = repo_root / config.local_manifest_dir_path
 
-        process_zooniverse_clips(input_maxn, output_selections, drop_id, config)
+    input_maxn = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
+    output_selections = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
+
+    process_zooniverse_clips(input_maxn, output_selections, drop_id, config)
 
 if __name__ == "__main__":
     main()

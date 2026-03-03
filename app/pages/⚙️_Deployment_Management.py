@@ -1,27 +1,11 @@
-import hmac
 import pandas as pd
 import streamlit as st
 import sqlite3
 from pathlib import Path
-from spyfish.config import config
-from spyfish.config import PipelineStatus
-
-# Constants for UI filtering state checks
-VIDEO_PRESENT_STATUSES = [
-    PipelineStatus.READY_FOR_ML, PipelineStatus.PROCESSING_ML, PipelineStatus.ML_COMPLETE,
-    PipelineStatus.READY_FOR_CITSCI, PipelineStatus.PROCESSING_CITSCI, PipelineStatus.CITSCI_COMPLETE,
-    PipelineStatus.READY_FOR_EXPERT, PipelineStatus.PROCESSING_EXPERT, PipelineStatus.EXPERT_COMPLETE,
-    PipelineStatus.PIPELINE_COMPLETE
-]
-
-# --- Load SQLite deployment status data ---
-@st.cache_data(ttl=900)  # Check S3 at most every 5 minutes
-def sync_db_if_needed():
-    """Helper to sync database from S3 if in AWS mode or missing locally."""
-    from spyfish.storage.db_sync import download_db
-    if config.storage.get("mode") == "aws" or not config.db_path.exists():
-        download_db()
-    return True
+from spyfish.config import config, PipelineStatus
+from spyfish.utils import extract_survey_id, get_survey_summary
+from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from utils import sync_db_if_needed, check_password
 
 @st.cache_data(ttl=1)  # Refresh UI instantly
 def load_deployment_status():
@@ -44,9 +28,6 @@ def load_deployment_status():
             "is_bad_deployment": "IsBadDeployment"
         }, inplace=True)
         df["IsBadDeployment"] = df["IsBadDeployment"].astype(bool)
-
-        # MOCKING MISSING STATS COLUMNS FOR VISUAL PARITY
-        from spyfish.utils import extract_survey_id
         df["SurveyID"] = extract_survey_id(df["DropID"])
 
         # Map Pipeline Complete (excluding EXCLUDED/bad deployments)
@@ -61,31 +42,10 @@ def load_deployment_status():
         # Deployments that are complete or bad do not need action
         df["NeedsAction"] = ~(df["Complete"] | df["IsBadDeployment"])
 
-
         return df
     except Exception as e:
         st.error(f"Error loading deployment DB: {e}")
         return None
-
-# --- Password protection ---
-def check_password():
-    """Returns True if the user entered the correct password."""
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-
-    if not st.session_state.password_correct:
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            app_password = st.secrets.get("APP_PASSWORD")
-            if app_password is not None and hmac.compare_digest(password, app_password):
-                st.session_state.password_correct = True
-                st.rerun()
-            else:
-                st.error("❌ Incorrect password")
-        return False
-    return True
-
-
 
 # --- Display functions ---
 def display_deployment_table(df: pd.DataFrame, title: str, description: str):
@@ -104,7 +64,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         st.metric("Unique Surveys", df["SurveyID"].nunique())
     with col4:
         # User request: get this info from status (READY_FOR_ML, PIPELINE_COMPLETE, etc) rather than mocked VideoStatus
-        videos_present = df["Status"].isin(VIDEO_PRESENT_STATUSES).sum()
+        videos_present = df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()
         st.metric("Videos Present", videos_present)
 
     with col5: st.metric("ML Ann.", (df["MlAnnotations"] > 0).sum())
@@ -132,6 +92,162 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         }
     )
 
+def render_overview(deployment_df: pd.DataFrame):
+    st.header("📊 Overview")
+    st.caption("Complete deployment status overview")
+
+    total = len(deployment_df)
+    videos_present = deployment_df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()
+
+    # Mini metrics overview
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+    with m1: st.metric("Total", total)
+    with m2: st.metric("Action Req.", (~deployment_df["Complete"]).sum())
+    with m3: st.metric("Videos", videos_present)
+    with m4: st.metric("Complete", deployment_df["Complete"].sum())
+    with m5: st.metric("ML Ann.", (deployment_df["MlAnnotations"] > 0).sum())
+    with m6: st.metric("CitSci Ann.", (deployment_df["CitSciAnnotations"] > 0).sum())
+    with m7: st.metric("Expert Ann.", (deployment_df["ExpertAnnotations"] > 0).sum())
+
+def render_survey_tab(deployment_df: pd.DataFrame):
+    st.subheader("Survey Overview")
+    st.caption("Aggregation of video deployments by SurveyID")
+
+    # Survey-level interesting metrics overview
+    st.divider()
+    s1, s2, s3, s4, s5, s6, s7 = st.columns(7)
+
+    total_surveys = max(1, deployment_df["SurveyID"].nunique())
+    with s1: st.metric("Surveys", total_surveys)
+    with s2: st.metric("Avg Deps / Survey", round(len(deployment_df) / total_surveys, 1))
+
+    survey_completion = (deployment_df['Complete'].mean() * 100) if not deployment_df.empty else 0
+    with s3: st.metric("Completion", f"{round(survey_completion, 1)}%")
+
+    with s4: st.metric("Avg Anns / Survey", round(deployment_df["TotalAnnotations"].sum() / total_surveys))
+    with s5: st.metric("Total Annotations", deployment_df["TotalAnnotations"].sum())
+    with s6: st.metric("Bad Deployments", deployment_df["IsBadDeployment"].sum())
+    with s7: st.metric("Action Required", (~deployment_df["Complete"]).sum())
+    st.divider()
+
+    survey_summary = get_survey_summary(deployment_df)
+    if not survey_summary.empty:
+        st.dataframe(survey_summary, width='stretch', hide_index=True)
+
+def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
+    st.subheader("🔄 Pipeline Stage Breakdown")
+    st.caption("How many deployments are at each step of the pipeline")
+
+    total = len(deployment_df)
+    status_counts = deployment_df["Status"].value_counts().to_dict()
+    rows = []
+    for status_key, label, description in PipelineStatus.STAGE_ORDER:
+        count = status_counts.get(status_key, 0)
+        if count == 0:
+            continue
+        pct = round(count / total * 100, 1) if total > 0 else 0
+        rows.append({"Stage": label, "Description": description, "Count": count, "% of Total": f"{pct}%"})
+
+    if rows:
+        st.dataframe(
+            pd.DataFrame(rows),
+            hide_index=True,
+            width='stretch',
+            column_config={
+                "Count": st.column_config.ProgressColumn(
+                    "Count",
+                    min_value=0,
+                    max_value=total,
+                    format="%d",
+                ),
+            }
+        )
+    else:
+        st.info("No deployed records to display yet.")
+
+    # Filters
+    status_order = [s[0] for s in PipelineStatus.STAGE_ORDER]
+    all_statuses = [s for s in status_order if s in deployment_df["Status"].unique()]
+    all_statuses += [s for s in deployment_df["Status"].unique() if s not in status_order]
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        status_filter = st.multiselect(
+            "Filter by Status",
+            options=all_statuses,
+            default=None
+        )
+    with col2:
+        survey_filter = st.multiselect(
+            "Filter by Survey",
+            options=sorted(deployment_df["SurveyID"].unique().tolist()),
+            default=None
+        )
+    with col3:
+        complete_filter = st.selectbox(
+            "Filter by Complete",
+            options=["All", "Complete", "Action Required"],
+            index=0
+        )
+
+    # Apply filters
+    filtered_df = deployment_df.copy()
+    if status_filter:
+        filtered_df = filtered_df[filtered_df["Status"].isin(status_filter)]
+    if survey_filter:
+        filtered_df = filtered_df[filtered_df["SurveyID"].isin(survey_filter)]
+    if complete_filter == "Complete":
+        filtered_df = filtered_df[filtered_df["Complete"] == True]
+    elif complete_filter == "Action Required":
+        filtered_df = filtered_df[filtered_df["Complete"] == False]
+
+    display_deployment_table(
+        filtered_df,
+        f"Filtered Results ({len(filtered_df)} deployments)",
+        "Use filters above to narrow down results"
+    )
+
+def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
+    st.header("🔍 Detailed Annotation View")
+    st.caption("Select a deployment to view individual annotation records from the annotations database")
+
+    selected_drop_id = st.selectbox(
+        "Select DropID to view details",
+        options=["None"] + sorted(deployment_df["DropID"].tolist()),
+        index=0
+    )
+    ann_db = AnnotationDatabaseManager()
+
+    if selected_drop_id != "None":
+        # Load detailed annotations
+        detailed_anns = ann_db.get_annotations_for_drop(selected_drop_id)
+
+        if detailed_anns:
+            ann_df = pd.DataFrame(detailed_anns)
+            st.write(f"Showing {len(ann_df)} annotations for **{selected_drop_id}**")
+
+            # Group by source for mini metrics
+            s_cols = st.columns(3)
+            with s_cols[0]: st.metric("Expert", len(ann_df[ann_df["annotated_by"] == "expert"]))
+            with s_cols[1]: st.metric("ML", len(ann_df[ann_df["annotated_by"] == "ml"]))
+            with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["annotated_by"] == "citsci"]))
+
+            st.dataframe(
+                ann_df[["scientific_name", "time_of_max", "max_interval", "annotated_by", "interval_annotation", "confidence_agreement", "external_id"]],
+                width='stretch',
+                hide_index=True
+            )
+        else:
+            st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")
+
+@st.cache_data(ttl=600)
+def get_all_annotations_export():
+    adb = AnnotationDatabaseManager()
+    df = adb.get_all_annotations_export_df()
+    if df is None or df.empty:
+        return None
+    return df.to_csv(index=False).encode('utf-8')
+
 def main():
     st.set_page_config(page_title="Deployment Management", page_icon="⚙️", layout="wide")
     if not check_password():
@@ -143,166 +259,31 @@ def main():
     col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("🔄 Refresh DB", help="Read latest SQLite pipeline status"):
+            sync_db_if_needed.clear()
             st.rerun()
 
     st.divider()
     deployment_df = load_deployment_status()
     if deployment_df is None: return
 
-    st.header("📊 Overview")
-    st.caption("Complete deployment status overview")
+    render_overview(deployment_df)
 
-    # Mini metrics overview
-    m1, m2, m3, m4, m5, m6,m7 = st.columns(7)
-    with m1: st.metric("Total", len(deployment_df))
-    with m2: st.metric("Action Req.", (~deployment_df["Complete"]).sum())
-    with m3: st.metric("Surveys", deployment_df["SurveyID"].nunique())
-
-    videos_present = deployment_df["Status"].isin(VIDEO_PRESENT_STATUSES).sum()
-    with m4: st.metric("Videos", videos_present)
-
-    with m5: st.metric("ML Ann.", (deployment_df["MlAnnotations"] > 0).sum())
-
-    with m6: st.metric("CitSci Ann.", (deployment_df["CitSciAnnotations"] > 0).sum())
-    with m7: st.metric("Expert Ann.", (deployment_df["ExpertAnnotations"] > 0).sum())
-
-
-    st.divider()
-
-    tab1, tab2, tab3 = st.tabs([ "📋 Deployments Overview", "📊 Survey Overview",  "🐟 Annotations Overview"])
+    tab1, tab2, tab3 = st.tabs(["📋 Deployments Overview", "📊 Survey Overview", "🐟 Annotations Overview"])
 
     with tab2:
-        st.subheader("Survey Overview")
-        st.caption("Aggregation of video deployments by SurveyID")
-
-        # Survey-level interesting metrics overview
-        st.divider()
-        s1, s2, s3, s4, s5, s6, s7 = st.columns(7)
-
-        total_surveys = max(1, deployment_df["SurveyID"].nunique())
-        with s1: st.metric("Surveys", total_surveys)
-        with s2: st.metric("Avg Deps / Survey", round(len(deployment_df) / total_surveys, 1))
-
-        survey_completion = (deployment_df['Complete'].mean() * 100) if not deployment_df.empty else 0
-        with s3: st.metric("Completion", f"{round(survey_completion, 1)}%")
-
-        with s4: st.metric("Avg Anns / Survey", round(deployment_df["TotalAnnotations"].sum() / total_surveys))
-        with s5: st.metric("Total Annotations", deployment_df["TotalAnnotations"].sum())
-        with s6: st.metric("Bad Deployments", deployment_df["IsBadDeployment"].sum())
-        with s7: st.metric("Action Required", (~deployment_df["Complete"]).sum())
-        st.divider()
-
-        if not deployment_df.empty:
-            survey_summary = deployment_df.groupby("SurveyID").agg(
-                TotalDeployments=("DropID", "nunique"),
-                CompleteDeployments=("Complete", "sum"),
-                BadDeployments=("IsBadDeployment", "sum"),
-                NeedsAction=("NeedsAction", "sum"),
-                VideosPresent=("Status", lambda x: x.isin(VIDEO_PRESENT_STATUSES).sum()),
-                MLAnnotated=("MlAnnotations", lambda x: (x > 0).sum()),
-                CitSciAnnotated=("CitSciAnnotations", lambda x: (x > 0).sum()),
-                ExpertAnnotated=("ExpertAnnotations", lambda x: (x > 0).sum())
-            ).reset_index()
-            # Calculate percentages cleanly: (Bad + Expert) / Total
-            survey_summary["CompletionPct"] = (
-                ((survey_summary["BadDeployments"] + survey_summary["ExpertAnnotated"]) / survey_summary["TotalDeployments"]) * 100
-            ).round(1).astype(str) + "%"
-
-            st.dataframe(survey_summary, width='stretch', hide_index=True)
+        render_survey_tab(deployment_df)
 
     with tab1:
-
-        # Filters
-        status_order = [
-            "PENDING_ARRIVAL", "READY_FOR_ML", "PROCESSING_ML", "ML_COMPLETE",
-            "READY_FOR_CITSCI", "PROCESSING_CITSCI", "CITSCI_COMPLETE",
-            "READY_FOR_EXPERT", "PROCESSING_EXPERT", "EXPERT_COMPLETE",
-            "PIPELINE_COMPLETE", "EXCLUDED", "ON_HOLD", "ERROR", "MISSING_METADATA"
-        ]
-        all_statuses = [s for s in status_order if s in deployment_df["Status"].unique()]
-        all_statuses += [s for s in deployment_df["Status"].unique() if s not in status_order]
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            status_filter = st.multiselect(
-                "Filter by Status",
-                options=all_statuses,
-                default=None
-            )
-        with col2:
-            survey_filter = st.multiselect(
-                "Filter by Survey",
-                options=sorted(deployment_df["SurveyID"].unique().tolist()),
-                default=None
-            )
-        with col3:
-            complete_filter = st.selectbox(
-                "Filter by Complete",
-                options=["All", "Complete", "Action Required"],
-                index=0
-            )
-
-        # Apply filters
-        filtered_df = deployment_df.copy()
-        if status_filter:
-            filtered_df = filtered_df[filtered_df["Status"].isin(status_filter)]
-        if survey_filter:
-            filtered_df = filtered_df[filtered_df["SurveyID"].isin(survey_filter)]
-        if complete_filter == "Complete":
-            filtered_df = filtered_df[filtered_df["Complete"] == True]
-        elif complete_filter == "Action Required":
-            filtered_df = filtered_df[filtered_df["Complete"] == False]
-
-        display_deployment_table(
-            filtered_df,
-            f"Filtered Results ({len(filtered_df)} deployments)",
-            "Use filters above to narrow down results"
-        )
+        render_pipeline_stage_tab(deployment_df)
 
     with tab3:
-
-        # --- Detailed Annotation View ---
-        st.header("🔍 Detailed Annotation View")
-        st.caption("Select a deployment to view individual annotation records from the annotations database")
-
-        selected_drop_id = st.selectbox(
-            "Select DropID to view details",
-            options=["None"] + sorted(deployment_df["DropID"].tolist()),
-            index=0
-        )
-
-        if selected_drop_id != "None":
-            from spyfish.database.annotation_manager import AnnotationDatabaseManager
-            ann_db = AnnotationDatabaseManager()
-
-            # Load detailed annotations
-            detailed_anns = ann_db.get_annotations_for_drop(selected_drop_id)
-
-            if detailed_anns:
-                ann_df = pd.DataFrame(detailed_anns)
-                st.write(f"Showing {len(ann_df)} annotations for **{selected_drop_id}**")
-
-                # Group by source for mini metrics
-                s_cols = st.columns(3)
-                with s_cols[0]: st.metric("Expert", len(ann_df[ann_df["source"] == "expert"]))
-                with s_cols[1]: st.metric("ML", len(ann_df[ann_df["source"] == "ml"]))
-                with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["source"] == "citsci"]))
-
-                st.dataframe(
-                    ann_df[["scientific_name", "timestamp", "count", "source", "confidence", "external_id"]],
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else:
-                st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")
-
-    st.divider()
+        render_detailed_annotation_tab(deployment_df)
 
     st.divider()
 
     # Download section
     st.header("📥 Export Data")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         csv = deployment_df.to_csv(index=False).encode('utf-8')
         st.download_button(
@@ -319,6 +300,19 @@ def main():
             file_name="deployments_needs_action.csv",
             mime="text/csv",
         )
+
+    with col3:
+        annotations_csv = get_all_annotations_export()
+        if annotations_csv:
+            st.download_button(
+                label="Download All Annotations",
+                data=annotations_csv,
+                file_name="spyfish_all_annotations.csv",
+                mime="text/csv",
+                type="primary"
+            )
+        else:
+            st.button("Download All Annotations", help="No annotations available yet.")
 
 if __name__ == "__main__":
     main()

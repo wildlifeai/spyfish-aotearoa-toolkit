@@ -10,7 +10,6 @@ from spyfish.config import config, PipelineStatus
 from spyfish.database.manager import DatabaseManager
 from spyfish.validation.data_validator import DataValidator
 from spyfish.storage.s3_handler import S3Handler
-from spyfish.storage.local import LocalStorageHandler
 
 def run_ingestion():
     logging.info("Starting Spyfish Pipeline Ingestion...")
@@ -27,24 +26,11 @@ def run_ingestion():
         raise KeyError(f"Missing required CSV column mappings in config.yaml. Found: DropID={drop_col}, Bad={bad_col}, Video={video_col}")
 
     db = DatabaseManager()
-    # Setup Storage precisely like loop.py
-    mode = config.storage.get("mode", "local")
-    if mode == "aws":
-
-        storage = S3Handler(bucket=config.storage.get("bucket_name"))
-        s3 = storage
-    else:
-        storage = LocalStorageHandler(video_folder=config.storage.get("local_video_dir", "."))
-        s3 = None  # We only need s3 to download the csv, handled differently below
+    storage = S3Handler(bucket=config.storage.get("bucket_name"))
 
     logging.info("2. Fetching the master BUV Deployments list...")
-    if mode == "aws":
-        csv_path = config.storage.get("sharepoint_deployment_csv_key")
-        deployments_df = storage.read_df_from_s3_csv(csv_path)
-    else:
-
-        csv_path = config.storage.get("local_deployment_csv_key")
-        deployments_df = pd.read_csv(csv_path)
+    csv_path = config.storage.get("sharepoint_deployment_csv_key")
+    deployments_df = storage.read_df_from_s3_csv(csv_path)
 
     logging.info(f"Loaded {len(deployments_df)} deployment records.")
 
@@ -72,20 +58,16 @@ def run_ingestion():
     logging.info(f"Found {len(structural_error_drops)} DropIDs with structural CSV errors.")
 
     logging.info(f"Logging {len(structured_errors)} validation errors to SQLite...")
-    db.clear_validation_errors(auto_sync=False)
-    db.add_validation_errors(structured_errors, auto_sync=False)
+    db.clear_validation_errors()
+    db.add_validation_errors(structured_errors)
 
-    logging.info(f"4. Batch mapping known media files in {mode} storage...")
-    if mode == "aws":
-        known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
-    else:
-        known_files = storage.get_all_videos()
+    logging.info("4. Batch mapping known media files in S3...")
+    known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
 
-    # User test injection
-    test_drops = config.test_drops
-    for test_id, test_key, _, _ in test_drops:
-        if test_key:
-            known_files.add(test_key)
+    if config.is_test_run:
+        from spyfish.test_setup import inject_test_data
+        logging.info("Injecting test overrides into the pipeline database manifest...")
+        deployments_df = inject_test_data(deployments_df, known_files)
 
     # 5. Load expert annotations and count per DropID (always from S3)
     logging.info("5. Fetching expert annotations from S3...")
@@ -99,30 +81,7 @@ def run_ingestion():
     except Exception as e:
         logging.warning(f"Failed to load KSO annotations from S3: {e}. Expert counts will default to 0.")
 
-    # Inject User Test DataFrame rows matching the mock files
-    for test_id, test_key, sampling_start, sampling_end in test_drops:
-        fake_row = pd.DataFrame([{
-            "DropID": test_id,
-            "SurveyID": test_id[:16],
-            "SiteID": test_id[17:24],
-            "IsBadDeployment": "False",
-            "LinkToVideoFile": test_key,
-            "SamplingStart": sampling_start,
-            "SamplingEnd": sampling_end
-        }])
-        deployments_df = pd.concat([deployments_df, fake_row], ignore_index=True)
-
-    # 6. Synchronize into SQLite
-    logging.info("6. Synchronizing all deployment records into SQLite...")
-    from spyfish.storage.db_sync import download_db, upload_db
-    if config.storage.get("mode") == "aws":
-        download_db()
-
     _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_files, expert_counts, mapping)
-
-    if config.storage.get("mode") == "aws":
-        upload_db()
-
     logging.info(f"Ingestion complete. Synchronized {len(deployments_df)} records into the pipeline database.")
 
 def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_files, expert_counts, mapping):
@@ -198,8 +157,7 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             sampling_end=sampling_end,
             expert_annotations=expert_anns,
             ml_annotations=ml_anns,
-            citsci_annotations=citsci_anns,
-            auto_sync=False
+            citsci_annotations=citsci_anns
         )
         new_count += 1
         expt_count += expert_anns

@@ -11,6 +11,7 @@ from spyfish.config import config, PipelineStatus, get_required
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.db_sync import download_db, upload_db
+from spyfish.ml.run_inference import main as run_inference_main
 
 class MLRunner:
     def __init__(self):
@@ -35,11 +36,6 @@ class MLRunner:
         self.confidence = get_required(config.ml_inference, "confidence_threshold", "ml_inference")
         self.model = config.mock_model_path if self.is_local else get_required(config.ml_inference, "model_path", "ml_inference")
 
-    def sync_down(self):
-        """Downloads the master pipeline database from S3."""
-        if self.is_test_run:
-            return
-        download_db()
 
     def generate_manifest(self) -> List[str]:
         """Queries the local sqlite DB for videos READY_FOR_ML and creates the target CSV manifest."""
@@ -86,12 +82,6 @@ class MLRunner:
             "sampling_end": "SamplingEnd"
         })
 
-        # On NeSI, it is significantly faster and more robust to rsync the files natively
-        # using the aws cli instead of generating presigned URLs (since Slurm jobs may sit in queue for days)
-        # TODO: This downloads the videos *synchronously* in the Python orchestrator loop.
-        # As tech debt cleanup, this should eventually be moved OUT of the orchestrator Python logic
-        # into a native Snakemake Rule (e.g. `rule download_videos`) so that Slurm can
-        # parallelize the file transfer step across multiple nodes instead of the head node blocking.
         logging.info("Generating target paths and downloading media via aws s3...")
 
         # In a local run, '/nesi/' doesn't exist. Safely mock it to prevent MacOS read-only errors.
@@ -123,7 +113,6 @@ class MLRunner:
                 local_filepaths.append(local_path)
             except subprocess.CalledProcessError as e:
                 logging.error(f"Failed to download video {s3_uri}: {e}")
-                # If download fails, we shouldn't pass it to snakemake
                 continue
 
         df["VideoURL"] = local_filepaths
@@ -136,21 +125,18 @@ class MLRunner:
 
         return df[drop_id_col].tolist()
 
-    def run_snakemake(self, targets: List[str]) -> List[str]:
-        """Executes the Snakemake workflow based on the targets"""
+    def run_inference_loop(self, targets: List[str]) -> List[str]:
+        """Executes the YOLO inference directly in a Python loop for each target."""
         if not targets:
             return []
 
         logging.info(f"Setting {len(targets)} targets to {PipelineStatus.PROCESSING_ML}...")
-        logging.info(f"Setting {len(targets)} targets to {PipelineStatus.PROCESSING_ML}...")
         if not self.is_test_run:
             # Batch update status to PROCESSING_ML
-            download_db()
             for target in targets:
-                self.db.update_status(target, PipelineStatus.PROCESSING_ML, auto_sync=False)
-            upload_db()
+                self.db.update_status(target, PipelineStatus.PROCESSING_ML)
 
-        logging.info(f"Starting Snakemake orchestrator for {len(targets)} drops...")
+        logging.info(f"Starting inference loop for {len(targets)} drops...")
 
         # Automatically download the YOLO weights from S3 if they don't exist locally
         if not os.path.exists(self.model):
@@ -169,49 +155,39 @@ class MLRunner:
             else:
                 logging.warning(f"Model missing locally and 'model_s3_key' not configured in yaml. Inference will likely fail.")
 
-        # Since we use `--directory nesi_pipeline`, relative paths inside Snakemake
-        # (like where to find the manifest) must be adjusted if they were passed from the root.
-        # We convert the manifest path to absolute so Snakemake finds it regardless of its working directory.
-        abs_manifest = os.path.abspath(self.manifest_path)
 
-        cmd = [
-            "snakemake",
-            "--cores", "1",
-            "--snakefile", "nesi_pipeline/Snakefile",
-            "--config",
-            f"frame_skip={self.frame_skip}",
-            f"confidence_threshold={self.confidence}",
-            f"model_path={self.model}",
-            f"manifest={abs_manifest}",
-            f"output_dir={self.manifest_dir}",
-            f"log_dir={config.local_logs_dir}"
-        ]
-
-        logging.info(f"Executing: {' '.join(cmd)}")
+        # Load the manifest to get URLs and metadata
+        df = pd.read_csv(self.manifest_path)
+        model_name = Path(self.model).stem
 
         success_targets = []
-        try:
-            # We use run to block until the workflow completes
-            result = subprocess.run(cmd, check=True)
-            if result.returncode == 0:
-                logging.info("Snakemake pipeline completed successfully.")
-                # For now, we assume all targets in the manifest succeeded if sm returned 0
-                # In robust production, we would parse the Snakemake output logs or output files
-                # to strictly verify row-by-row success.
-                success_targets = targets
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Snakemake pipeline failed with error code {e.returncode}, {e}")
-            # If Snakemake fails, we return an empty success list to ensure no jobs are marked ML_COMPLETED.
-            # In a production setting we might want to flag them as ERROR in the DB here so they don't get stuck in PROCESSING_ML
-            return []
-        except Exception as e:
-            logging.error(f"An unexpected error occurred during Snakemake execution: {e}")
-            return []
+        for drop_id in targets:
+            try:
+                row = df[df[config.csv_mapping.get('drop_id_column', 'DropID')] == drop_id].iloc[0]
+
+                inference_args = {
+                    'drop_id': drop_id,
+                    'video_url': row['VideoURL'],
+                    'sampling_start': row['SamplingStart'],
+                    'sampling_end': row['SamplingEnd'],
+                    'model_path': self.model,
+                    'frame_skip': self.frame_skip,
+                    'confidence_threshold': self.confidence,
+                    'output_csv': os.path.join(self.manifest_dir, f"{drop_id}_{model_name}_raw.csv")
+                }
+
+                logging.info(f"Running inference for {drop_id}...")
+                run_inference_main(inference_args)
+                success_targets.append(drop_id)
+
+            except Exception as e:
+                logging.error(f"Inference failed for {drop_id}: {e}")
+                # We continue to the next one, but this one won't be in success_targets
 
         return success_targets
 
-    def sync_up(self, successful_drops: List[str]):
-        """Redownloads the DB to avoid race conditions, applies UPDATES, and uploads back to S3"""
+    def finalize_batch_results(self, successful_drops: List[str]):
+        """Uploads generated ML CSVs to S3 and marks deployments as ML_COMPLETE locally."""
         if not successful_drops:
             logging.info("No successful drops to sync. Exiting.")
             return
@@ -238,9 +214,6 @@ class MLRunner:
             else:
                 logging.warning(f"Expected to find ML output at {local_csv} but file is missing.")
 
-        # Re-download the DB to ensure we don't overwrite UI changes while Snakemake ran
-        download_db()
-
         # Apply the updates, BUT ONLY if the video is STILL marked as PROCESSING_ML.
         # This protects against cases where a user might have manually excluded or deleted
         # the run from the dashboard while the long ML queue was executing!
@@ -248,11 +221,8 @@ class MLRunner:
         for drop_id in successful_drops:
             record = self.db.get_deployment(drop_id)
             if record and record['status'] == PipelineStatus.PROCESSING_ML:
-                self.db.update_status(drop_id, PipelineStatus.ML_COMPLETE, auto_sync=False)
+                self.db.update_status(drop_id, PipelineStatus.ML_COMPLETE)
                 updated_count += 1
-
-        # Upload back up
-        upload_db()
         logging.info(f"Successfully updated {updated_count} rows in local DB to ML_COMPLETE.")
         logging.info("State Sync Complete.")
 
@@ -261,10 +231,9 @@ def main():
     args = parser.parse_args()
 
     runner = MLRunner()
-    runner.sync_down()
     targets = runner.generate_manifest()
-    successes = runner.run_snakemake(targets)
-    runner.sync_up(successes)
+    successes = runner.run_inference_loop(targets)
+    runner.finalize_batch_results(successes)
 
 if __name__ == "__main__":
     main()
