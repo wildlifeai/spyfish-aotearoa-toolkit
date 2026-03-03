@@ -157,8 +157,7 @@ def select_maxn_clips_for_review(
 
     # Sort chronologically
     if not selections_df.empty:
-        selections_df['sort_helper'] = selections_df['StartTime'].apply(time_to_seconds)
-        selections_df = selections_df.sort_values('sort_helper').drop(columns=['sort_helper'])
+        selections_df = selections_df.sort_values("ClipStartRelative").reset_index(drop=True)
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
     selections_df.to_csv(output_selections_path, index=False)

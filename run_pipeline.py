@@ -78,8 +78,6 @@ def main():
             db = DatabaseManager()
             inject_biigle_test_drops(db)
             logging.info("Biigle test drops seeded. Will now run Step 6 (Biigle sync).")
-            # Force biigle_sync to also run
-            args.biigle_sync = True
         except Exception as e:
             logging.error(f"Biigle test seed FAILED: {e}")
             logging.error(traceback.format_exc())
@@ -203,7 +201,7 @@ def main():
         logging.info("─── STEP 5: SKIPPED (--skip-biigle-upload) ───")
 
     # ── Step 6: Biigle annotation sync ──────────────────────────
-    if run_all or args.biigle_sync:
+    if run_all or args.biigle_sync or args.biigle_test:
         logging.info("─── STEP 6: Syncing Biigle annotations ───")
         try:
             sync_biigle_annotations()

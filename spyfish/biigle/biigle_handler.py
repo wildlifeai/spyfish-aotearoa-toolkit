@@ -496,4 +496,4 @@ class BiigleHandler:
 
         except Exception as e:
             logging.error(f"Error checking done status for volume {volume_id}: {e}")
-            return False, "image"
+            raise

@@ -77,16 +77,30 @@ def sync_biigle_annotations():
                 logging.warning(f"  Could not find label column in report for {drop_id}. Columns: {list(report_df.columns)}")
                 continue
 
+            # Find the filename column
+            fname_col = None
+
+            # TODO this is sus, fix
+            for col in ['image_filename', 'filename', 'Filename', 'Image filename', 'Image Filename']:
+                if col in report_df.columns:
+                    fname_col = col
+                    break
+
+            if not fname_col:
+                logging.warning(f"  Could not find filename column in report for {drop_id}. Columns: {list(report_df.columns)}")
+
             fish_annotations = report_df
 
             annotations_to_add = []
             for _, row in fish_annotations.iterrows():
                 timestamp = None
-                if 'image_filename' in row:
-                    fname = str(row['image_filename'])
-                    if 'extracted_frame_' in fname:
+                if fname_col and fname_col in row:
+                    fname = str(row[fname_col])
+                    if '__frame_' in fname:
                         try:
-                            secs = float(fname.split('extracted_frame_')[-1].split('.jpg')[0])
+                            # Parse out time from filename like: "KSF_20240124...__frame_12.345s.jpg"
+                            secs_str = fname.split('__frame_')[-1].split('s.jpg')[0]
+                            secs = float(secs_str)
                             h = int(secs // 3600)
                             m = int((secs % 3600) // 60)
                             s = int(secs % 60)
