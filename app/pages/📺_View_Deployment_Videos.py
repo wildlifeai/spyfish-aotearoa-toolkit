@@ -1,9 +1,9 @@
-import hmac
 import streamlit as st
 from botocore.exceptions import ClientError
 
 from spyfish.config import config
 from spyfish.storage.s3_handler import S3Handler
+from utils import check_password
 
 # --- Helper to generate a presigned URL ---
 @st.cache_resource
@@ -18,23 +18,6 @@ def get_presigned_url(key: str, expires_in: int = 3600) -> str | None:
         st.error(f"AWS Error: {e}")
         return None
 
-def check_password():
-    """Returns True if the user entered the correct password."""
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-
-    if not st.session_state.password_correct:
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            app_password = st.secrets.get("APP_PASSWORD")
-
-            if app_password is not None and hmac.compare_digest(password, app_password):
-                st.session_state.password_correct = True
-                st.rerun()
-            else:
-                st.error("❌ Incorrect password")
-        return False
-    return True
 
 # --- MAIN APP ---
 if not check_password():

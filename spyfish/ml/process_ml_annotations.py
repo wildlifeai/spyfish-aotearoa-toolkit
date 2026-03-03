@@ -161,10 +161,11 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
             annotations_to_add.append({
                 "drop_id": drop_id,
                 "scientific_name": row["ScientificName"],
-                "timestamp": row["TimeOfMax"],
-                "count": row["MaxInterval"],
-                "source": "ml",
-                "confidence": row["ConfidenceAgreement"],
+                "time_of_max": row["TimeOfMax"],
+                "max_interval": row["MaxInterval"],
+                "annotated_by": "ml",
+                "interval_annotation": "",
+                "confidence_agreement": row["ConfidenceAgreement"],
                 "external_id": model_name
             })
 

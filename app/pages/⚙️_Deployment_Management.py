@@ -1,11 +1,10 @@
-import hmac
 import pandas as pd
 import streamlit as st
 import sqlite3
 from pathlib import Path
 from spyfish.config import config
 from spyfish.config import PipelineStatus
-from utils import sync_db_if_needed
+from utils import sync_db_if_needed, check_password
 
 # Constants for UI filtering state checks
 VIDEO_PRESENT_STATUSES = [
@@ -59,24 +58,6 @@ def load_deployment_status():
     except Exception as e:
         st.error(f"Error loading deployment DB: {e}")
         return None
-
-# --- Password protection ---
-def check_password():
-    """Returns True if the user entered the correct password."""
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-
-    if not st.session_state.password_correct:
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            app_password = st.secrets.get("APP_PASSWORD")
-            if app_password is not None and hmac.compare_digest(password, app_password):
-                st.session_state.password_correct = True
-                st.rerun()
-            else:
-                st.error("❌ Incorrect password")
-        return False
-    return True
 
 
 
@@ -136,6 +117,7 @@ def main():
     col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("🔄 Refresh DB", help="Read latest SQLite pipeline status"):
+            sync_db_if_needed.clear()
             st.rerun()
 
     st.divider()
@@ -157,55 +139,6 @@ def main():
     with m5: st.metric("ML Ann.", (deployment_df["MlAnnotations"] > 0).sum())
     with m6: st.metric("CitSci Ann.", (deployment_df["CitSciAnnotations"] > 0).sum())
     with m7: st.metric("Expert Ann.", (deployment_df["ExpertAnnotations"] > 0).sum())
-
-
-    st.divider()
-    st.subheader("🔄 Pipeline Stage Breakdown")
-    st.caption("How many deployments are at each step of the pipeline")
-
-    STAGE_ORDER = [
-        ("PENDING_ARRIVAL",      "⏳ Pending Arrival",       "Waiting for video to arrive in S3"),
-        ("READY_FOR_ML",         "🤖 Ready for ML",          "Video present, queued for ML inference"),
-        ("PROCESSING_ML",        "⚙️ Processing ML",         "ML inference actively running"),
-        ("ML_COMPLETE",          "✅ ML Complete",            "ML done, awaiting Zooniverse/Biigle"),
-        ("READY_FOR_CITSCI",     "🌍 Ready for CitSci",      "Queued for citizen science upload"),
-        ("PROCESSING_CITSCI",    "⚙️ Processing CitSci",    "CitSci workflow running"),
-        ("CITSCI_COMPLETE",      "✅ CitSci Complete",       "CitSci done, awaiting expert review"),
-        ("READY_FOR_EXPERT",     "🔬 Ready for Expert",      "Queued for expert annotation in Biigle"),
-        ("PROCESSING_EXPERT",    "⚙️ Processing Expert",    "Expert annotation in progress"),
-        ("EXPERT_COMPLETE",      "✅ Expert Complete",       "Expert done, syncing annotations"),
-        ("PIPELINE_COMPLETE",    "🎉 Pipeline Complete",     "Fully processed"),
-        ("ON_HOLD",              "⏸️ On Hold",               "Paused for investigation"),
-        ("EXCLUDED",             "🚫 Excluded",              "Bad deployment, not processing"),
-        ("ERROR",                "❌ Error",                 "Failed a pipeline step"),
-        ("MISSING_METADATA",     "⚠️ Missing Metadata",     "Required metadata absent"),
-    ]
-
-    status_counts = deployment_df["Status"].value_counts().to_dict()
-    rows = []
-    for status_key, label, description in STAGE_ORDER:
-        count = status_counts.get(status_key, 0)
-        if count == 0:
-            continue
-        pct = round(count / total * 100, 1) if total > 0 else 0
-        rows.append({"Stage": label, "Description": description, "Count": count, "% of Total": f"{pct}%"})
-
-    if rows:
-        st.dataframe(
-            pd.DataFrame(rows),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Count": st.column_config.ProgressColumn(
-                    "Count",
-                    min_value=0,
-                    max_value=total,
-                    format="%d",
-                ),
-            }
-        )
-    else:
-        st.info("No deployed records to display yet.")
 
 
     tab1, tab2, tab3 = st.tabs([ "📋 Deployments Overview", "📊 Survey Overview",  "🐟 Annotations Overview"])
@@ -250,6 +183,52 @@ def main():
             st.dataframe(survey_summary, width='stretch', hide_index=True)
 
     with tab1:
+        st.subheader("🔄 Pipeline Stage Breakdown")
+        st.caption("How many deployments are at each step of the pipeline")
+
+        STAGE_ORDER = [
+            ("PENDING_ARRIVAL",      "⏳ Pending Arrival",       "Waiting for video to arrive in S3"),
+            ("READY_FOR_ML",         "🤖 Ready for ML",          "Video present, queued for ML inference"),
+            ("PROCESSING_ML",        "⚙️ Processing ML",         "ML inference actively running"),
+            ("ML_COMPLETE",          "✅ ML Complete",            "ML done, awaiting Zooniverse/Biigle"),
+            ("READY_FOR_CITSCI",     "🌍 Ready for CitSci",      "Queued for citizen science upload"),
+            ("PROCESSING_CITSCI",    "⚙️ Processing CitSci",    "CitSci workflow running"),
+            ("CITSCI_COMPLETE",      "✅ CitSci Complete",       "CitSci done, awaiting expert review"),
+            ("READY_FOR_EXPERT",     "🔬 Ready for Expert",      "Queued for expert annotation in Biigle"),
+            ("PROCESSING_EXPERT",    "⚙️ Processing Expert",    "Expert annotation in progress"),
+            ("EXPERT_COMPLETE",      "✅ Expert Complete",       "Expert done, syncing annotations"),
+            ("PIPELINE_COMPLETE",    "🎉 Pipeline Complete",     "Fully processed"),
+            ("ON_HOLD",              "⏸️ On Hold",               "Paused for investigation"),
+            ("EXCLUDED",             "🚫 Excluded",              "Bad deployment, not processing"),
+            ("ERROR",                "❌ Error",                 "Failed a pipeline step"),
+            ("MISSING_METADATA",     "⚠️ Missing Metadata",     "Required metadata absent"),
+        ]
+
+        status_counts = deployment_df["Status"].value_counts().to_dict()
+        rows = []
+        for status_key, label, description in STAGE_ORDER:
+            count = status_counts.get(status_key, 0)
+            if count == 0:
+                continue
+            pct = round(count / total * 100, 1) if total > 0 else 0
+            rows.append({"Stage": label, "Description": description, "Count": count, "% of Total": f"{pct}%"})
+
+        if rows:
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                width='stretch',
+                column_config={
+                    "Count": st.column_config.ProgressColumn(
+                        "Count",
+                        min_value=0,
+                        max_value=total,
+                        format="%d",
+                    ),
+                }
+            )
+        else:
+            st.info("No deployed records to display yet.")
 
         # Filters
         status_order = [
@@ -309,10 +288,10 @@ def main():
             options=["None"] + sorted(deployment_df["DropID"].tolist()),
             index=0
         )
+        from spyfish.database.annotation_manager import AnnotationDatabaseManager
+        ann_db = AnnotationDatabaseManager()
 
         if selected_drop_id != "None":
-            from spyfish.database.annotation_manager import AnnotationDatabaseManager
-            ann_db = AnnotationDatabaseManager()
 
             # Load detailed annotations
             detailed_anns = ann_db.get_annotations_for_drop(selected_drop_id)
@@ -323,13 +302,13 @@ def main():
 
                 # Group by source for mini metrics
                 s_cols = st.columns(3)
-                with s_cols[0]: st.metric("Expert", len(ann_df[ann_df["source"] == "expert"]))
-                with s_cols[1]: st.metric("ML", len(ann_df[ann_df["source"] == "ml"]))
-                with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["source"] == "citsci"]))
+                with s_cols[0]: st.metric("Expert", len(ann_df[ann_df["annotated_by"] == "expert"]))
+                with s_cols[1]: st.metric("ML", len(ann_df[ann_df["annotated_by"] == "ml"]))
+                with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["annotated_by"] == "citsci"]))
 
                 st.dataframe(
-                    ann_df[["scientific_name", "timestamp", "count", "source", "confidence", "external_id"]],
-                    use_container_width=True,
+                    ann_df[["scientific_name", "time_of_max", "max_interval", "annotated_by", "interval_annotation", "confidence_agreement", "external_id"]],
+                    width='stretch',
                     hide_index=True
                 )
             else:
@@ -339,7 +318,7 @@ def main():
 
     # Download section
     st.header("📥 Export Data")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         csv = deployment_df.to_csv(index=False).encode('utf-8')
         st.download_button(
@@ -356,6 +335,28 @@ def main():
             file_name="deployments_needs_action.csv",
             mime="text/csv",
         )
+
+    with col3:
+        @st.cache_data(ttl=600)
+        def get_all_annotations_export():
+            from spyfish.database.annotation_manager import AnnotationDatabaseManager
+            adb = AnnotationDatabaseManager()
+            df = adb.get_all_annotations_export_df()
+            if df is None or df.empty:
+                return None
+            return df.to_csv(index=False).encode('utf-8')
+
+        annotations_csv = get_all_annotations_export()
+        if annotations_csv:
+            st.download_button(
+                label="Download All Annotations",
+                data=annotations_csv,
+                file_name="spyfish_all_annotations.csv",
+                mime="text/csv",
+                type="primary"
+            )
+        else:
+            st.button("Download All Annotations", help="No annotations available yet.")
 
 if __name__ == "__main__":
     main()

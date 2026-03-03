@@ -1,8 +1,8 @@
-import hmac
 import pandas as pd
 import streamlit as st
 
 from spyfish.database.manager import DatabaseManager
+from utils import check_password
 
 
 from utils import sync_db_if_needed
@@ -25,23 +25,6 @@ def load_file_differences():
     """Returns empty lists since File Presence is handled via pipeline Status."""
     return [], []
 
-# --- Password protection ---
-def check_password():
-    """Returns True if the user entered the correct password."""
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-
-    if not st.session_state.password_correct:
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            app_password = st.secrets.get("APP_PASSWORD")
-            if app_password is not None and hmac.compare_digest(password, app_password):
-                st.session_state.password_correct = True
-                st.rerun()
-            else:
-                st.error("❌ Incorrect password")
-        return False
-    return True
 
 # --- Display functions ---
 def display_error_summary(errors_df: pd.DataFrame):

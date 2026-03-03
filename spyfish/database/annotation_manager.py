@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from contextlib import closing
+import pandas as pd
 
 from spyfish.config import config
 
@@ -31,24 +32,25 @@ class AnnotationDatabaseManager:
         logging.info(f"Initializing Annotation DB at {self.db_path}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # Drop and recreate if schema needs adjustment during implementation
+            # Schema migration is complete — do not drop table again
             # cursor.execute('DROP TABLE IF EXISTS annotations')
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS annotations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     drop_id TEXT NOT NULL,
                     scientific_name TEXT,
-                    timestamp TEXT, -- HH:MM:SS
-                    count INTEGER DEFAULT 1,
-                    source TEXT NOT NULL, -- 'ml', 'expert', 'citsci'
-                    confidence REAL,
+                    time_of_max TEXT, -- HH:MM:SS
+                    max_interval INTEGER DEFAULT 1,
+                    annotated_by TEXT NOT NULL, -- e.g., 'expert'
+                    interval_annotation TEXT,
+                    confidence_agreement REAL,
                     external_id TEXT, -- e.g. Biigle annotation ID
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
-            # Index for fast aggregation by drop_id and source
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drop_source ON annotations(drop_id, source)')
+            # Index for fast aggregation by drop_id and source (annotated_by)
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drop_source ON annotations(drop_id, annotated_by)')
             conn.commit()
 
     def add_annotations(self, annotations: List[Dict[str, Any]]):
@@ -58,25 +60,25 @@ class AnnotationDatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.executemany('''
-                INSERT INTO annotations (drop_id, scientific_name, timestamp, count, source, confidence, external_id)
-                VALUES (:drop_id, :scientific_name, :timestamp, :count, :source, :confidence, :external_id)
+                INSERT INTO annotations (drop_id, scientific_name, time_of_max, max_interval, annotated_by, interval_annotation, confidence_agreement, external_id)
+                VALUES (:drop_id, :scientific_name, :time_of_max, :max_interval, :annotated_by, :interval_annotation, :confidence_agreement, :external_id)
             ''', annotations)
             conn.commit()
 
-    def clear_annotations(self, drop_id: str, source: str):
-        """Clears existing annotations for a given drop and source."""
+    def clear_annotations(self, drop_id: str, annotated_by: str):
+        """Clears existing annotations for a given drop and source (annotated_by)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND source = ?", (drop_id, source))
+            cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND annotated_by = ?", (drop_id, annotated_by))
             conn.commit()
 
-    def get_annotations_for_drop(self, drop_id: str, source: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_annotations_for_drop(self, drop_id: str, annotated_by: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve annotations for a drop, optionally filtered by source."""
         query = "SELECT * FROM annotations WHERE drop_id = ?"
         params = [drop_id]
-        if source:
-            query += " AND source = ?"
-            params.append(source)
+        if annotated_by:
+            query += " AND annotated_by = ?"
+            params.append(annotated_by)
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -84,13 +86,45 @@ class AnnotationDatabaseManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_counts_per_source(self, drop_id: str) -> Dict[str, int]:
-        """Get the total annotation count (sum of 'count' column) per source for a drop."""
+        """Get the total annotation count (sum of 'max_interval') per source ('annotated_by') for a drop."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT source, SUM(count) as total
+                SELECT annotated_by as source, SUM(max_interval) as total
                 FROM annotations
                 WHERE drop_id = ?
-                GROUP BY source
+                GROUP BY annotated_by
             ''', (drop_id,))
             return {row['source']: row['total'] for row in cursor.fetchall()}
+
+    def get_all_annotations_export_df(self) -> Optional[pd.DataFrame]:
+        """
+        Returns a DataFrame of all annotations formatted exactly for export/app display,
+        with columns: DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy,
+        IntervalAnnotation, ConfidenceAgreement.
+        """
+        import pandas as pd
+        with self.get_connection() as conn:
+            df = pd.read_sql_query("SELECT * FROM annotations", conn)
+
+        if df.empty:
+            return None
+
+        # Map internal schema strictly to requested export columns using the exact casing
+        df = df.rename(columns={
+            "drop_id": "DropID",
+            "scientific_name": "ScientificName",
+            "time_of_max": "TimeOfMax",
+            "max_interval": "MaxInterval",
+            "annotated_by": "AnnotatedBy",
+            "interval_annotation": "IntervalAnnotation",
+            "confidence_agreement": "ConfidenceAgreement"
+        })
+
+        # We drop any internal columns (like id, external_id, created_at) by strictly selecting
+        export_cols = [
+            "DropID", "ScientificName", "TimeOfMax", "MaxInterval",
+            "AnnotatedBy", "IntervalAnnotation", "ConfidenceAgreement"
+        ]
+
+        return df[export_cols]

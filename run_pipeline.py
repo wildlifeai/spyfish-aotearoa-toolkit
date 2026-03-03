@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from spyfish.config import config, PipelineStatus
-from spyfish.storage.db_sync import upload_db
+from spyfish.storage.db_sync import upload_db, upload_annotations_db
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.select_clips import select_maxn_clips_for_review
 from spyfish.extraction.extract_clips import extract_clips_from_selections
@@ -30,6 +30,7 @@ from spyfish.biigle.upload_frames import upload_frames_to_biigle
 from spyfish.ml.process_ml_annotations import run_post_ml
 from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.ingest import run_ingestion
+from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
 
 
 def main():
@@ -63,6 +64,7 @@ def main():
         logging.info("─── STEP 1: Ingesting metadata into pipeline database ───")
         try:
             run_ingestion()
+            ingest_legacy_expert_annotations()
         except Exception as e:
             logging.error(f"Step 1 FAILED: {e}")
             logging.error(traceback.format_exc())
@@ -212,6 +214,7 @@ def main():
 
     # Push final DB state to S3 for Streamlit apps to read
     upload_db()
+    upload_annotations_db()
 
     logging.info("=" * 60)
     logging.info(f"PIPELINE COMPLETE — {len(results)} drops processed")

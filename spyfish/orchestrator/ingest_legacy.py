@@ -40,10 +40,11 @@ def ingest_legacy_expert_annotations():
             annotations.append({
                 "drop_id": row["DropID"],
                 "scientific_name": scientific_name,
-                "timestamp": row["TimeOfMax"] if not pd.isna(row["TimeOfMax"]) else None,
-                "count": row["MaxInterval"] if not pd.isna(row["MaxInterval"]) else 0,
-                "source": "expert",
-                "confidence": confidence,
+                "time_of_max": row["TimeOfMax"] if not pd.isna(row["TimeOfMax"]) else None,
+                "max_interval": row["MaxInterval"] if not pd.isna(row["MaxInterval"]) else 0,
+                "annotated_by": "expert",
+                "interval_annotation": row.get("IntervalAnnotation", None) if not pd.isna(row.get("IntervalAnnotation")) else None,
+                "confidence_agreement": confidence,
                 "external_id": "legacy"  # distinguishes these from Biigle-synced expert annotations
             })
 
@@ -51,7 +52,7 @@ def ingest_legacy_expert_annotations():
         ann_db = AnnotationDatabaseManager()
         # Clear only legacy expert annotations to avoid wiping Biigle-synced expert data
         with ann_db.get_connection() as conn:
-            conn.execute("DELETE FROM annotations WHERE source = 'expert' AND external_id = 'legacy'")
+            conn.execute("DELETE FROM annotations WHERE annotated_by = 'expert' AND external_id = 'legacy'")
 
         ann_db.add_annotations(annotations)
         logging.info(f"Successfully ingested {len(annotations)} expert annotations into spyfish_annotations.db")
@@ -76,7 +77,7 @@ def sync_annotations_to_main_db(drop_ids: Optional[List[str]] = None):
     main_db = DatabaseManager()
 
     query = '''
-        SELECT drop_id, source, SUM(count) as total
+        SELECT drop_id, annotated_by as source, SUM(max_interval) as total
         FROM annotations
     '''
     params = []
@@ -85,7 +86,7 @@ def sync_annotations_to_main_db(drop_ids: Optional[List[str]] = None):
         query += f" WHERE drop_id IN ({placeholders})"
         params.extend(drop_ids)
 
-    query += " GROUP BY drop_id, source"
+    query += " GROUP BY drop_id, annotated_by"
 
     with ann_db.get_connection() as conn:
         cursor = conn.cursor()

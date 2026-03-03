@@ -1,3 +1,4 @@
+import re
 import logging
 import pandas as pd
 from typing import List, Dict, Any
@@ -7,11 +8,17 @@ from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.orchestrator.ingest_legacy import sync_annotations_to_main_db
 from spyfish.config import PipelineStatus, config
+from spyfish.utils import seconds_to_time
 
 def sync_biigle_annotations():
     """
     Checks all deployments with a biigle_volume_id that are not yet complete.
     Downloads reports, checks for 'Done' label, and ingests annotations.
+
+    Biigle output columns: 'annotation_label_id', 'label_id', 'label_name',
+    'label_hierarchy','user_id', 'firstname', 'lastname', 'image_id', 'filename',
+    'image_longitude', 'image_latitude', 'shape_id', 'shape_name', 'points',
+    'attributes', 'annotation_id', 'created_at', 'source_file'
     """
     logging.info("Starting Biigle annotation sync...")
 
@@ -59,71 +66,84 @@ def sync_biigle_annotations():
                 report_type = config.biigle_annotation_report_type_video
             else:
                 report_type = config.biigle_annotation_report_type_images
-            report_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
+            fish_annotations_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
 
-            if report_df.empty:
+            if fish_annotations_df.empty:
                 logging.info(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")
                 db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 continue
 
-            # 4. Find the label column
-            label_col = None
-            for col in ['label_name', 'label', 'Label', 'Scientific Name', 'scientific_name']:
-                if col in report_df.columns:
-                    label_col = col
-                    break
 
-            if not label_col:
-                logging.warning(f"  Could not find label column in report for {drop_id}. Columns: {list(report_df.columns)}")
-                continue
+            label_col = "label_name"
+            fname_col = "filename"
 
-            # Find the filename column
-            fname_col = None
 
-            # TODO this is sus, fix
-            for col in ['image_filename', 'filename', 'Filename', 'Image filename', 'Image Filename']:
-                if col in report_df.columns:
-                    fname_col = col
-                    break
-
-            if not fname_col:
-                logging.warning(f"  Could not find filename column in report for {drop_id}. Columns: {list(report_df.columns)}")
-
-            fish_annotations = report_df
-
-            annotations_to_add = []
-            for _, row in fish_annotations.iterrows():
+            # Aggregate by (timestamp, scientific_name) to sum counts
+            aggregated_annotations = {}
+            for _, row in fish_annotations_df.iterrows():
                 timestamp = None
                 if fname_col and fname_col in row:
                     fname = str(row[fname_col])
-                    if '__frame_' in fname:
-                        try:
-                            # Parse out time from filename like: "KSF_20240124...__frame_12.345s.jpg"
-                            secs_str = fname.split('__frame_')[-1].split('s.jpg')[0]
-                            secs = float(secs_str)
-                            h = int(secs // 3600)
-                            m = int((secs % 3600) // 60)
-                            s = int(secs % 60)
-                            ms = int((secs % 1) * 1000)
-                            timestamp = f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-                        except (ValueError, IndexError) as e:
-                            logging.warning(f"Could not parse timestamp from filename '{fname}': {e}")
 
-                annotations_to_add.append({
-                    "drop_id": drop_id,
-                    "scientific_name": row[label_col],
-                    "timestamp": timestamp,
-                    "count": 1,
-                    "source": "expert",
-                    "confidence": 1.0,
-                    "external_id": str(row.get('id', ''))
-                })
+                    try:
+
+
+                        secs = None
+                        # Image frame formatting from biigle test
+                        if '__frame_' in fname:
+                            match = re.search(r'__frame_([\d\.]+)s\.jpg', fname)
+                            if match:
+                                secs = float(match.group(1))
+                        # Video clip format from biigle video annotations
+                        elif '_clip_' in fname:
+
+                            match = re.search(r'_clip_([\d\.]+)s\.', fname)
+                            if match:
+                                secs = float(match.group(1))
+
+                            if 'frames' in row:
+                                frame_str = str(row['frames']).strip("[]")
+                                if frame_str and frame_str != 'nan':
+                                    secs += float(frame_str)
+
+
+                        if secs is not None:
+                            timestamp = seconds_to_time(secs)
+                    except (ValueError, IndexError) as e:
+                        logging.warning(f"Could not parse timestamp from filename '{fname}': {e}")
+
+                species = str(row.get(label_col, 'unknown_species')).strip()
+                # Clean up "Kina - Evechinus chloroticus" to "Evechinus chloroticus"
+                if " - " in species:
+                    species = species.split(" - ")[1]
+
+                # Use empty string instead of None to allow sorting
+                sortable_time = timestamp or ""
+
+                key = (sortable_time, species)
+                if key not in aggregated_annotations:
+                    aggregated_annotations[key] = {
+                        "drop_id": drop_id,
+                        "scientific_name": species,
+                        "time_of_max": timestamp,
+                        "max_interval": 0,
+                        "annotated_by": "expert",
+                        "interval_annotation": "",
+                        "confidence_agreement": 1.0,
+                        "external_id": str(row.get('annotation_id', row.get('id', ''))) # Prefer video annotation ID, fallback to image annotation ID
+                    }
+
+                aggregated_annotations[key]["max_interval"] += 1
+
+            # Convert to list and sort by drop_id (already same) and time_of_max
+            annotations_to_add = list(aggregated_annotations.values())
+            annotations_to_add.sort(key=lambda x: (x["drop_id"], x["time_of_max"] or ""))
 
             if annotations_to_add:
                 # Clear previous syncs for this drop (using a distinct connection to avoid locks)
                 with ann_db.get_connection() as conn:
                     cursor = conn.cursor()
-                    cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND source = 'expert' AND external_id IS NOT NULL", (drop_id,))
+                    cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND annotated_by = 'expert' AND external_id IS NOT NULL", (drop_id,))
                     conn.commit()
 
                 # Add new annotations
