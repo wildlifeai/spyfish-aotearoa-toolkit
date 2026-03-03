@@ -94,8 +94,8 @@ def upload_clips_to_zooniverse(
             "#DropID": row.get("DropID", drop_id),
             "#SelectionReason": row.get("SelectionReason", ""),
             "#TargetSpecies": row.get("TargetSpecies", ""),
-            "#MaxCount": row.get("MaxCount", ""),
-            "#Confidence": row.get("Confidence", ""),
+            "#MaxInterval": row.get("MaxInterval", ""),
+            "#ConfidenceAgreement": row.get("ConfidenceAgreement", ""),
             "#StartTime": row.get("StartTime", ""),
             "#EndTime": row.get("EndTime", ""),
             "#SamplingStart": row.get("SamplingStart", 0),
@@ -111,3 +111,68 @@ def upload_clips_to_zooniverse(
 
     subject_set.add(new_subjects)
     logging.info(f"Uploaded {len(new_subjects)}/{n} clips to subject set '{set_name}'.")
+
+def upload_frames_to_zooniverse(
+    frames_df: pd.DataFrame,
+    subject_set_name: str | None = None,
+) -> None:
+    """
+    Uploads extracted frames to Zooniverse as a new subject set.
+
+    Reads frame paths and metadata from frames_df (produced by extract_frames_from_selections).
+    DropID and FramePath are read from the DataFrame directly.
+    """
+
+    if not all([config.zooniverse_user, config.zooniverse_password, config.zooniverse_project_id]):
+        raise EnvironmentError(
+            "Missing Zooniverse credentials. Set ZOONIVERSE_USER, ZOONIVERSE_PASSWORD, "
+            "and ZOONIVERSE_PROJECT_ID in your .env file."
+        )
+
+    # Filter to frames that were actually extracted
+    uploadable = frames_df[frames_df["FramePath"].notna()].copy()
+    if uploadable.empty:
+        logging.error("No frames available to upload (FramePath is empty for all rows).")
+        return
+
+    drop_id = uploadable["DropID"].iloc[0]
+    n = len(uploadable)
+
+    logging.info(f"Connecting to Zooniverse as {config.zooniverse_user}...")
+    Panoptes.connect(username=config.zooniverse_user, password=config.zooniverse_password)
+    zoo_project = Project.find(config.zooniverse_project_id)
+
+    set_name = subject_set_name or f"spyfish_{drop_id}_{n}images"
+    subject_set = SubjectSet()
+    subject_set.links.project = zoo_project
+    subject_set.display_name = set_name
+    subject_set.save()
+    logging.info(f"Subject set created: '{set_name}'")
+
+    new_subjects = []
+    for _, row in uploadable.iterrows():
+        frame_path = Path(row["FramePath"])
+        if not frame_path.exists():
+            logging.warning(f"Frame file missing, skipping: {frame_path.name}")
+            continue
+        # Metadata strictly mirrors standardized selections outputs. Legacy selections are handled separately.
+        meta = {
+            "#DropID": row.get("DropID", drop_id),
+            "#SelectionReason": row.get("SelectionReason", ""),
+            "#TargetSpecies": row.get("TargetSpecies", ""),
+            "#MaxInterval": row.get("MaxInterval", ""),
+            "#ConfidenceAgreement": row.get("ConfidenceAgreement", ""),
+            "#TimeOfMaxnMs": row.get("TimeOfMaxnMs", ""),
+            "#SamplingStart": row.get("SamplingStart", 0),
+        }
+
+        subject = Subject()
+        subject.links.project = zoo_project
+        subject.add_location(str(frame_path))
+        subject.metadata.update(meta)
+        subject.save()
+        new_subjects.append(subject)
+        logging.info(f"  Saved: {frame_path.name} ({row.get('SelectionReason', '')})")
+    logging.warning(f"This is what the rows have {uploadable.columns} check if metadata is good {meta}")
+    subject_set.add(new_subjects)
+    logging.info(f"Uploaded {len(new_subjects)}/{n} frames to subject set '{set_name}'.")

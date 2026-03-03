@@ -72,8 +72,8 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
     with col6: st.metric("CitSci Ann.", (df["CitSciAnnotations"] > 0).sum())
     with col7: st.metric("Expert Ann.", (df["ExpertAnnotations"] > 0).sum())
 
-
-    show_annotations = st.checkbox("Show Annotation Columns", key=f"show_ann_{title}", value=False)
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        show_annotations = st.checkbox("Show Annotation Columns", key=f"show_ann_{title}", value=False)
 
     display_cols = ["DropID", "SurveyID", "Status", "Complete"]
     if show_annotations:
@@ -207,7 +207,7 @@ def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
         "Use filters above to narrow down results"
     )
 
-def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
+def render_detailed_annotation_tab(deployment_df: pd.DataFrame, ann_db):
     st.header("🔍 Detailed Annotation View")
     st.caption("Select a deployment to view individual annotation records from the annotations database")
 
@@ -216,7 +216,6 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
         options=["None"] + sorted(deployment_df["DropID"].tolist()),
         index=0
     )
-    ann_db = AnnotationDatabaseManager()
 
     if selected_drop_id != "None":
         # Load detailed annotations
@@ -241,9 +240,8 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
             st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")
 
 @st.cache_data(ttl=600)
-def get_all_annotations_export():
-    adb = AnnotationDatabaseManager()
-    df = adb.get_all_annotations_export_df()
+def get_all_annotations_export(_adb):
+    df = _adb.get_all_annotations_export_df()
     if df is None or df.empty:
         return None
     return df.to_csv(index=False).encode('utf-8')
@@ -267,6 +265,7 @@ def main():
     if deployment_df is None: return
 
     render_overview(deployment_df)
+    ann_db = AnnotationDatabaseManager()
 
     tab1, tab2, tab3 = st.tabs(["📋 Deployments Overview", "📊 Survey Overview", "🐟 Annotations Overview"])
 
@@ -277,7 +276,7 @@ def main():
         render_pipeline_stage_tab(deployment_df)
 
     with tab3:
-        render_detailed_annotation_tab(deployment_df)
+        render_detailed_annotation_tab(deployment_df, ann_db)
 
     st.divider()
 
@@ -302,7 +301,7 @@ def main():
         )
 
     with col3:
-        annotations_csv = get_all_annotations_export()
+        annotations_csv = get_all_annotations_export(ann_db)
         if annotations_csv:
             st.download_button(
                 label="Download All Annotations",

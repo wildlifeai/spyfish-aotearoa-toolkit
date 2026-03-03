@@ -60,7 +60,7 @@ def extract_clips_from_selections(
         clip_duration = clip_end_relative - clip_start_relative
         seek_seconds = sampling_start + clip_start_relative
 
-        out_filename = f"{drop_id}_{int(clip_start_relative):05d}s_{int(clip_duration):02d}s.mp4"
+        out_filename = f"{drop_id}_{int(clip_duration):02d}s_{int(clip_start_relative):05d}s.mp4"
         out_path = Path(output_dir) / out_filename
 
         cmd = [
@@ -75,7 +75,7 @@ def extract_clips_from_selections(
             str(out_path),
         ]
 
-        logging.info(f"  [{idx+1}/{n}] {seek_seconds:.1f}s → {out_filename}")
+        logging.info(f"  [{idx+1}/{len(df)}] {seek_seconds:.1f}s → {out_filename}")
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             clip_paths.append(str(out_path))

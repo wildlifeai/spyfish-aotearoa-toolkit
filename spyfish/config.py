@@ -337,6 +337,10 @@ class ConfigWrapper:
         return self._yaml_config.get("validation_rules", {})
 
     @property
+    def zooniverse_extraction(self):
+        return self._yaml_config.get("zooniverse_extraction", {})
+
+    @property
     def ml_inference(self):
         return self._yaml_config.get("ml_inference", {})
 

@@ -45,7 +45,9 @@ def _map_biigle_to_spyfish_schema(row: pd.Series, label_col: str, drop_id: str, 
     species = str(row.get(label_col, 'unknown_species')).strip()
     # Clean up "Kina - Evechinus chloroticus" to "Evechinus chloroticus"
     if " - " in species:
-        species = species.split(" - ")[1]
+        parts = species.split(" - ", 1)
+        if len(parts) == 2:
+            species = parts[1]
 
     # Use empty string instead of None to allow sorting
     sortable_time = timestamp or ""

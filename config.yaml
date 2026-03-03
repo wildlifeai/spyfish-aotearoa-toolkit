@@ -89,6 +89,20 @@ ml_inference:
     interval_seconds: 10
     annotated_by_prefix: "ml"
 
+zooniverse_extraction:
+  binary_strategy:
+    maxn_clips: 10
+    confusing_clips: 20
+    empty_clips: 5
+    start_clips: 2
+    temporal_spacing_seconds: 10
+  multiclass_strategy:
+    per_species_maxn_clips: 5
+    per_species_confusing_clips: 10
+    per_video_empty_clips: 3
+    per_video_start_clips: 2
+    temporal_spacing_seconds: 10
+
 orchestrator:
   is_test_run: true
   is_local: true

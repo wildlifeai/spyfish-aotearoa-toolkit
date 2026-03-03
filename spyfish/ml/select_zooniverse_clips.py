@@ -37,29 +37,34 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
 
     def add_interval(row, reason, species="All"):
         interval_start = row['TimeSeconds']
-
         # In Spyfish, intervals are generally bucketed to the 10s mark.
         # But if TimeOfMax is exactly 00:00:15, we want the bucket that contains it (00:00:10 to 00:00:20)
         # So we round down to the nearest 10s bucket to get the start of the clip.
-        clip_start_sec = (interval_start // 10) * 10
+
+        # Configurable clip length, defaulting to 10 seconds
+        clip_length = config.get('zooniverse_extraction', {}).get('clip_length_seconds', 10)
+
+        # Round down to the nearest bucket to get the start of the clip.
+        clip_start_sec = (interval_start // clip_length) * clip_length
 
         if clip_start_sec in selected_intervals:
-            return False # Already selected this 10s clip for another reason
+            return False # Already selected this clip for another reason
 
         selected_intervals.add(clip_start_sec)
         selections_rows.append({
             'DropID': drop_id,
             'StartTime': seconds_to_time(clip_start_sec),
-            'EndTime': seconds_to_time(clip_start_sec + 10),
+            'EndTime': seconds_to_time(clip_start_sec + clip_length),
             'TargetSpecies': species,
             'SelectionReason': reason,
-            'MaxCount': row['MaxInterval'],
-            'Confidence': row['ConfidenceAgreement']
+            'MaxInterval': row['MaxInterval'],
+            'ConfidenceAgreement': row['ConfidenceAgreement'],
+            'TimeOfMaxnMs': row['TimeSeconds'] # Required for exact frame extraction
         })
         return True
 
-    def check_temporal_spacing(candidate_sec, spacing_seconds, current_selections):
-        candidate_clip_start = (candidate_sec // 10) * 10
+    def check_temporal_spacing(candidate_sec, spacing_seconds, current_selections, clip_length):
+        candidate_clip_start = (candidate_sec // clip_length) * clip_length
         for s in current_selections:
             if abs(candidate_clip_start - s) < spacing_seconds:
                 return False
@@ -80,7 +85,8 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
         n_confusing = strat.get('confusing_clips', 20)
         n_empty = strat.get('empty_clips', 5)
         n_start = strat.get('start_clips', 2)
-        spacing = strat.get('temporal_spacing_seconds', 30)
+        clip_length = z_config.get('clip_length_seconds', 10)
+        spacing = strat.get('temporal_spacing_seconds', clip_length)
 
         # 1. Absolute MaxN
         top_maxn = df.nlargest(n_maxn, 'MaxInterval')
@@ -97,7 +103,7 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
             # (It's OK if a confusing clip is near a MaxN clip)
             # Actually, per prompt: "spaced at least 30s apart, the ones that are not in MaxN"
             # We check the master `selected_intervals` so it doesn't overlap at all.
-            if check_temporal_spacing(row['TimeSeconds'], spacing, selected_intervals):
+            if check_temporal_spacing(row['TimeSeconds'], spacing, selected_intervals, clip_length):
                 if add_interval(row, reason="Confusing (High count, low conf)", species=row['ScientificName']):
                     added_confusing += 1
 
@@ -124,7 +130,8 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
         n_confusing_per_sp = strat.get('per_species_confusing_clips', 10)
         n_empty = strat.get('per_video_empty_clips', 3)
         n_start = strat.get('per_video_start_clips', 2)
-        spacing = strat.get('temporal_spacing_seconds', 30)
+        clip_length = z_config.get('clip_length_seconds', 10)
+        spacing = strat.get('temporal_spacing_seconds', clip_length)
 
         # Iterate per species
         for species in unique_species:
@@ -141,7 +148,7 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
             for _, row in conf_sp_df.iterrows():
                 if added_conf >= n_confusing_per_sp:
                     break
-                if check_temporal_spacing(row['TimeSeconds'], spacing, selected_intervals):
+                if check_temporal_spacing(row['TimeSeconds'], spacing, selected_intervals, clip_length):
                     if add_interval(row, reason=f"Confusing ({species})", species=species):
                         added_conf += 1
 
@@ -181,7 +188,7 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
         selections_df['sort_helper'] = selections_df['StartTime'].apply(time_to_seconds)
         selections_df = selections_df.sort_values('sort_helper').drop(columns=['sort_helper'])
     else:
-        selections_df = pd.DataFrame(columns=['DropID', 'StartTime', 'EndTime', 'TargetSpecies', 'SelectionReason', 'MaxCount', 'Confidence'])
+        selections_df = pd.DataFrame(columns=['DropID', 'StartTime', 'EndTime', 'TargetSpecies', 'SelectionReason', 'MaxInterval', 'ConfidenceAgreement', 'TimeOfMaxnMs'])
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
     selections_df.to_csv(output_selections_path, index=False)
@@ -198,7 +205,7 @@ def main():
     annotations_dir = repo_root / config.local_manifest_dir_path
 
     input_maxn = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
-    output_selections = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
+    output_selections = str(annotations_dir / f"{drop_id}_frames_selection.csv")
 
     process_zooniverse_clips(input_maxn, output_selections, drop_id, config)
 
