@@ -161,14 +161,65 @@ class BiigleHandler:
         project_id = project_id or config.biigle_project_id
         try:
             pending = self.create_pending_volume(project_id, media_type)
+            pending_id = pending["id"]
             volume_info = self.setup_volume_with_files(
-                pending["id"], volume_name, s3_url, files
+                pending_id, volume_name, s3_url, files
             )
             logging.info(f"Created volume '{volume_name}' with {len(files)} files")
+
+            # The pending volume ID is temporary — resolve the real (finalized) volume ID
+            # by looking it up in the project's volume list.
+            real_id = self.resolve_real_volume_id(volume_name, project_id)
+            if real_id and real_id != pending_id:
+                logging.info(f"Resolved real volume ID: {pending_id} (pending) → {real_id} (finalized)")
+                volume_info["id"] = real_id
+            elif not real_id:
+                logging.warning(
+                    f"Could not resolve real volume ID for '{volume_name}'. "
+                    f"Storing pending ID {pending_id} — sync checks may fail until Biigle processes the volume."
+                )
+
             return volume_info
         except Exception as e:
             logging.error(f"Failed to create volume from S3 files: {e}")
             raise
+
+    def resolve_real_volume_id(
+        self, volume_name: str, project_id: Optional[int] = None, max_tries: int = 10, poll_interval: float = 3.0
+    ) -> Optional[int]:
+        """
+        After creating a pending volume, Biigle assigns the finalized volume a different ID.
+        This method polls the project's real volumes list until it finds one matching
+        `volume_name`, returning the real volume ID.
+
+        Args:
+            volume_name: The name used when creating the volume.
+            project_id: The Biigle project to search in.
+            max_tries: How many times to poll before giving up.
+            poll_interval: Seconds between each attempt.
+
+        Returns:
+            The real volume ID, or None if not found within the retry window.
+        """
+        project_id = project_id or config.biigle_project_id
+        for attempt in range(1, max_tries + 1):
+            try:
+                volumes = self.get_volumes(project_id)
+                for v in volumes:
+                    if v.get("name") == volume_name:
+                        return v["id"]
+            except Exception as e:
+                logging.warning(f"Attempt {attempt}/{max_tries}: failed to list volumes — {e}")
+
+            if attempt < max_tries:
+                logging.info(
+                    f"Volume '{volume_name}' not yet visible in project list. "
+                    f"Attempt {attempt}/{max_tries}. Retrying in {poll_interval}s..."
+                )
+                time.sleep(poll_interval)
+
+        logging.warning(f"Could not find finalized volume '{volume_name}' after {max_tries} attempts.")
+        return None
 
     def build_s3_url(self, s3_path: str, disk_id: Optional[int] = None) -> str:
         """
@@ -347,3 +398,102 @@ class BiigleHandler:
             f"{len(csv_dict)} CSV(s), {len(df)} rows."
         )
         return df
+
+    def get_volume_info(self, volume_id: int) -> Dict[str, Any]:
+        """
+        Get metadata for a single volume, including its media_type ('image' or 'video').
+        Uses GET /api/v1/volumes/{id}
+        """
+        try:
+            response = self.api.get(f"volumes/{volume_id}")
+            return response.json()
+        except Exception as e:
+            logging.error(f"Failed to get info for volume {volume_id}: {e}")
+            raise
+
+    def get_volume_file_ids(self, volume_id: int) -> List[int]:
+        """
+        Get the list of file IDs (video or image) for a volume.
+        Uses GET /api/v1/volumes/{id}/files
+        """
+        try:
+            response = self.api.get(f"volumes/{volume_id}/files")
+            file_ids = response.json()
+            logging.info(f"Volume {volume_id} has {len(file_ids)} file(s).")
+            return file_ids
+        except Exception as e:
+            logging.error(f"Failed to get files for volume {volume_id}: {e}")
+            raise
+
+    def get_video_labels(self, video_id: int) -> List[Dict[str, Any]]:
+        """
+        Get whole-video labels for a specific video file.
+        These are the "Done" / status labels applied to the entire video (not individual annotations).
+        Uses GET /api/v1/videos/{id}/labels
+        """
+        try:
+            response = self.api.get(f"videos/{video_id}/labels")
+            labels = response.json()
+            logging.info(f"Video {video_id} has {len(labels)} video label(s).")
+            return labels
+        except Exception as e:
+            logging.error(f"Failed to get labels for video {video_id}: {e}")
+            raise
+
+    def get_image_labels(self, image_id: int) -> List[Dict[str, Any]]:
+        """
+        Get whole-image labels for a specific image file.
+        Uses GET /api/v1/images/{id}/labels
+        """
+        try:
+            response = self.api.get(f"images/{image_id}/labels")
+            labels = response.json()
+            logging.info(f"Image {image_id} has {len(labels)} image label(s).")
+            return labels
+        except Exception as e:
+            logging.error(f"Failed to get labels for image {image_id}: {e}")
+            raise
+
+    def volume_is_done(self, volume_id: int):
+        """
+        Check whether the first file in a volume has a whole-file label
+        indicating it is done. The done labels are configured via
+        config.biigle_done_labels (defaults: 'Done Volume' and 'Done QA Review').
+        Uses the volume's media_type (from its metadata) to call the correct label endpoint.
+
+        Returns:
+            Tuple of (is_done: bool, media_type: str) where media_type is 'image' or 'video'.
+        """
+        done_labels = config.biigle_done_labels
+
+        try:
+            # Get media_type directly from volume metadata — no guessing needed
+            volume_info = self.get_volume_info(volume_id)
+            media_type = volume_info.get("media_type", "image")
+
+            file_ids = self.get_volume_file_ids(volume_id)
+            if not file_ids:
+                logging.warning(f"Volume {volume_id} has no files.")
+                return False, media_type
+
+            # Only the first file has the status labels
+            first_id = file_ids[0]
+            get_labels = self.get_image_labels if media_type == "image" else self.get_video_labels
+
+            try:
+                labels = get_labels(first_id)
+            except Exception as e:
+                logging.warning(f"Could not get {media_type} labels for file {first_id}: {e}")
+                return False, media_type
+
+            # Both labels must be present (exact match, as they appear in Biigle)
+            found_labels = {label_entry.get("label", {}).get("name", "") for label_entry in labels}
+            if all(lbl in found_labels for lbl in done_labels):
+                logging.info(f"All done labels {done_labels} found on {media_type} {first_id} in volume {volume_id}.")
+                return True, media_type
+
+            return False, media_type
+
+        except Exception as e:
+            logging.error(f"Error checking done status for volume {volume_id}: {e}")
+            raise

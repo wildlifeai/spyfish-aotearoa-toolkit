@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from spyfish.config import config
+from spyfish.config import PipelineStatus
 
 
 def delete_file(filename: str):
@@ -98,3 +99,62 @@ def write_data_to_file(data_str: str, output_path: str) -> None:
     except (IOError, OSError) as e:
         logging.error(f"Failed to write file paths to {output_path}: {e}")
         raise
+
+def time_to_seconds(time_str: str) -> float:
+    """Converts a time string (HH:MM:SS or HH:MM:SS.mmm) to seconds."""
+    if pd.isna(time_str):
+        return 0.0
+    parts = str(time_str).split(':')
+    if len(parts) == 3:
+        h = int(parts[0])
+        m = int(parts[1])
+        s = float(parts[2])
+        return h * 3600.0 + m * 60.0 + s
+    elif len(parts) == 2:
+        m = int(parts[0])
+        s = float(parts[1])
+        return m * 60.0 + s
+    else:
+        return float(parts[0])
+
+def seconds_to_time(seconds: float) -> str:
+    """Converts seconds to HH:MM:SS.mmm format."""
+    if pd.isna(seconds):
+        return "00:00:00.000"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+        if s == 60:
+            s = 0
+            m += 1
+            if m == 60:
+                m = 0
+                h += 1
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+def get_survey_summary(deployment_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregates deployment data to summarize status and progress by Survey."""
+    if deployment_df.empty:
+        return pd.DataFrame()
+
+    survey_summary = deployment_df.groupby("SurveyID").agg(
+        TotalDeployments=("DropID", "nunique"),
+        CompleteDeployments=("Complete", "sum"),
+        BadDeployments=("IsBadDeployment", "sum"),
+        NeedsAction=("NeedsAction", "sum"),
+        VideosPresent=("Status", lambda x: x.isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()),
+        MLAnnotated=("MlAnnotations", lambda x: (x > 0).sum()),
+        CitSciAnnotated=("CitSciAnnotations", lambda x: (x > 0).sum()),
+        ExpertAnnotated=("ExpertAnnotations", lambda x: (x > 0).sum())
+    ).reset_index()
+
+    # Calculate percentages cleanly: (Bad + Expert) / Total
+    survey_summary["CompletionPct"] = (
+        ((survey_summary["BadDeployments"] + survey_summary["ExpertAnnotated"]) / survey_summary["TotalDeployments"]) * 100
+    ).round(1).astype(str) + "%"
+
+    return survey_summary

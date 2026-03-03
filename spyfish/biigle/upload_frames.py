@@ -166,21 +166,7 @@ def upload_frames_to_biigle(
     # Step 3: Save volume_id to database
     if volume_id:
         db = DatabaseManager()
-        deployment = db.get_deployment(drop_id)
-        if deployment:
-            db.add_or_update_deployment(
-                drop_id=drop_id,
-                status=deployment["status"],
-                video_path=deployment["video_path"],
-                is_bad_deployment=bool(deployment["is_bad_deployment"]),
-                error_message=deployment["error_message"],
-                sampling_start=deployment["sampling_start"],
-                sampling_end=deployment["sampling_end"],
-                ml_annotations=deployment["ml_annotations"],
-                citsci_annotations=deployment["citsci_annotations"],
-                expert_annotations=deployment["expert_annotations"],
-                biigle_volume_id=str(volume_id)
-            )
-            logging.info(f"Saved Biigle volume_id {volume_id} to database for {drop_id}")
+        db.update_biigle_volume_id(drop_id, volume_id)
+        logging.info(f"Saved Biigle volume_id {volume_id} to database for {drop_id}")
 
     return volume_info

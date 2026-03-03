@@ -173,7 +173,6 @@ db/
 *.db
 
 .DS_Store
-.snakemake/
 notes/
 kso/
 mock_model/

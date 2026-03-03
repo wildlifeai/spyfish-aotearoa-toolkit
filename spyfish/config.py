@@ -133,6 +133,11 @@ class ConfigWrapper:
         return self._yaml_config.get("biigle", {}).get("annotation_report_type_images", 3)
 
     @property
+    def biigle_done_labels(self) -> list:
+        """Whole-file labels that indicate a volume is ready to be ingested (e.g. 'Done Volume', 'Done QA Review')."""
+        return self._yaml_config.get("biigle", {}).get("done_labels", ["Done Volume", "Done QA Review"])
+
+    @property
     def biigle_volume_report_type(self) -> int:
         return self._yaml_config.get("biigle", {}).get("volume_report_type", 10)
 
@@ -342,19 +347,11 @@ class ConfigWrapper:
     @property
     def test_drops(self):
         """Returns list of (drop_id, drop_key, sampling_start, sampling_end) tuples."""
-        drops = []
-        ml = self.ml_inference
-        i = 1
-        while True:
-            drop_id = ml.get(f"test_drop_id_{i}")
-            drop_key = ml.get(f"test_drop_key_{i}")
-            if not drop_id:
-                break
-            sampling_start = ml.get(f"test_drop_sampling_start_{i}")
-            sampling_end = ml.get(f"test_drop_sampling_end_{i}")
-            drops.append((drop_id, drop_key, sampling_start, sampling_end))
-            i += 1
-        return drops
+        try:
+            from spyfish.test_setup import TEST_DROPS
+            return TEST_DROPS
+        except ImportError:
+            return []
 
     @property
     def model_path(self):
@@ -381,12 +378,12 @@ class ConfigWrapper:
         return self.ml_inference.get("extraction", {}).get("interval_seconds", 10)
 
     @property
-    def mock_video_dir(self):
-        return self.orchestrator.get("mock_video_dir", "mock_media")
-
-    @property
     def orchestrator(self):
         return self._yaml_config.get("orchestrator", {})
+
+    @property
+    def mock_video_dir(self):
+        return self.orchestrator.get("mock_video_dir", "mock_media")
 
     @property
     def is_test_run(self):
@@ -417,20 +414,20 @@ class ConfigWrapper:
         return self.orchestrator.get("s3_annotations_dir", "process_files/annotations")
 
     @property
-    def local_logs_dir(self):
-        return self.orchestrator.get("local_logs_dir", "process_files/logs")
-
-    @property
-    def s3_annotations_dir(self):
-        return self.orchestrator.get("s3_annotations_dir", "process_files/annotations")
-
-    @property
     def nesi_video_dir(self):
         return self.orchestrator.get("nesi_video_dir")
 
     @property
     def s3_db_key(self) -> str:
         return self.orchestrator.get("s3_db_key", "process_files/spyfish_pipeline.db")
+
+    @property
+    def annotations_db_path(self) -> Path:
+        return self.project_root / "process_files" / "spyfish_annotations.db"
+
+    @property
+    def s3_annotations_db_key(self) -> str:
+        return "process_files/spyfish_annotations.db"
 
 config = ConfigWrapper()
 
@@ -456,3 +453,28 @@ class PipelineStatus:
     PROCESSING_EXPERT = "PROCESSING_EXPERT"
     EXPERT_COMPLETE = "EXPERT_COMPLETE"
     PIPELINE_COMPLETE = "PIPELINE_COMPLETE"
+
+    VIDEO_PRESENT_STATUSES = [
+        READY_FOR_ML, PROCESSING_ML, ML_COMPLETE,
+        READY_FOR_CITSCI, PROCESSING_CITSCI, CITSCI_COMPLETE,
+        READY_FOR_EXPERT, PROCESSING_EXPERT, EXPERT_COMPLETE,
+        PIPELINE_COMPLETE
+    ]
+
+    STAGE_ORDER = [
+        ("PENDING_ARRIVAL",      "⏳ Pending Arrival",       "Waiting for video to arrive in S3"),
+        ("READY_FOR_ML",         "🤖 Ready for ML",          "Video present, queued for ML inference"),
+        ("PROCESSING_ML",        "⚙️ Processing ML",         "ML inference actively running"),
+        ("ML_COMPLETE",          "✅ ML Complete",            "ML done, awaiting Zooniverse/Biigle"),
+        ("READY_FOR_CITSCI",     "🌍 Ready for CitSci",      "Queued for citizen science upload"),
+        ("PROCESSING_CITSCI",    "⚙️ Processing CitSci",    "CitSci workflow running"),
+        ("CITSCI_COMPLETE",      "✅ CitSci Complete",       "CitSci done, awaiting expert review"),
+        ("READY_FOR_EXPERT",     "🔬 Ready for Expert",      "Queued for expert annotation in Biigle"),
+        ("PROCESSING_EXPERT",    "⚙️ Processing Expert",    "Expert annotation in progress"),
+        ("EXPERT_COMPLETE",      "✅ Expert Complete",       "Expert done, syncing annotations"),
+        ("PIPELINE_COMPLETE",    "🎉 Pipeline Complete",     "Fully processed"),
+        ("ON_HOLD",              "⏸️ On Hold",               "Paused for investigation"),
+        ("EXCLUDED",             "🚫 Excluded",              "Bad deployment, not processing"),
+        ("ERROR",                "❌ Error",                 "Failed a pipeline step"),
+        ("MISSING_METADATA",     "⚠️ Missing Metadata",     "Required metadata absent"),
+    ]

@@ -14,32 +14,9 @@ from pathlib import Path
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import time_to_seconds, seconds_to_time
 
-
-# ── helpers ─────────────────────────────────────────────────────────────────
-
-def _time_to_seconds(time_str: str) -> float:
-    if pd.isna(time_str):
-        return 0.0
-    # Handle both HH:MM:SS and HH:MM:SS.mmm
-    parts = time_str.split(":")
-    h = int(parts[0])
-    m = int(parts[1])
-    s = float(parts[2])
-    return h * 3600 + m * 60 + s
-
-
-def _seconds_to_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-
-
-# ── main function ────────────────────────────────────────────────────────────
-
-def select_zooniverse_clips(
+def select_maxn_clips_for_review(
     maxn_csv_path: str,
     output_selections_path: str,
     drop_id: str,
@@ -95,8 +72,8 @@ def select_zooniverse_clips(
             "ClipStartRelative": clip_start,                       # seconds since SamplingStart (snapped to interval)
             "ClipEndRelative": clip_start + interval_sec,
             "TimeOfMaxnMs": float(row.get("TimeOfMaxnMs", clip_start)),  # exact ML peak seconds (sub-second precision)
-            "StartTime": _seconds_to_time(clip_start),            # HH:MM:SS relative
-            "EndTime": _seconds_to_time(clip_start + interval_sec),
+            "StartTime": seconds_to_time(clip_start),            # HH:MM:SS relative
+            "EndTime": seconds_to_time(clip_start + interval_sec),
             "TargetSpecies": species,
             "SelectionReason": reason,
             "MaxCount": row["MaxInterval"],
@@ -177,7 +154,10 @@ def select_zooniverse_clips(
         return None
 
     selections_df = pd.DataFrame(selection_rows)
-    selections_df = selections_df.sort_values("ClipStartRelative").reset_index(drop=True)
+
+    # Sort chronologically
+    if not selections_df.empty:
+        selections_df = selections_df.sort_values("ClipStartRelative").reset_index(drop=True)
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
     selections_df.to_csv(output_selections_path, index=False)
@@ -186,19 +166,16 @@ def select_zooniverse_clips(
 
 
 def main():
-    if "snakemake" in globals():
-        pass
-    else:
-        logging.info("Running clip selection in standalone test mode.")
-        repo_root = Path(__file__).parent.parent.parent
-        drop_id = config.test_drops[0][0]
-        model_name = Path(config.model_path or config.mock_model_path).stem
+    logging.info("Running clip selection in standalone test mode.")
+    repo_root = Path(__file__).parent.parent.parent
+    drop_id = config.test_drops[0][0]
+    model_name = Path(config.model_path or config.mock_model_path).stem
 
-        annotations_dir = repo_root / config.local_manifest_dir_path
-        input_maxn = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
-        output_selections = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
+    annotations_dir = repo_root / config.local_manifest_dir_path
+    input_maxn = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
+    output_selections = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
 
-        select_zooniverse_clips(input_maxn, output_selections, drop_id, sampling_start=0)
+    select_zooniverse_clips(input_maxn, output_selections, drop_id, sampling_start=0)
 
 
 if __name__ == "__main__":
