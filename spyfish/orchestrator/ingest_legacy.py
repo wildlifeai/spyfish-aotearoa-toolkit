@@ -44,14 +44,14 @@ def ingest_legacy_expert_annotations():
                 "count": row["MaxInterval"] if not pd.isna(row["MaxInterval"]) else 0,
                 "source": "expert",
                 "confidence": confidence,
-                "external_id": None
+                "external_id": "legacy"  # distinguishes these from Biigle-synced expert annotations
             })
 
         # 3. Insert into Annotation DB
         ann_db = AnnotationDatabaseManager()
-        # Clear existing experts to avoid duplicates if re-running
+        # Clear only legacy expert annotations to avoid wiping Biigle-synced expert data
         with ann_db.get_connection() as conn:
-            conn.execute("DELETE FROM annotations WHERE source = 'expert'")
+            conn.execute("DELETE FROM annotations WHERE source = 'expert' AND external_id = 'legacy'")
 
         ann_db.add_annotations(annotations)
         logging.info(f"Successfully ingested {len(annotations)} expert annotations into spyfish_annotations.db")

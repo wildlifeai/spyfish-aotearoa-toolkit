@@ -76,35 +76,40 @@ def run_yolo_inference(video_url, model_path, conf, output_csv, true_fps, vid_st
         sys.exit(1)
 
 
-def main():
+def main(args=None):
+    import argparse
+    parser = argparse.ArgumentParser(description='Run YOLO inference on a video.')
+    parser.add_hide = True # Internal flag for orchestrator
 
-    if "snakemake" in globals():
-        # Running via Snakemake
-        drop_id = snakemake.wildcards.drop_id
-        video_url = snakemake.params.video_url
-        sampling_start = int(snakemake.params.sampling_start) if hasattr(snakemake.params, 'sampling_start') and snakemake.params.sampling_start else 0
-        sampling_end = int(snakemake.params.sampling_end) if hasattr(snakemake.params, 'sampling_end') and snakemake.params.sampling_end else None
+    # If running standalone via CLI, parse args.
+    # If called from orchestrator, args will be passed as a dict or object.
 
-        model_path = snakemake.config["model_path"]
-        vid_stride = int(snakemake.config["frame_skip"])
-        conf = float(snakemake.config["confidence_threshold"])
-        output_csv = snakemake.output.csv
-    else:
-        # Running standalone/local test
-        logging.info("Running in standalone testing mode (Snakemake not detected).")
-        # Ensure we are in the correct directory relative path
-        repo_root = Path(__file__).parent.parent.parent
-        from spyfish.config import config
+    from spyfish.config import config
+
+    # Default values from config
+    repo_root = Path(__file__).parent.parent.parent
+
+    if args is None:
+        # Standalone manual run
+        logging.info("Running in standalone manual mode.")
         drop_id, _, sampling_start, sampling_end = config.test_drops[0]
         video_url = str(repo_root / config.mock_video_dir / f"{drop_id}.mp4")
         model_path = config.mock_model_path if config.mock_model_path else "mock_model.pt"
-        model_name = Path(model_path).stem
         vid_stride = int(config.frame_skip)
         conf = float(config.confidence_threshold)
-        sampling_start = sampling_start or 0
-        sampling_end = sampling_end or None
         output_dir = repo_root / config.local_manifest_dir_path
+        model_name = Path(model_path).stem
         output_csv = str(output_dir / f"{drop_id}_{model_name}_raw.csv")
+    else:
+        # Called from Orchestrator (ml_runner.py)
+        drop_id = args.get('drop_id')
+        video_url = args.get('video_url')
+        sampling_start = args.get('sampling_start', 0)
+        sampling_end = args.get('sampling_end')
+        model_path = args.get('model_path')
+        vid_stride = int(args.get('frame_skip', config.frame_skip))
+        conf = float(args.get('confidence_threshold', config.confidence_threshold))
+        output_csv = args.get('output_csv')
 
     logging.info(f"Starting YOLO inference on {drop_id}")
     logging.info(f"Video Source: {video_url}")

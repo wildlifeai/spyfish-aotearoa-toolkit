@@ -2,6 +2,7 @@ import sqlite3
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from contextlib import closing
 
 from spyfish.config import config
 
@@ -17,13 +18,13 @@ class AnnotationDatabaseManager:
             # Use the same directory as the main pipeline DB (process_files/)
             self.db_path = str(config.project_root / "process_files" / "spyfish_annotations.db")
 
-        self.mode = config.storage.get("mode", "local")
         self.init_db()
 
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        """Returns a configured SQLite connection wrapped in contextlib.closing."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        return closing(conn)
 
     def init_db(self):
         """Initializes the annotations schema."""
@@ -60,6 +61,13 @@ class AnnotationDatabaseManager:
                 INSERT INTO annotations (drop_id, scientific_name, timestamp, count, source, confidence, external_id)
                 VALUES (:drop_id, :scientific_name, :timestamp, :count, :source, :confidence, :external_id)
             ''', annotations)
+            conn.commit()
+
+    def clear_annotations(self, drop_id: str, source: str):
+        """Clears existing annotations for a given drop and source."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND source = ?", (drop_id, source))
             conn.commit()
 
     def get_annotations_for_drop(self, drop_id: str, source: Optional[str] = None) -> List[Dict[str, Any]]:

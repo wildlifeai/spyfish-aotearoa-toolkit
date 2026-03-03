@@ -5,16 +5,7 @@ import streamlit as st
 from spyfish.database.manager import DatabaseManager
 
 
-# --- Load error data ---
-@st.cache_data(ttl=300)  # Check S3 at most every 5 minutes
-def sync_db_if_needed():
-    """Helper to sync database from S3 if in AWS mode or missing locally."""
-    from spyfish.config import config
-    from spyfish.storage.db_sync import download_db
-    if config.storage.get("mode") == "aws" or not config.db_path.exists():
-        download_db()
-    return True
-
+from utils import sync_db_if_needed
 @st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
 def load_error_data():
     """Load validation errors from native SQLite DB, syncing from S3 if needed."""

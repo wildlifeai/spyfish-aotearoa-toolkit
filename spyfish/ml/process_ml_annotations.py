@@ -13,14 +13,7 @@ from spyfish.orchestrator.ingest_legacy import sync_annotations_to_main_db
 from spyfish.ml.draw_frames import draw_boxes_on_frames
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
-
-def seconds_to_time(seconds):
-    """Converts seconds to HH:MM:SS.mmm format."""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+from spyfish.utils import seconds_to_time
 
 
 def process_maxn(raw_df, output_csv_path, drop_id,
@@ -43,7 +36,7 @@ def process_maxn(raw_df, output_csv_path, drop_id,
         DataFrame with MaxN results.
     """
     logging.info(f"Processing MaxN for {drop_id}")
-    logging.info(f"Settings - Interval: {interval_seconds}s, Threshold: {confidence_threshold}")
+    logging.info(f"Settings - Interval: {interval_seconds}s, MaxN Confidence Threshold: {confidence_threshold}")
 
     if raw_df.empty:
         logging.warning(f"Empty CSV for {drop_id}")
@@ -141,9 +134,13 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         # Read raw CSV once — shared by process_maxn and draw_frames lookup
         raw_df = pd.read_csv(raw_csv)
 
-        # Get sampling_start from DB
-        deployment = db.get_deployment(drop_id)
-        sampling_start = deployment['sampling_start'] if deployment and deployment['sampling_start'] else 0
+        # Get sampling_start from DB. We do this in a short-lived block to prevent holding locks.
+        db = DatabaseManager()
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT sampling_start FROM deployments WHERE drop_id = ?', (drop_id,))
+            row = cursor.fetchone()
+            sampling_start = dict(row)['sampling_start'] if row and row['sampling_start'] else 0
 
         # 1. Extract MaxN (uses higher threshold than base inference)
         maxn_df = process_maxn(
@@ -172,11 +169,9 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
             })
 
         if annotations_to_add:
-            with ann_db.get_connection() as conn:
-                # TODO do we want this? maybe some comparison?
-                # Clear previous ML syncs for this drop
-                conn.execute("DELETE FROM annotations WHERE drop_id = ? AND source = 'ml'", (drop_id,))
-                ann_db.add_annotations(annotations_to_add)
+            # Clear previous ML syncs for this drop
+            ann_db.clear_annotations(drop_id, "ml")
+            ann_db.add_annotations(annotations_to_add)
             logging.info(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
 
         if not draw_images:

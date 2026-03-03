@@ -98,3 +98,39 @@ def write_data_to_file(data_str: str, output_path: str) -> None:
     except (IOError, OSError) as e:
         logging.error(f"Failed to write file paths to {output_path}: {e}")
         raise
+
+def time_to_seconds(time_str: str) -> float:
+    """Converts a time string (HH:MM:SS or HH:MM:SS.mmm) to seconds."""
+    if pd.isna(time_str):
+        return 0.0
+    parts = str(time_str).split(':')
+    if len(parts) == 3:
+        h = int(parts[0])
+        m = int(parts[1])
+        s = float(parts[2])
+        return h * 3600.0 + m * 60.0 + s
+    elif len(parts) == 2:
+        m = int(parts[0])
+        s = float(parts[1])
+        return m * 60.0 + s
+    else:
+        return float(parts[0])
+
+def seconds_to_time(seconds: float) -> str:
+    """Converts seconds to HH:MM:SS.mmm format."""
+    if pd.isna(seconds):
+        return "00:00:00.000"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+        if s == 60:
+            s = 0
+            m += 1
+            if m == 60:
+                m = 0
+                h += 1
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"

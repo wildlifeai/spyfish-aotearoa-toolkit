@@ -90,19 +90,17 @@ def extract_clips_from_selections(
 
 
 def main():
-    if "snakemake" in globals():
-        pass
-    else:
-        logging.info("Running clip extraction in standalone test mode.")
-        repo_root = Path(__file__).parent.parent.parent
-        drop_id = config.test_drops[0][0]
 
-        annotations_dir = repo_root / config.local_manifest_dir_path
-        selections_csv = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
-        video_path = str(repo_root / config.mock_video_dir / f"{drop_id}.mp4")
-        output_dir = str(repo_root / config.local_data_quality_dir / drop_id / "zooniverse_clips")
+    logging.info("Running clip extraction in standalone test mode.")
+    repo_root = Path(__file__).parent.parent.parent
+    drop_id = config.test_drops[0][0]
 
-        extract_clips_from_selections(selections_csv, video_path, output_dir)
+    annotations_dir = repo_root / config.local_manifest_dir_path
+    selections_csv = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
+    video_path = str(repo_root / config.mock_video_dir / f"{drop_id}.mp4")
+    output_dir = str(repo_root / config.local_data_quality_dir / drop_id / "zooniverse_clips")
+
+    extract_clips_from_selections(selections_csv, video_path, output_dir)
 
 
 if __name__ == "__main__":

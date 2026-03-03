@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 from spyfish.config import config
 from spyfish.config import PipelineStatus
+from utils import sync_db_if_needed
 
 # Constants for UI filtering state checks
 VIDEO_PRESENT_STATUSES = [
@@ -14,14 +15,6 @@ VIDEO_PRESENT_STATUSES = [
     PipelineStatus.PIPELINE_COMPLETE
 ]
 
-# --- Load SQLite deployment status data ---
-@st.cache_data(ttl=900)  # Check S3 at most every 5 minutes
-def sync_db_if_needed():
-    """Helper to sync database from S3 if in AWS mode or missing locally."""
-    from spyfish.storage.db_sync import download_db
-    if config.storage.get("mode") == "aws" or not config.db_path.exists():
-        download_db()
-    return True
 
 @st.cache_data(ttl=1)  # Refresh UI instantly
 def load_deployment_status():
@@ -152,22 +145,68 @@ def main():
     st.header("📊 Overview")
     st.caption("Complete deployment status overview")
 
+    total = len(deployment_df)
+    videos_present = deployment_df["Status"].isin(VIDEO_PRESENT_STATUSES).sum()
+
     # Mini metrics overview
     m1, m2, m3, m4, m5, m6,m7 = st.columns(7)
-    with m1: st.metric("Total", len(deployment_df))
+    with m1: st.metric("Total", total)
     with m2: st.metric("Action Req.", (~deployment_df["Complete"]).sum())
-    with m3: st.metric("Surveys", deployment_df["SurveyID"].nunique())
-
-    videos_present = deployment_df["Status"].isin(VIDEO_PRESENT_STATUSES).sum()
-    with m4: st.metric("Videos", videos_present)
-
+    with m3: st.metric("Videos", videos_present)
+    with m4: st.metric("Complete", deployment_df["Complete"].sum())
     with m5: st.metric("ML Ann.", (deployment_df["MlAnnotations"] > 0).sum())
-
     with m6: st.metric("CitSci Ann.", (deployment_df["CitSciAnnotations"] > 0).sum())
     with m7: st.metric("Expert Ann.", (deployment_df["ExpertAnnotations"] > 0).sum())
 
 
     st.divider()
+    st.subheader("🔄 Pipeline Stage Breakdown")
+    st.caption("How many deployments are at each step of the pipeline")
+
+    STAGE_ORDER = [
+        ("PENDING_ARRIVAL",      "⏳ Pending Arrival",       "Waiting for video to arrive in S3"),
+        ("READY_FOR_ML",         "🤖 Ready for ML",          "Video present, queued for ML inference"),
+        ("PROCESSING_ML",        "⚙️ Processing ML",         "ML inference actively running"),
+        ("ML_COMPLETE",          "✅ ML Complete",            "ML done, awaiting Zooniverse/Biigle"),
+        ("READY_FOR_CITSCI",     "🌍 Ready for CitSci",      "Queued for citizen science upload"),
+        ("PROCESSING_CITSCI",    "⚙️ Processing CitSci",    "CitSci workflow running"),
+        ("CITSCI_COMPLETE",      "✅ CitSci Complete",       "CitSci done, awaiting expert review"),
+        ("READY_FOR_EXPERT",     "🔬 Ready for Expert",      "Queued for expert annotation in Biigle"),
+        ("PROCESSING_EXPERT",    "⚙️ Processing Expert",    "Expert annotation in progress"),
+        ("EXPERT_COMPLETE",      "✅ Expert Complete",       "Expert done, syncing annotations"),
+        ("PIPELINE_COMPLETE",    "🎉 Pipeline Complete",     "Fully processed"),
+        ("ON_HOLD",              "⏸️ On Hold",               "Paused for investigation"),
+        ("EXCLUDED",             "🚫 Excluded",              "Bad deployment, not processing"),
+        ("ERROR",                "❌ Error",                 "Failed a pipeline step"),
+        ("MISSING_METADATA",     "⚠️ Missing Metadata",     "Required metadata absent"),
+    ]
+
+    status_counts = deployment_df["Status"].value_counts().to_dict()
+    rows = []
+    for status_key, label, description in STAGE_ORDER:
+        count = status_counts.get(status_key, 0)
+        if count == 0:
+            continue
+        pct = round(count / total * 100, 1) if total > 0 else 0
+        rows.append({"Stage": label, "Description": description, "Count": count, "% of Total": f"{pct}%"})
+
+    if rows:
+        st.dataframe(
+            pd.DataFrame(rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Count": st.column_config.ProgressColumn(
+                    "Count",
+                    min_value=0,
+                    max_value=total,
+                    format="%d",
+                ),
+            }
+        )
+    else:
+        st.info("No deployed records to display yet.")
+
 
     tab1, tab2, tab3 = st.tabs([ "📋 Deployments Overview", "📊 Survey Overview",  "🐟 Annotations Overview"])
 
@@ -295,8 +334,6 @@ def main():
                 )
             else:
                 st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")
-
-    st.divider()
 
     st.divider()
 

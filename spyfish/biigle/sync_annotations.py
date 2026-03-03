@@ -42,15 +42,31 @@ def sync_biigle_annotations():
         logging.info(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
-            # 2. Get annotation report
-            # We use the image report type for image volumes
-            report_df = handler.export_report_to_df("volumes", volume_id, type_id=config.biigle_annotation_report_type_images)
+            # 2. Check 'Done' label via file-level labels (NOT from annotation report)
+            # In Biigle, "Done" is a whole-file label applied via the label panel,
+            # which lives at GET /api/v1/images/{id}/labels or /videos/{id}/labels.
+            # volume_is_done also detects whether this is an image or video volume.
+            is_done, media_type = handler.volume_is_done(volume_id)
 
-            if report_df.empty:
-                logging.info(f"  No annotations found for {drop_id}")
+            if not is_done:
+                logging.info(f"  Volume {volume_id} for {drop_id} not marked 'Done' yet. Skipping.")
                 continue
 
-            # 3. Check for 'Done' label
+            logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report...")
+
+            # 3. Download annotation report using the correct type for this volume's media
+            if media_type == "video":
+                report_type = config.biigle_annotation_report_type_video
+            else:
+                report_type = config.biigle_annotation_report_type_images
+            report_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
+
+            if report_df.empty:
+                logging.info(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")
+                db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
+                continue
+
+            # 4. Find the label column
             label_col = None
             for col in ['label_name', 'label', 'Label', 'Scientific Name', 'scientific_name']:
                 if col in report_df.columns:
@@ -58,19 +74,10 @@ def sync_biigle_annotations():
                     break
 
             if not label_col:
-                logging.warning(f"  Could not find label column in report for {drop_id}.")
+                logging.warning(f"  Could not find label column in report for {drop_id}. Columns: {list(report_df.columns)}")
                 continue
 
-            is_done = report_df[label_col].astype(str).str.contains("Done", case=False).any()
-
-            if not is_done:
-                logging.info(f"  Volume {volume_id} for {drop_id} exists but not marked 'Done' yet.")
-                continue
-
-            logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE. Ingesting annotations...")
-
-            # 4. Parse and Ingest
-            fish_annotations = report_df[~report_df[label_col].astype(str).str.contains("Done", case=False)]
+            fish_annotations = report_df
 
             annotations_to_add = []
             for _, row in fish_annotations.iterrows():
@@ -85,8 +92,8 @@ def sync_biigle_annotations():
                             s = int(secs % 60)
                             ms = int((secs % 1) * 1000)
                             timestamp = f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-                        except:
-                            pass
+                        except (ValueError, IndexError) as e:
+                            logging.warning(f"Could not parse timestamp from filename '{fname}': {e}")
 
                 annotations_to_add.append({
                     "drop_id": drop_id,
@@ -99,10 +106,14 @@ def sync_biigle_annotations():
                 })
 
             if annotations_to_add:
+                # Clear previous syncs for this drop (using a distinct connection to avoid locks)
                 with ann_db.get_connection() as conn:
-                    # Clear previous syncs for this drop
-                    conn.execute("DELETE FROM annotations WHERE drop_id = ? AND source = 'expert' AND external_id IS NOT NULL", (drop_id,))
-                    ann_db.add_annotations(annotations_to_add)
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND source = 'expert' AND external_id IS NOT NULL", (drop_id,))
+                    conn.commit()
+
+                # Add new annotations
+                ann_db.add_annotations(annotations_to_add)
 
                 processed_drops.append(drop_id)
                 logging.info(f"  Ingested {len(annotations_to_add)} annotations for {drop_id}")

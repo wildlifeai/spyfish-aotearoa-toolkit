@@ -133,6 +133,11 @@ class ConfigWrapper:
         return self._yaml_config.get("biigle", {}).get("annotation_report_type_images", 3)
 
     @property
+    def biigle_done_labels(self) -> list:
+        """Whole-file labels that indicate a volume is ready to be ingested (e.g. 'Done Volume', 'Done QA Review')."""
+        return self._yaml_config.get("biigle", {}).get("done_labels", ["Done Volume", "Done QA Review"])
+
+    @property
     def biigle_volume_report_type(self) -> int:
         return self._yaml_config.get("biigle", {}).get("volume_report_type", 10)
 
@@ -342,19 +347,11 @@ class ConfigWrapper:
     @property
     def test_drops(self):
         """Returns list of (drop_id, drop_key, sampling_start, sampling_end) tuples."""
-        drops = []
-        ml = self.ml_inference
-        i = 1
-        while True:
-            drop_id = ml.get(f"test_drop_id_{i}")
-            drop_key = ml.get(f"test_drop_key_{i}")
-            if not drop_id:
-                break
-            sampling_start = ml.get(f"test_drop_sampling_start_{i}")
-            sampling_end = ml.get(f"test_drop_sampling_end_{i}")
-            drops.append((drop_id, drop_key, sampling_start, sampling_end))
-            i += 1
-        return drops
+        try:
+            from spyfish.test_setup import TEST_DROPS
+            return TEST_DROPS
+        except ImportError:
+            return []
 
     @property
     def model_path(self):
@@ -381,12 +378,12 @@ class ConfigWrapper:
         return self.ml_inference.get("extraction", {}).get("interval_seconds", 10)
 
     @property
-    def mock_video_dir(self):
-        return self.orchestrator.get("mock_video_dir", "mock_media")
-
-    @property
     def orchestrator(self):
         return self._yaml_config.get("orchestrator", {})
+
+    @property
+    def mock_video_dir(self):
+        return self.orchestrator.get("mock_video_dir", "mock_media")
 
     @property
     def is_test_run(self):
@@ -407,14 +404,6 @@ class ConfigWrapper:
     @property
     def local_manifest_name(self):
         return self.orchestrator.get("local_manifest_name", "videos_to_ml.csv")
-
-    @property
-    def local_logs_dir(self):
-        return self.orchestrator.get("local_logs_dir", "process_files/logs")
-
-    @property
-    def s3_annotations_dir(self):
-        return self.orchestrator.get("s3_annotations_dir", "process_files/annotations")
 
     @property
     def local_logs_dir(self):

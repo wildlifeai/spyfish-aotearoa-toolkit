@@ -552,8 +552,8 @@ class S3Handler:
             ...     column_filter="IsBadDeployment",
             ...     column_value=False
             ... )
-            >>> print(f"All paths: {len(result['all'])}")
-            >>> print(f"Valid paths: {len(result['filtered'])}")
+            >>> logging.info(f"All paths: {len(result['all'])}")
+            >>> logging.info(f"Valid paths: {len(result['filtered'])}")
 
         Note:
             The 'all' set is used to check for extra files in S3 (a file in S3 is not
