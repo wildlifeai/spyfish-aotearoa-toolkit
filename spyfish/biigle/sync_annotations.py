@@ -122,13 +122,13 @@ def sync_biigle_annotations():
         drop_id = dep["drop_id"]
         volume_id = int(dep["biigle_volume_id"])
 
-        logging.info(f"Checking Biigle volume {volume_id} for {drop_id}")
+        logging.debug(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
             # 2. Check presence of labels that define the volume as done via file-level labels
             is_done, media_type = handler.volume_is_done(volume_id)
             if not is_done:
-                logging.info(f"  Volume {volume_id} for {drop_id} not marked 'Done' yet. Skipping.")
+                logging.debug(f"  Volume {volume_id} for {drop_id} not marked Done yet. Skipping.")
                 continue
 
             logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report...")
@@ -138,7 +138,7 @@ def sync_biigle_annotations():
             fish_annotations_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
 
             if fish_annotations_df.empty:
-                logging.info(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")
+                logging.debug(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")
                 db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 continue
 

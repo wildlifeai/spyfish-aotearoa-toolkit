@@ -9,7 +9,7 @@ from pathlib import Path
 from spyfish.config import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
-from spyfish.ml.draw_frames import draw_boxes_on_frames
+from spyfish.ml.draw_frames import draw_boxes_on_video_frames
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
 from spyfish.utils import seconds_to_time
@@ -34,8 +34,7 @@ def process_maxn(raw_df, output_csv_path, drop_id,
     Returns:
         DataFrame with MaxN results.
     """
-    logging.info(f"Processing MaxN for {drop_id}")
-    logging.info(f"Settings - Interval: {interval_seconds}s, MaxN Confidence Threshold: {confidence_threshold}")
+    logging.debug(f"Processing MaxN for {drop_id} (Interval: {interval_seconds}s, MaxN Threshold: {confidence_threshold})")
 
     if raw_df.empty:
         logging.warning(f"Empty CSV for {drop_id}")
@@ -97,7 +96,7 @@ def process_maxn(raw_df, output_csv_path, drop_id,
 
     Path(output_csv_path).parent.mkdir(parents=True, exist_ok=True)
     maxn_df.to_csv(output_csv_path, index=False)
-    logging.info(f"Saved MaxN results: {len(maxn_df)} rows to {output_csv_path}")
+    logging.info(f" Saved MaxN {len(maxn_df)} rows for {drop_id} to {output_csv_path}")
 
     return maxn_df
 
@@ -120,12 +119,14 @@ def _ingest_ml_annotations(ann_db: AnnotationDatabaseManager, drop_id: str, maxn
         # Clear previous ML syncs for this drop
         ann_db.clear_annotations(drop_id, "ml")
         ann_db.add_annotations(annotations_to_add)
-        logging.info(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
+        logging.debug(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
 
-def _generate_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, drop_id: str,
-                                video_dir: Path, output_root: Path, base_conf: float,
-                                maxn_conf: float, interval: float, sampling_start: int):
-    """Draw max-N plots and frame extractions for human QA."""
+
+def _run_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, drop_id: str,
+                            video_dir: Path, output_root: Path, base_conf: float,
+                            maxn_conf: float, interval: float, sampling_start: int,
+                            raw_csv_path: str = None):
+    """Draw MaxN timeline plot and lowest-confidence annotated frames for human QA review."""
     # Save MaxN timeline visualisation
     plot_maxn_timeline(
         raw_df=raw_df,
@@ -149,17 +150,18 @@ def _generate_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, dro
     # Find video file
     video_path = video_dir / f"{drop_id}.mp4"
     if not video_path.exists():
-        logging.warning(f"Video not found at {video_path}, skipping frame drawing")
+        logging.warning(f"Video not found at {video_path}, skipping QA frame drawing")
         return
 
-    frames_dir = str(output_root / drop_id / "frames")
-    draw_boxes_on_frames(
-        video_path=str(video_path),
-        raw_csv_path=None, # In case module requires it. Wait, the original passed raw_csv. We'll pass raw_df context? Wait, no, it needs raw_csv_path.
+    frames_dir = str(output_root / drop_id / "qa_frames")
+    draw_boxes_on_video_frames(
+        video_path=video_path,
+        raw_csv_path=raw_csv_path,
         output_dir=frames_dir,
         frame_list=frame_indices,
         confidence_threshold=base_conf,
-        sampling_start=sampling_start
+        sampling_start=sampling_start,
+        drop_id=drop_id
     )
 
 def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
@@ -177,7 +179,7 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         draw_images: Whether to draw QA review frames (default: True).
     """
     db = DatabaseManager()
-    model_name = Path(config.model_path or config.mock_model_path).stem
+    model_name = config.pipeline_model_path
     base_conf = float(config.confidence_threshold)
     maxn_conf = float(config.maxn_confidence_threshold)
     interval = config.interval_seconds
@@ -187,10 +189,12 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
     ann_db = AnnotationDatabaseManager()
 
     for drop_id in drop_ids:
-        logging.info(f"Post-ML processing: {drop_id}")
+        logging.debug(f"Post-ML processing: {drop_id}")
 
-        raw_csv = str(annotations_dir / f"{drop_id}_{model_name}_raw.csv")
-        maxn_csv = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
+        drop_annotations_dir = output_root / drop_id / "annotations"
+        drop_annotations_dir.mkdir(parents=True, exist_ok=True)
+        raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
+        maxn_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
 
         # Read raw CSV once — shared by process_maxn and draw_frames lookup
         raw_df = pd.read_csv(raw_csv)
@@ -212,8 +216,11 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         )
 
         if maxn_df.empty:
-            logging.warning(f"No MaxN results for {drop_id}, skipping ingestion and QA drawing")
-            continue
+            logging.warning(f"No MaxN results for {drop_id}. Saving empty CSV for health checks.")
+            # Create a placeholder empty MaxN CSV with the correct headers
+            # TODO how ate these the correct headers
+            maxn_df = pd.DataFrame(columns=['DropID', 'ScientificName', 'TimeOfMax', 'MaxInterval', 'AnnotatedBy', 'Interval_annotation', 'ConfidenceAgreement', 'time_of_maxn_ms'])
+            maxn_df.to_csv(maxn_csv, index=False)
 
         # 2. Ingest into detailed annotations database
         _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
@@ -222,45 +229,24 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
             logging.info(f"Post-ML processing complete for {drop_id} (frame & plot drawing skipped)")
             continue
 
-        # 3. Save MaxN timeline visualisation and draw frames
-
-        # Save MaxN timeline visualisation
-        plot_maxn_timeline(
+        # 3. Draw QA visualisations (MaxN timeline + lowest-confidence frames)
+        _run_qa_visualizations(
             raw_df=raw_df,
             maxn_df=maxn_df,
             drop_id=drop_id,
-            output_dir=output_root / drop_id,
+            video_dir=video_dir,
+            output_root=output_root,
             base_conf=base_conf,
             maxn_conf=maxn_conf,
-            interval_seconds=interval,
-        )
-
-        # Draw lowest-confidence frames for QA review
-        review_df = maxn_df.sort_values('ConfidenceAgreement').head(10)
-
-        # Map time_of_maxn_ms back to raw CSV frame numbers
-        frame_indices = []
-        for t_sec in review_df['time_of_maxn_ms']:
-            closest = raw_df.iloc[(raw_df['time_seconds'] - t_sec).abs().argsort()[:1]]
-            frame_indices.append(int(closest['frame'].iloc[0]))
-
-        # Find video file
-        video_path = video_dir / f"{drop_id}.mp4"
-        if not video_path.exists():
-            logging.warning(f"Video not found at {video_path}, skipping frame drawing")
-            continue
-
-        frames_dir = str(output_root / drop_id / "frames")
-        draw_boxes_on_frames(
-            video_path=str(video_path),
+            interval=interval,
+            sampling_start=sampling_start,
             raw_csv_path=raw_csv,
-            output_dir=frames_dir,
-            frame_list=frame_indices,
-            confidence_threshold=base_conf,
-            sampling_start=sampling_start
         )
 
-        logging.info(f"Post-ML processing complete for {drop_id}")
+        logging.info(f"  → Post-ML processing complete for: {drop_id}")
+
+        # Update status to AWAITING_CITSCI_CLIPS
+        db.update_status(drop_id, config.PipelineStatus.AWAITING_CITSCI_CLIPS)
 
     # 4. Finally sync all updated drops to the main pipeline DB
     if drop_ids:

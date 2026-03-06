@@ -127,3 +127,47 @@ def upload_annotations_db() -> bool:
     except Exception as e:
         logging.error(f"Failed to upload annotations database: {e}")
         return False
+
+def sync_annotations() -> bool:
+    """
+    Synchronizes the local nested annotations to S3 via 'aws s3 sync' with filters.
+    Keeps everything nested on S3 to match the local data_quality structure.
+    """
+    s3 = S3Handler()
+    local_dir = config.local_data_quality_dir
+    s3_prefix = config.s3_data_quality_dir
+
+    # Only include annotation CSVs, exclude everything else (like large videos if they somehow got in here)
+    filters = ["--exclude", "*", "--include", "*/annotations/*.csv", "--include", "*/zooniverse_clips/*.csv"]
+
+    return s3.sync_local_to_s3(str(local_dir), s3_prefix, filters=filters)
+
+def sync_pipeline_results() -> bool:
+    """
+    Comprehensive sync of all pipeline outputs to S3:
+    1. Uploads both databases (pipeline and annotations)
+    2. Syncs the data_quality directory (filtered to exclude large binaries)
+    """
+    logging.info("Starting consolidated pipeline sync to S3...")
+    success = True
+
+    # 1. Databases
+    if not upload_db():
+        logging.error("Failed to upload pipeline database.")
+        success = False
+
+    if not upload_annotations_db():
+        logging.error("Failed to upload annotations database.")
+        success = False
+
+    # 2. Annotations & Selections
+    if not sync_annotations():
+        logging.error("Failed to sync annotations directory.")
+        success = False
+
+    if success:
+        logging.info("Consolidated S3 sync completed successfully.")
+    else:
+        logging.warning("Consolidated S3 sync completed with errors.")
+
+    return success

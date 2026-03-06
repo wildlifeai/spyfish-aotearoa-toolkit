@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import generate_frame_filename
 
 
 # ── ffmpeg frame extraction ──────────────────────────────────────────────────
@@ -219,7 +220,7 @@ def extract_frames_from_selections(
 
         seek_seconds = sampling_start + time_of_max_relative
 
-        out_filename = f"{drop_id}__frame_{time_of_max_relative:.3f}s.jpg"
+        out_filename = generate_frame_filename(drop_id, time_of_max_relative)
         out_path = out_dir / out_filename
 
         logging.info(f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s → {out_filename}")
@@ -242,7 +243,12 @@ def extract_frames_from_selections(
 
     # Build and save COCO JSON
     coco = build_coco_from_raw_csv(raw_csv_path, frame_records)
-    coco_path = out_dir / f"{drop_id}_coco_annotations.json"
+
+    # Save the COCO annotations to a dedicated annotations directory, separate from the frames
+    annotations_dir = out_dir.parent / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    coco_path = annotations_dir / f"{drop_id}_coco_annotations.json"
     with open(coco_path, "w") as f:
         json.dump(coco, f, indent=2)
     logging.info(f"COCO annotations → {coco_path} ({len(coco['images'])} images, {len(coco['annotations'])} annotations)")

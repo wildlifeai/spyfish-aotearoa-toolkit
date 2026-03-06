@@ -10,7 +10,6 @@ from pathlib import Path
 from spyfish.config import config, PipelineStatus, get_required
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.database.manager import DatabaseManager
-from spyfish.storage.db_sync import download_db, upload_db
 from spyfish.ml.run_inference import main as run_inference_main
 
 class MLRunner:
@@ -19,77 +18,59 @@ class MLRunner:
         self.is_local = config.is_local
 
         # S3 properties
-        self.bucket = get_required(config.storage, "bucket_name", "storage")
-        self.s3_db_key = get_required(config.orchestrator, "s3_db_key", "orchestrator")
+        self.bucket = config.s3_bucket
+        self.s3_db_key = config.s3_db_key
         self.s3 = S3Handler(bucket=self.bucket)
         self.db = DatabaseManager()
 
-        # Local state properties
+        self.video_storage_dir = config.media_dir
         self.local_db_path = config.db_path
-        self.manifest_dir = config.local_manifest_dir_path
-        self.manifest_path = os.path.join(self.manifest_dir, config.local_manifest_name)
-        self.nesi_video_dir = get_required(config.orchestrator, "nesi_video_dir", "orchestrator")
 
         # Logic properties
         self.limit = get_required(config.ml_inference, "limit_processing", "ml_inference")
         self.frame_skip = get_required(config.ml_inference, "frame_skip", "ml_inference")
+        self.imgsz = int(config.imgsz)
         self.confidence = get_required(config.ml_inference, "confidence_threshold", "ml_inference")
-        self.model = config.mock_model_path if self.is_local else get_required(config.ml_inference, "model_path", "ml_inference")
+        # TODO what is happening here
+        self.model = config.pipeline_model_path if self.is_local else get_required(config.ml_inference, "model_path", "ml_inference")
 
 
-    def generate_manifest(self) -> List[str]:
-        """Queries the local sqlite DB for videos READY_FOR_ML and creates the target CSV manifest."""
-        logging.info(f"Querying local state database for READY_FOR_ML videos (LIMIT: {self.limit})...")
+    def get_inference_targets(self) -> List[dict]:
+        """Queries the local sqlite DB for videos READY_FOR_ML and returns a list of target dictionaries."""
+        logging.debug(f"Querying local state database for {PipelineStatus.READY_FOR_ML} videos (LIMIT: {self.limit})...")
 
-        # Dummy behavior during dry run if we don't have the DB
-        if self.is_test_run and not os.path.exists(self.local_db_path):
-            logging.info("Test run: Skipping DB query because DB file was not downloaded.")
-            return ["DRY_RUN_ID_1"]
+        if not os.path.exists(self.local_db_path):
+            logging.warning(f"Database not found at {self.local_db_path}. Ingestion must be run first.")
+            return []
 
         conn = sqlite3.connect(self.local_db_path)
 
         drop_id_col = config.csv_mapping.get('drop_id_column', 'DropID')
         video_link_col = config.csv_mapping.get('video_file_link_column', 'LinkToVideoFile')
 
-        test_drops = config.test_drops
-        test_drop_ids = [t[0] for t in test_drops]
-        if test_drop_ids:
-            placeholders = ','.join(['?'] * len(test_drop_ids))
-            logging.info(f"TEST MODE ACTIVE: Forcing manifest to include {drop_id_col}: {test_drop_ids}")
-            query = f"""
-                SELECT drop_id as {drop_id_col},
-                       video_path as {video_link_col},
-                       sampling_start as SamplingStart,
-                       sampling_end as SamplingEnd
-                FROM deployments
-                WHERE drop_id IN ({placeholders})
-            """
-            df = pd.read_sql_query(query, conn, params=test_drop_ids)
-        else:
-            df = pd.DataFrame(self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML))
-            if not df.empty:
-                df = df.head(self.limit)
+        df = pd.DataFrame(self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML))
+
+        df = df.head(self.limit)
 
         if df.empty:
-            logging.info("No drops available for ML processing. Exiting.")
             return []
 
         # Rename columns to match what the rest of the method expects (BUV Deployment CSV style)
         df = df.rename(columns={
             "drop_id": drop_id_col,
             "video_path": video_link_col,
-            "sampling_start": "SamplingStart",
-            "sampling_end": "SamplingEnd"
+            "sampling_start": config.csv_sampling_start_column,
+            "sampling_end": config.csv_sampling_end_column
         })
 
-        logging.info("Generating target paths and downloading media via aws s3...")
+        logging.debug("Generating target paths and downloading media via aws s3...")
 
-        # In a local run, '/nesi/' doesn't exist. Safely mock it to prevent MacOS read-only errors.
-        actual_video_dir = self.nesi_video_dir if not (self.is_test_run or self.is_local) else "mock_media"
+        actual_video_dir = self.video_storage_dir
         os.makedirs(actual_video_dir, exist_ok=True)
 
+        valid_indices = []
         local_filepaths = []
-        for path in df[video_link_col]:
+        for idx, path in df[video_link_col].items():
             filename = os.path.basename(path)
             local_path = os.path.join(actual_video_dir, filename)
 
@@ -97,8 +78,9 @@ class MLRunner:
 
             # Skip if the file already exists locally
             if os.path.exists(local_path):
-                logging.info(f"Video {filename} already exists at {local_path}. Skipping download.")
+                logging.debug(f"Video {filename} already exists at {local_path}. Skipping download.")
                 local_filepaths.append(local_path)
+                valid_indices.append(idx)
                 continue
 
             logging.info(f"Downloading {s3_uri} to {local_path}...")
@@ -111,39 +93,46 @@ class MLRunner:
                     check=True
                 )
                 local_filepaths.append(local_path)
+                valid_indices.append(idx)
             except subprocess.CalledProcessError as e:
                 logging.error(f"Failed to download video {s3_uri}: {e}")
                 continue
 
+        # Keep only the rows where the video is actually available locally
+        df = df.loc[valid_indices].copy()
+
+        if df.empty:
+            logging.warning("No media was successfully downloaded. Exiting.")
+            return []
+
         df["VideoURL"] = local_filepaths
 
-        # Save manifest
-        logging.info(f"Writing {len(df)} target records to {self.manifest_path}")
-        # Make sure directory exists
-        os.makedirs(os.path.dirname(self.manifest_path), exist_ok=True)
-        df.to_csv(self.manifest_path, index=False)
+        df["VideoURL"] = local_filepaths
 
-        return df[drop_id_col].tolist()
+        # Return list of records for inference
+        return df.to_dict('records')
 
-    def run_inference_loop(self, targets: List[str]) -> List[str]:
-        """Executes the YOLO inference directly in a Python loop for each target."""
+    def run_inference_loop(self, targets: List[dict]) -> List[str]:
+        """Executes the YOLO inference directly in a Python loop for each target dictionary."""
         if not targets:
             return []
 
-        logging.info(f"Setting {len(targets)} targets to {PipelineStatus.PROCESSING_ML}...")
-        if not self.is_test_run:
-            # Batch update status to PROCESSING_ML
-            for target in targets:
-                self.db.update_status(target, PipelineStatus.PROCESSING_ML)
+        drop_id_col = config.csv_mapping.get('drop_id_column', 'DropID')
+        drop_ids = [t[drop_id_col] for t in targets]
 
-        logging.info(f"Starting inference loop for {len(targets)} drops...")
+        logging.info(f"Setting {len(drop_ids)} targets to {PipelineStatus.PROCESSING_ML}...")
+        # Batch update status to PROCESSING_ML
+        for drop_id in drop_ids:
+            self.db.update_status(drop_id, PipelineStatus.PROCESSING_ML)
+
+        logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
 
         # Automatically download the YOLO weights from S3 if they don't exist locally
         if not os.path.exists(self.model):
             model_s3_key = config.model_s3_key
             if model_s3_key:
                 s3_uri = f"s3://{self.bucket}/{model_s3_key}"
-                logging.info(f"Model weights not found at {self.model}. Downloading from {s3_uri} via aws s3 cp...")
+                logging.debug(f"Model weights not found at {self.model}. Downloading from {s3_uri} via aws s3 cp...")
                 os.makedirs(os.path.dirname(self.model), exist_ok=True)
                 try:
                     subprocess.run(
@@ -156,33 +145,41 @@ class MLRunner:
                 logging.warning(f"Model missing locally and 'model_s3_key' not configured in yaml. Inference will likely fail.")
 
 
-        # Load the manifest to get URLs and metadata
-        df = pd.read_csv(self.manifest_path)
-        model_name = Path(self.model).stem
-
         success_targets = []
-        for drop_id in targets:
+        for row in targets:
             try:
-                row = df[df[config.csv_mapping.get('drop_id_column', 'DropID')] == drop_id].iloc[0]
+                drop_id = row[drop_id_col]
 
+                drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
                 inference_args = {
                     'drop_id': drop_id,
                     'video_url': row['VideoURL'],
-                    'sampling_start': row['SamplingStart'],
-                    'sampling_end': row['SamplingEnd'],
+                    'sampling_start': row[config.csv_sampling_start_column],
+                    'sampling_end': row[config.csv_sampling_end_column],
                     'model_path': self.model,
                     'frame_skip': self.frame_skip,
+                    'imgsz': self.imgsz,
                     'confidence_threshold': self.confidence,
-                    'output_csv': os.path.join(self.manifest_dir, f"{drop_id}_{model_name}_raw.csv")
+                    'output_csv': os.path.join(drop_annotations_dir, f"{drop_id}_{model_name}_raw.csv")
                 }
 
-                logging.info(f"Running inference for {drop_id}...")
+                logging.info(f"  → Running ML inference: {drop_id}")
                 run_inference_main(inference_args)
                 success_targets.append(drop_id)
 
             except Exception as e:
-                logging.error(f"Inference failed for {drop_id}: {e}")
-                # We continue to the next one, but this one won't be in success_targets
+                logging.error(f"Inference failed for {drop_id}: {e}", exc_info=True)
+                self.db.update_status(drop_id, PipelineStatus.ERROR)
+                self.db.add_validation_errors([{
+                        "SurveyID": "_".join(drop_id.split("_")[:3]),
+                        "DropID": drop_id,
+                        "ErrorType": "PIPELINE_ERROR",
+                        "FileName": "",
+                        "ColumnName": "ml_inference",
+                        "ErrorMessage": f"Inference failed: {type(e).__name__}: {e}",
+                        "InvalidValue": "",
+                    }])
+                # drop_id is not added to success_targets — it will not proceed
 
         return success_targets
 
@@ -194,44 +191,16 @@ class MLRunner:
 
         logging.info(f"Syncing state for {len(successful_drops)} successfully processed drops...")
 
-        if self.is_test_run:
-            logging.info(f"Test run: Would update status to ML_COMPLETED for DropIDs: {successful_drops}")
-            # Simulate CSV mock output creation so it tests
-            model_name = Path(self.model).stem
-            for drop_id in successful_drops:
-                local_csv = os.path.join(self.manifest_dir, f"{drop_id}_{model_name}_raw.csv")
-                logging.info(f"Test run: Would upload {local_csv} to S3...")
-            return
-
-        # Upload generated ML CSVs back up to S3 natively
-        model_name = Path(self.model).stem
         for drop_id in successful_drops:
-            local_csv = os.path.join(self.manifest_dir, f"{drop_id}_{model_name}_raw.csv")
-            if os.path.exists(local_csv):
-                s3_key = os.path.join(config.s3_annotations_dir, f"{drop_id}_{model_name}_raw.csv")
-                logging.info(f"Uploading ML inferences {local_csv} -> s3://{self.bucket}/{s3_key}")
-                self.s3.upload_file_to_s3(local_csv, s3_key)
-            else:
-                logging.warning(f"Expected to find ML output at {local_csv} but file is missing.")
-
-        # Apply the updates, BUT ONLY if the video is STILL marked as PROCESSING_ML.
-        # This protects against cases where a user might have manually excluded or deleted
-        # the run from the dashboard while the long ML queue was executing!
-        updated_count = 0
-        for drop_id in successful_drops:
-            record = self.db.get_deployment(drop_id)
-            if record and record['status'] == PipelineStatus.PROCESSING_ML:
-                self.db.update_status(drop_id, PipelineStatus.ML_COMPLETE)
-                updated_count += 1
-        logging.info(f"Successfully updated {updated_count} rows in local DB to ML_COMPLETE.")
-        logging.info("State Sync Complete.")
+            self.db.update_status(drop_id, PipelineStatus.ML_COMPLETE)
+        logging.info(f"Successfully updated {successful_drops} rows in local DB to {PipelineStatus.ML_COMPLETE}.")
 
 def main():
     parser = argparse.ArgumentParser(description='Spyfish ML Pipeline Orchestrator')
     args = parser.parse_args()
 
     runner = MLRunner()
-    targets = runner.generate_manifest()
+    targets = runner.get_inference_targets()
     successes = runner.run_inference_loop(targets)
     runner.finalize_batch_results(successes)
 

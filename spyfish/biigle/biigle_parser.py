@@ -38,7 +38,7 @@ class BiigleParser:
         else:
             # Resolve absolute path so the cache works regardless of the working directory
             # (Streamlit is launched from app/ so relative paths would be wrong)
-            self.cache_dir = config.project_root / config.local_data_quality_dir / "biigle_cache"
+            self.cache_dir = config.local_data_quality_dir / "biigle_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Biigle cache directory: {self.cache_dir}")
 
@@ -144,6 +144,7 @@ class BiigleParser:
         maxn_csv_path = self.cache_dir / f"{volume_id}_{resource}_maxn.csv"
         max_n_df.to_csv(maxn_csv_path, index=False)
         logging.info(f"Saved MaxN data → {maxn_csv_path}")
+
 
         return {
             "raw_annotations_df": raw_annotations_df,

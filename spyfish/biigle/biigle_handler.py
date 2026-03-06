@@ -185,7 +185,8 @@ class BiigleHandler:
             raise
 
     def resolve_real_volume_id(
-        self, volume_name: str, project_id: Optional[int] = None, max_tries: int = 10, poll_interval: float = 3.0
+        self, volume_name: str, project_id: Optional[int] = None,
+        max_tries: int = None, poll_interval: float = None
     ) -> Optional[int]:
         """
         After creating a pending volume, Biigle assigns the finalized volume a different ID.
@@ -195,12 +196,12 @@ class BiigleHandler:
         Args:
             volume_name: The name used when creating the volume.
             project_id: The Biigle project to search in.
-            max_tries: How many times to poll before giving up.
-            poll_interval: Seconds between each attempt.
 
         Returns:
             The real volume ID, or None if not found within the retry window.
         """
+        max_tries = config.volume_finalize_max_retries
+        poll_interval = config.volume_finalize_retry_interval_secs
         project_id = project_id or config.biigle_project_id
         for attempt in range(1, max_tries + 1):
             try:
@@ -278,6 +279,18 @@ class BiigleHandler:
             return {"tree_id": tree_id, "tree_info": tree_info, "labels": created_labels}
         except Exception as e:
             logging.error(f"Failed to create label tree: {e}")
+            raise
+
+    def get_label_tree_labels(self, tree_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all labels in a label tree.
+        Uses GET /api/v1/label-trees/{id}/labels
+        """
+        try:
+            response = self.api.get(f"label-trees/{tree_id}/labels")
+            return response.json()
+        except Exception as e:
+            logging.error(f"Failed to list labels for label tree {tree_id}: {e}")
             raise
 
     # ── Reports ───────────────────────────────────────────────────────────────
@@ -425,6 +438,38 @@ class BiigleHandler:
             logging.error(f"Failed to get files for volume {volume_id}: {e}")
             raise
 
+    def get_volume_images(self, volume_id: int) -> List[Dict[str, Any]]:
+        """
+        Get the full information for all images in a volume by first getting the list of file IDs,
+        then fetching each image's details concurrently.
+        Returns list of {"id": int, "filename": str, ...}
+        """
+        import concurrent.futures
+
+        try:
+            file_ids = self.get_volume_file_ids(volume_id)
+            if not file_ids:
+                return []
+
+            def _fetch_img(fid: int):
+                try:
+                    return self.api.get(f"images/{fid}").json()
+                except Exception as e:
+                    logging.warning(f"Could not fetch image {fid}: {e}")
+                    return None
+
+            images = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                for img in executor.map(_fetch_img, file_ids):
+                    if img:
+                        images.append(img)
+
+            logging.info(f"Retrieved {len(images)} images concurrently for volume {volume_id}.")
+            return images
+        except Exception as e:
+            logging.error(f"Failed to get images for volume {volume_id}: {e}")
+            raise
+
     def get_video_labels(self, video_id: int) -> List[Dict[str, Any]]:
         """
         Get whole-video labels for a specific video file.
@@ -496,4 +541,52 @@ class BiigleHandler:
 
         except Exception as e:
             logging.error(f"Error checking done status for volume {volume_id}: {e}")
+            raise
+
+    # ── Annotations Upload ────────────────────────────────────────────────────
+
+    def upload_image_annotations(self, volume_id: int, annotations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Upload multiple image annotations via bulk endpoint.
+        Uses POST /api/v1/image-annotations
+
+        Input list format:
+        [
+            {
+                "image_id": 12345,
+                "shape_id": 5,          # 5 = Rectangle
+                "points": [x1, y1, x2, y1, x2, y2, x1, y2], # 8 points flat mapped
+                "label_id": 6789,
+                "confidence": 0.85
+            },
+            ...
+        ]
+        """
+        if not annotations:
+            logging.warning("No annotations to bulk upload.")
+            return {}
+
+        logging.info(f"Bulk uploading {len(annotations)} image annotations to volume {volume_id} in batches of 100...")
+
+        final_result = []
+        try:
+            for i in range(0, len(annotations), 100):
+                batch = annotations[i:i + 100]
+                logging.info(f"Uploading batch {i//100 + 1}/{(len(annotations) - 1)//100 + 1} ({len(batch)} items)")
+                response = self.api.post("image-annotations", json=batch)
+
+                # Biigle API returns an array, but if we encounter errors, we capture the exception below
+                batch_result = response.json()
+                if isinstance(batch_result, list):
+                    final_result.extend(batch_result)
+                elif isinstance(batch_result, dict):
+                    final_result.append(batch_result)
+
+            logging.info(f"Successfully uploaded {len(annotations)} annotations in { (len(annotations) - 1)//100 + 1 } batches.")
+            return {"uploaded_count": len(final_result), "details": final_result}
+
+        except Exception as e:
+            logging.error(f"Failed to bulk upload image annotations to volume {volume_id}: {e}")
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                logging.error(f"Response: {e.response.text}")
             raise

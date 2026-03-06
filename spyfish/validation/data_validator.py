@@ -69,7 +69,6 @@ class DataValidator:
 
         result_df = self.validate_with_config(config)
         logging.info(f"Error validation completed, {result_df.shape[0]} errors found")
-        self.export_to_csv()
 
         if config.extract_clean_dataframes:
             self.export_clean_dataframes_to_csv()
@@ -79,7 +78,7 @@ class DataValidator:
         if config.file_presence:
             self.export_file_differences()
 
-        logging.info("Error validation process completed, files created/uploaded.")
+        logging.info("Error validation process completed.")
 
     def _get_validation_rules(self) -> Dict[str, Any]:
         """Load validation rules with their associated reference datasets from S3."""

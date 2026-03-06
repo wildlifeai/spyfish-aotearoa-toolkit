@@ -25,13 +25,14 @@ def load_deployment_status():
             "expert_annotations": "ExpertAnnotations",
             "ml_annotations": "MlAnnotations",
             "citsci_annotations": "CitSciAnnotations",
-            "is_bad_deployment": "IsBadDeployment"
+            "is_bad_deployment": "IsBadDeployment",
+            "sampling_start": "SamplingStart"
         }, inplace=True)
         df["IsBadDeployment"] = df["IsBadDeployment"].astype(bool)
         df["SurveyID"] = extract_survey_id(df["DropID"])
 
         # Map Pipeline Complete (excluding EXCLUDED/bad deployments)
-        df["Complete"] = df["Status"] == "PIPELINE_COMPLETE"
+        df["Complete"] = df["Status"] == PipelineStatus.PIPELINE_COMPLETE
         # Read the new native SQLite database columns
         df["ExpertAnnotations"] = df["ExpertAnnotations"].fillna(0).astype(int)
         df["MlAnnotations"] = df["MlAnnotations"].fillna(0).astype(int)
@@ -75,7 +76,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
     with st.container(horizontal=True, horizontal_alignment="right"):
         show_annotations = st.checkbox("Show Annotation Columns", key=f"show_ann_{title}", value=False)
 
-    display_cols = ["DropID", "SurveyID", "Status", "Complete"]
+    display_cols = ["DropID", "SurveyID", "SamplingStart", "Status","Complete"]
     if show_annotations:
         display_cols.extend(["MlAnnotations", "CitSciAnnotations","ExpertAnnotations" ])
 
@@ -232,9 +233,21 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame, ann_db):
             with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["annotated_by"] == "citsci"]))
 
             st.dataframe(
-                ann_df[["scientific_name", "time_of_max", "max_interval", "annotated_by", "interval_annotation", "confidence_agreement", "external_id"]],
+                ann_df[[
+                    "scientific_name", "time_of_max", "max_interval",
+                    "annotated_by", "interval_annotation", "confidence_agreement", "external_id"
+                ]],
                 width='stretch',
-                hide_index=True
+                hide_index=True,
+                column_config={
+                    "scientific_name":      st.column_config.TextColumn("Scientific Name"),
+                    "time_of_max":          st.column_config.TextColumn("Time of MaxN"),
+                    "max_interval":         st.column_config.NumberColumn("MaxN Count", width="small"),
+                    "annotated_by":         st.column_config.TextColumn("Annotated By", width="small"),
+                    "interval_annotation":  st.column_config.TextColumn("Interval (s)", width="small"),
+                    "confidence_agreement": st.column_config.NumberColumn("Confidence", format="%.2f", width="small"),
+                    "external_id":          st.column_config.TextColumn("External ID", width="small"),
+                },
             )
         else:
             st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")

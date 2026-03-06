@@ -167,13 +167,20 @@ def select_maxn_clips_for_review(
 
 def main():
     logging.info("Running clip selection in standalone test mode.")
-    repo_root = Path(__file__).parent.parent.parent
-    drop_id = config.test_drops[0][0]
-    model_name = Path(config.model_path or config.mock_model_path).stem
+    # The original content of main is now handled by argparse in __main__ block
+    pass
 
-    annotations_dir = repo_root / config.local_manifest_dir_path
-    input_maxn = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
-    output_selections = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Select clips for Zooniverse.")
+    parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
+    args = parser.parse_args()
+
+    drop_id = args.drop_id
+    model_name = config.pipeline_model_path
+
+    input_maxn = str(config.get_maxn_csv_path(drop_id, model_name))
+    output_selections = str(config.get_selections_csv_path(drop_id))
 
     select_zooniverse_clips(input_maxn, output_selections, drop_id, sampling_start=0)
 

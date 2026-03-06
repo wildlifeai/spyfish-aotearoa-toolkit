@@ -138,18 +138,21 @@ if __name__ == "__main__":
     import logging
     from pathlib import Path
     from spyfish.config import config
+    import argparse
 
-    drop_id = config.test_drops[0][0]
-    model_name = Path(config.model_path or config.mock_model_path).stem
+    parser = argparse.ArgumentParser(description="Generate MaxN visualisations.")
+    parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
+    args = parser.parse_args()
+
+    drop_id = args.drop_id
+    model_name = config.pipeline_model_path
     base_conf = float(config.confidence_threshold)
     maxn_conf = float(config.maxn_confidence_threshold)
     interval_seconds = config.interval_seconds
 
-    repo_root = Path(__file__).parent.parent.parent
-    annotations_dir = repo_root / config.local_manifest_dir_path
-    output_dir = repo_root / config.local_data_quality_dir / drop_id
+    output_dir = config.local_data_quality_dir / drop_id
 
-    raw_df = pd.read_csv(annotations_dir / f"{drop_id}_{model_name}_raw.csv")
-    maxn_df = pd.read_csv(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
+    raw_df = pd.read_csv(config.get_raw_csv_path(drop_id, model_name))
+    maxn_df = pd.read_csv(config.get_maxn_csv_path(drop_id, model_name))
 
     plot_maxn_timeline(raw_df, maxn_df, drop_id, output_dir, base_conf, maxn_conf, interval_seconds)

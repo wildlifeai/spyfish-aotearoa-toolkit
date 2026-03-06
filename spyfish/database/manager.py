@@ -99,15 +99,30 @@ class DatabaseManager:
                     ml_annotations=excluded.ml_annotations,
                     citsci_annotations=excluded.citsci_annotations,
                     expert_annotations=excluded.expert_annotations,
-                    biigle_volume_id=excluded.biigle_volume_id
+                    biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id)
             ''', (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id))
             conn.commit()
 
     def update_status(self, drop_id: str, new_status: str):
-        """Updates the status of a specific deployment."""
+        """Updates the status of a specific deployment.
+        If transitioning away from ERROR, clears any PIPELINE_ERROR rows from validation_errors.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            # Check current status before updating
+            cursor.execute('SELECT status FROM deployments WHERE drop_id = ?', (drop_id,))
+            row = cursor.fetchone()
+            current_status = row['status'] if row else None
             cursor.execute('UPDATE deployments SET status = ? WHERE drop_id = ?', (new_status, drop_id))
+            # TODO sus check what's happening here
+
+            # If we're moving away from ERROR, clear the PIPELINE_ERROR entries for this drop
+            if current_status == 'ERROR' and new_status != 'ERROR':
+                cursor.execute(
+                    "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
+                    (drop_id,)
+                )
+                logging.info(f"Cleared PIPELINE_ERROR entries for {drop_id} (status reset to {new_status})")
             conn.commit()
 
     def update_biigle_volume_id(self, drop_id: str, volume_id: str):
@@ -124,6 +139,16 @@ class DatabaseManager:
             cursor.execute('SELECT * FROM deployments WHERE status = ?', (status,))
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_deployments_by_statuses(self, statuses: List[str]) -> List[Dict[str, Any]]:
+        """Returns all deployments currently in any of the given statuses."""
+        if not statuses:
+            return []
+        placeholders = ', '.join(['?'] * len(statuses))
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'SELECT * FROM deployments WHERE status IN ({placeholders})', statuses)
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_deployment(self, drop_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific deployment by drop_id."""
         with self.get_connection() as conn:
@@ -131,6 +156,30 @@ class DatabaseManager:
             cursor.execute('SELECT * FROM deployments WHERE drop_id = ?', (drop_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def get_deployments_by_ids(self, drop_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch multiple deployments in a single query. Returns {drop_id: record}."""
+        if not drop_ids:
+            return {}
+        placeholders = ', '.join(['?'] * len(drop_ids))
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'SELECT * FROM deployments WHERE drop_id IN ({placeholders})', drop_ids)
+            return {row['drop_id']: dict(row) for row in cursor.fetchall()}
+
+    def clear_pipeline_errors(self, drop_id: str):
+        """Remove all PIPELINE_ERROR rows from validation_errors for a specific drop.
+        Call this when manually fixing a drop and retrying it.
+        (This is also called automatically by update_status when moving away from ERROR.)
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
+                (drop_id,)
+            )
+            conn.commit()
+            logging.info(f"Cleared PIPELINE_ERROR entries for {drop_id}")
 
     def clear_validation_errors(self):
         """Clears all validation errors from the database."""

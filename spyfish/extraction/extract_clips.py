@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import time_to_seconds, generate_clip_filename
 
 
 def extract_clips_from_selections(
@@ -55,12 +56,18 @@ def extract_clips_from_selections(
 
     clip_paths = []
     for idx, row in df.iterrows():
-        clip_start_relative = float(row["ClipStartRelative"]) if "ClipStartRelative" in row else 0.0
-        clip_end_relative = float(row["ClipEndRelative"]) if "ClipEndRelative" in row else clip_start_relative + 10.0
+        if "SecondsSinceSamplingStart" not in row:
+            logging.error(f"Missing SecondsSinceSamplingStart in row: {row}")
+            clip_paths.append(None)
+            continue
+
+        clip_start_relative = time_to_seconds(row["SecondsSinceSamplingStart"])
+        clip_end_relative = time_to_seconds(row["EndSecondsSinceSamplingStart"]) if "EndSecondsSinceSamplingStart" in row else clip_start_relative + 10.0
+
         clip_duration = clip_end_relative - clip_start_relative
         seek_seconds = sampling_start + clip_start_relative
 
-        out_filename = f"{drop_id}_{int(clip_duration):02d}s_{int(clip_start_relative):05d}s.mp4"
+        out_filename = generate_clip_filename(drop_id, clip_duration, clip_start_relative)
         out_path = Path(output_dir) / out_filename
 
         cmd = [
@@ -89,19 +96,19 @@ def extract_clips_from_selections(
     return df
 
 
-def main():
-
-    logging.info("Running clip extraction in standalone test mode.")
-    repo_root = Path(__file__).parent.parent.parent
-    drop_id = config.test_drops[0][0]
-
-    annotations_dir = repo_root / config.local_manifest_dir_path
-    selections_csv = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
-    video_path = str(repo_root / config.mock_video_dir / f"{drop_id}.mp4")
-    output_dir = str(repo_root / config.local_data_quality_dir / drop_id / "zooniverse_clips")
+def main(drop_id):
+    logging.info(f"Running clip extraction for Drop ID: {drop_id}")
+    selections_csv = str(config.get_selections_csv_path(drop_id))
+    video_path = str(config.get_video_path(drop_id))
+    output_dir = str(config.local_data_quality_dir / drop_id / "zooniverse_clips")
 
     extract_clips_from_selections(selections_csv, video_path, output_dir)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Extract clips from selections.")
+    parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
+    args = parser.parse_args()
+
+    main(args.drop_id)

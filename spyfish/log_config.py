@@ -47,3 +47,10 @@ else:
         format=format_string,
         force=True,
     )
+
+def log_header(title: str, character: str = "═"):
+    """Logs a visually distinct header for a pipeline step."""
+    width = 60
+    logging.info(character * width)
+    logging.info(f" {title} ".center(width, character))
+    logging.info(character * width)

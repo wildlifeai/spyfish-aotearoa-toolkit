@@ -28,13 +28,12 @@ def run_ingestion():
     db = DatabaseManager()
     storage = S3Handler(bucket=config.storage.get("bucket_name"))
 
-    logging.info("2. Fetching the master BUV Deployments list...")
     csv_path = config.storage.get("sharepoint_deployment_csv_key")
+    logging.debug(f"Fetching the master deployments list from {csv_path}...")
+
     deployments_df = storage.read_df_from_s3_csv(csv_path)
 
-    logging.info(f"Loaded {len(deployments_df)} deployment records.")
-
-    logging.info("3. Running full cross-dataset DataValidation...")
+    logging.debug("Running full cross-dataset DataValidation on {len(deployments_df)} loaded deployment records....")
     validator = DataValidator()
     validator.run_validation(file_presence=False, remove_duplicates=True, extract_clean_dataframes=False)
 
@@ -55,22 +54,15 @@ def run_ingestion():
             if pd.notna(e.DropID):
                 structural_error_drops.add(str(e.DropID).strip())
 
-    logging.info(f"Found {len(structural_error_drops)} DropIDs with structural CSV errors.")
-
-    logging.info(f"Logging {len(structured_errors)} validation errors to SQLite...")
+    logging.debug(f"Found {len(structural_error_drops)} DropIDs with structural CSV errors, logging them into DB.")
     db.clear_validation_errors()
     db.add_validation_errors(structured_errors)
 
-    logging.info("4. Batch mapping known media files in S3...")
+    logging.debug("Batch mapping known media files in S3...")
     known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
 
-    if config.is_test_run:
-        from spyfish.test_setup import inject_test_data
-        logging.info("Injecting test overrides into the pipeline database manifest...")
-        deployments_df = inject_test_data(deployments_df, known_files)
-
     # 5. Load expert annotations and count per DropID (always from S3)
-    logging.info("5. Fetching expert annotations from S3...")
+    logging.debug("Fetching expert annotations from S3...")
     expert_counts = {}
     try:
         s3_handler = S3Handler(bucket=config.storage.get("bucket_name"))
@@ -104,15 +96,15 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
 
         # Parse Sampling offsets — these MUST exist in the BUV Deployment CSV
         try:
-            sampling_start = int(pd.to_numeric(row.get("SamplingStart")))
-            sampling_end = int(pd.to_numeric(row.get("SamplingEnd")))
+            sampling_start = int(pd.to_numeric(row.get(config.csv_sampling_start_column)))
+            sampling_end = int(pd.to_numeric(row.get(config.csv_sampling_end_column)))
         except (ValueError, TypeError) as e:
             # We no longer skip deployments with sampling errors. We keep them for visibility
             # but mark them as ERROR so the user knows they need attention.
             if drop_id not in structural_error_drops:
                 # logging.warning(
                 #     f"Missing or invalid SamplingStart/SamplingEnd for {drop_id}. "
-                #     f"Got SamplingStart={row.get('SamplingStart')}, SamplingEnd={row.get('SamplingEnd')}. "
+                #     f"Got {config.csv_sampling_start_column}={row.get(config.csv_sampling_start_column)}, {config.csv_sampling_end_column}={row.get(config.csv_sampling_end_column)}. "
                 #     f"This deployment will be flagged as ERROR."
                 # )
                 structural_error_drops.add(drop_id)
@@ -129,7 +121,7 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             status = PipelineStatus.PIPELINE_COMPLETE
         elif is_bad_deployment:
             status = PipelineStatus.EXCLUDED
-        elif drop_id in structural_error_drops:
+        elif drop_id in structural_error_drops and not config.is_test_run:
             status = PipelineStatus.ERROR
         else:
             existing_record = db.get_deployment(drop_id)
