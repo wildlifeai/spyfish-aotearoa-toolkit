@@ -68,7 +68,7 @@ def plot_maxn_timeline(
 
     # 2. Green highlight: MaxN clip windows
     for _, row in maxn_df.iterrows():
-        t = row["time_of_maxn_ms"]
+        t = row[config.csv_maxn_time_ms_column]
         interval_start = (t // interval_seconds) * interval_seconds
         ax.axvspan(interval_start, interval_start + interval_seconds,
                    alpha=0.15, color="#2ecc71", zorder=1)
@@ -90,12 +90,12 @@ def plot_maxn_timeline(
 
     # 5. Red dots: MaxN peaks with annotation
     for _, row in maxn_df.iterrows():
-        t = row["time_of_maxn_ms"]
-        count = row["MaxInterval"]
+        t = row[config.csv_maxn_time_ms_column]
+        count = row[config.csv_max_interval_column]
         ax.scatter(t, count, color="#e74c3c", s=120, zorder=6,
                    edgecolors="white", linewidth=1.5)
         ax.annotate(
-            f"MaxN={count}\n({row['ConfidenceAgreement']:.2f})",
+            f"MaxN={count}\n({row[config.csv_confidence_agreement_column]:.2f})",
             xy=(t, count), xytext=(5, 10), textcoords="offset points",
             fontsize=8, color="#c0392b", fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     maxn_conf = float(config.maxn_confidence_threshold)
     interval_seconds = config.interval_seconds
 
-    output_dir = config.local_data_quality_dir / drop_id
+    output_dir = config.data_quality_dir / drop_id
 
     raw_df = pd.read_csv(config.get_raw_csv_path(drop_id, model_name))
     maxn_df = pd.read_csv(config.get_maxn_csv_path(drop_id, model_name))

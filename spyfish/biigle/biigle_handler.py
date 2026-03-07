@@ -185,8 +185,7 @@ class BiigleHandler:
             raise
 
     def resolve_real_volume_id(
-        self, volume_name: str, project_id: Optional[int] = None,
-        max_tries: int = None, poll_interval: float = None
+        self, volume_name: str, project_id: Optional[int] = None
     ) -> Optional[int]:
         """
         After creating a pending volume, Biigle assigns the finalized volume a different ID.
@@ -206,9 +205,19 @@ class BiigleHandler:
         for attempt in range(1, max_tries + 1):
             try:
                 volumes = self.get_volumes(project_id)
-                for v in volumes:
-                    if v.get("name") == volume_name:
-                        return v["id"]
+                # Collect all volumes with a matching name
+                matches = [v for v in volumes if v.get("name") == volume_name]
+
+                if matches:
+                    # Sort by created_at descending (ISO format strings sort correctly)
+                    # Example: "2024-03-01T10:00:00Z" > "2024-02-01T10:00:00Z"
+                    matches.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+                    best_match = matches[0]
+
+                    if len(matches) > 1:
+                        logging.info(f"Multiple volumes found with name '{volume_name}'. Selecting most recent: ID {best_match['id']} (created {best_match.get('created_at')})")
+
+                    return best_match["id"]
             except Exception as e:
                 logging.warning(f"Attempt {attempt}/{max_tries}: failed to list volumes — {e}")
 

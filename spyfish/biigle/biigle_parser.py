@@ -31,14 +31,18 @@ class BiigleParser:
         email: Optional[str] = None,
         token: Optional[str] = None,
         cache_dir: Optional[str] = None,
+        drop_id: Optional[str] = None,
     ):
         self.biigle_handler = BiigleHandler(email=email, token=token)
         if cache_dir:
             self.cache_dir = Path(cache_dir)
+        elif drop_id:
+            # Use per-drop cache folder
+            self.cache_dir = config.data_quality_dir / drop_id / "biigle_cache"
         else:
-            # Resolve absolute path so the cache works regardless of the working directory
-            # (Streamlit is launched from app/ so relative paths would be wrong)
-            self.cache_dir = config.local_data_quality_dir / "biigle_cache"
+            # Fallback to general cache in data_quality folder
+            self.cache_dir = config.data_quality_dir / "biigle_cache"
+
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Biigle cache directory: {self.cache_dir}")
 
@@ -120,14 +124,14 @@ class BiigleParser:
             return {}
 
         # Derive DropID from video filename
-        annotations_df["DropID"] = annotations_df["video_filename"].str.replace(
+        annotations_df[config.drop_id_column] = annotations_df["video_filename"].str.replace(
             r"\.mp4.*", "", regex=True
         )
 
         raw_annotations_df = annotations_df.copy()
 
         required_columns = [
-            "DropID", "label_name", "video_id", "video_filename",
+            config.drop_id_column, "label_name", "video_id", "video_filename",
             "shape_id", "shape_name", "points", "frames",
         ]
         annotations_df = annotations_df[required_columns]
@@ -161,7 +165,7 @@ class BiigleParser:
         count_df = annotations_df[annotations_df["shape_name"] == "Rectangle"].copy()
         grouped = (
             count_df.groupby(
-                ["DropID", "video_filename", "label_name", "start_seconds", "frame_seconds", "time_of_max"]
+                [config.drop_id_column, "video_filename", "label_name", "start_seconds", "frame_seconds", "time_of_max"]
             )
             .size()
             .reset_index(name="max_count")
@@ -174,10 +178,10 @@ class BiigleParser:
         Ties resolved by earliest frame time.
         """
         ordered = annotations_df.sort_values(
-            ["DropID", "max_count", "start_seconds", "frame_seconds"],
+            [config.drop_id_column, "max_count", "start_seconds", "frame_seconds"],
             ascending=[True, False, True, True],
         )
-        result = ordered.drop_duplicates(subset=["DropID", "label_name"], keep="first")
+        result = ordered.drop_duplicates(subset=[config.drop_id_column, "label_name"], keep="first")
         return result.sort_values(["start_seconds", "frame_seconds"]).reset_index(drop=True)
 
     def process_sizes(self, annotations_df: pd.DataFrame) -> pd.DataFrame:
@@ -195,7 +199,7 @@ class BiigleParser:
         sizes_df = sizes_df[sizes_df["label_name"] != SCALE_BAR_LABEL_NAME]
 
         return sizes_df[
-            ["DropID", "label_name", "video_filename", "start_seconds", "frame_seconds", "time_of_max", "size_px", "size_cm"]
+            [config.drop_id_column, "label_name", "video_filename", "start_seconds", "frame_seconds", "time_of_max", "size_px", "size_cm"]
         ].sort_values(["start_seconds", "frame_seconds"]).reset_index(drop=True)
 
     # ── Geometry helpers ─────────────────────────────────────────────────────
@@ -245,16 +249,21 @@ class BiigleParser:
         matching the column names expected by ingest.py.
         """
         annotations_df = annotations_df.copy()
-        annotations_df["ScientificName"] = (
+        annotations_df[config.csv_scientific_name_column] = (
             annotations_df["label_name"].str.split(" - ").str[1]
             .fillna(annotations_df["label_name"])
         )
         return (
-            annotations_df.rename(columns={"max_count": "MaxInterval", "time_of_max": "TimeOfMax"})
-            .assign(
-                AnnotatedBy="expert",
-                IntervalAnnotation=interval_annotation_s,
-                ConfidenceAgreement="NA",
-            )
-            [["DropID", "ScientificName", "TimeOfMax", "MaxInterval", "AnnotatedBy", "IntervalAnnotation", "ConfidenceAgreement"]]
+            annotations_df.rename(columns={
+                "max_count": config.csv_max_interval_column,
+                "time_of_max": config.csv_maxn_time_column
+            })
+            .assign(**{
+                config.csv_annotated_by_column: "expert",
+                config.csv_interval_annotation_column: interval_annotation_s,
+                config.csv_confidence_agreement_column: "NA",
+            })
+            [[config.drop_id_column, config.csv_scientific_name_column, config.csv_maxn_time_column,
+              config.csv_max_interval_column, config.csv_annotated_by_column,
+              config.csv_interval_annotation_column, config.csv_confidence_agreement_column]]
         )

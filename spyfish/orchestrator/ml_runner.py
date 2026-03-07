@@ -14,7 +14,6 @@ from spyfish.ml.run_inference import main as run_inference_main
 
 class MLRunner:
     def __init__(self):
-        self.is_test_run = config.is_test_run
         self.is_local = config.is_local
 
         # S3 properties
@@ -31,8 +30,8 @@ class MLRunner:
         self.frame_skip = get_required(config.ml_inference, "frame_skip", "ml_inference")
         self.imgsz = int(config.imgsz)
         self.confidence = get_required(config.ml_inference, "confidence_threshold", "ml_inference")
-        # TODO what is happening here
-        self.model = config.pipeline_model_path if self.is_local else get_required(config.ml_inference, "model_path", "ml_inference")
+        # Use the standardized pipeline model path
+        self.model = str(config.pipeline_model_path)
 
 
     def get_inference_targets(self) -> List[dict]:
@@ -45,7 +44,7 @@ class MLRunner:
 
         conn = sqlite3.connect(self.local_db_path)
 
-        drop_id_col = config.csv_mapping.get('drop_id_column', 'DropID')
+        drop_id_col = config.drop_id_column
         video_link_col = config.csv_mapping.get('video_file_link_column', 'LinkToVideoFile')
 
         df = pd.DataFrame(self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML))
@@ -117,7 +116,7 @@ class MLRunner:
         if not targets:
             return []
 
-        drop_id_col = config.csv_mapping.get('drop_id_column', 'DropID')
+        drop_id_col = config.drop_id_column
         drop_ids = [t[drop_id_col] for t in targets]
 
         logging.info(f"Setting {len(drop_ids)} targets to {PipelineStatus.PROCESSING_ML}...")
@@ -151,6 +150,7 @@ class MLRunner:
                 drop_id = row[drop_id_col]
 
                 drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
+                model_name = Path(self.model).stem
                 inference_args = {
                     'drop_id': drop_id,
                     'video_url': row['VideoURL'],

@@ -52,10 +52,12 @@ def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
             logging.warning(f"No CSV data for frame {csv_frame}")
             continue
 
-        # ML time is relative to sampling_start. Add it back for the real video position.
+        # The 'frame' column in the raw CSV is already an absolute frame index from the source video
+        video_frame_num = csv_frame
+
+        # Calculate absolute video time for filename matching (sampling_start + ML relative time)
         ml_time = frame_rows['time_seconds'].iloc[0]
         video_time = ml_time + sampling_start
-        video_frame_num = int(video_time * fps)
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, video_frame_num)
         ret, frame = cap.read()

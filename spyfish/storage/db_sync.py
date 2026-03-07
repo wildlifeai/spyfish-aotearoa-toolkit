@@ -51,6 +51,9 @@ def upload_db() -> bool:
     """
     Uploads the pipeline database to S3.
     """
+    if config.is_test_run:
+        logging.info("Skipping database upload in test run.")
+        return True
     s3 = S3Handler()
     local_path = config.db_path
     s3_key = config.s3_db_key
@@ -128,27 +131,46 @@ def upload_annotations_db() -> bool:
         logging.error(f"Failed to upload annotations database: {e}")
         return False
 
-def sync_annotations() -> bool:
+def sync_annotations(upload_videos: bool = False) -> bool:
     """
-    Synchronizes the local nested annotations to S3 via 'aws s3 sync' with filters.
-    Keeps everything nested on S3 to match the local data_quality structure.
+    Synchronizes the local nested annotations and images to S3.
+    By default, excludes large video files to save bandwidth and storage.
+
+    Args:
+        upload_videos: If True, also uploads .mp4 files. Default False.
     """
     s3 = S3Handler()
-    local_dir = config.local_data_quality_dir
+    local_dq_dir = config.data_quality_dir
     s3_prefix = config.s3_data_quality_dir
 
-    # Only include annotation CSVs, exclude everything else (like large videos if they somehow got in here)
-    filters = ["--exclude", "*", "--include", "*/annotations/*.csv", "--include", "*/zooniverse_clips/*.csv"]
+    # Start with global exclude
+    filters = ["--exclude", "*"]
 
-    return s3.sync_local_to_s3(str(local_dir), s3_prefix, filters=filters)
+    # Include metadata and annotations
+    filters += ["--include", "*/annotations/*.csv"]
+    filters += ["--include", "*/annotations/*.json"]
+    filters += ["--include", "*/zooniverse_clips/*.csv"]
 
-def sync_pipeline_results() -> bool:
+    # Include images (standardize on .jpg/.jpeg/.png)
+    image_patterns = ["*/qa_frames/*", "*/biigle_cache/*", "*/zooniverse_images/*"]
+    for pattern in image_patterns:
+        filters += ["--include", f"{pattern}.jpg"]
+        filters += ["--include", f"{pattern}.jpeg"]
+        filters += ["--include", f"{pattern}.png"]
+
+    # Optionally include videos
+    if upload_videos:
+        filters += ["--include", "*.mp4"]
+
+    return s3.sync_local_to_s3(str(local_dq_dir), s3_prefix, filters=filters)
+
+def sync_pipeline_results(upload_videos: bool = False) -> bool:
     """
     Comprehensive sync of all pipeline outputs to S3:
     1. Uploads both databases (pipeline and annotations)
     2. Syncs the data_quality directory (filtered to exclude large binaries)
     """
-    logging.info("Starting consolidated pipeline sync to S3...")
+    logging.info(f"Starting consolidated pipeline sync to S3 (upload_videos={upload_videos})...")
     success = True
 
     # 1. Databases
@@ -161,9 +183,10 @@ def sync_pipeline_results() -> bool:
         success = False
 
     # 2. Annotations & Selections
-    if not sync_annotations():
-        logging.error("Failed to sync annotations directory.")
-        success = False
+    if not config.is_test_run:
+        if not sync_annotations(upload_videos=upload_videos):
+            logging.error("Failed to sync annotations directory.")
+            success = False
 
     if success:
         logging.info("Consolidated S3 sync completed successfully.")

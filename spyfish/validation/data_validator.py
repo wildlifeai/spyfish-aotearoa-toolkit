@@ -9,7 +9,7 @@ import copy
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Set
 
 import pandas as pd
 
@@ -58,6 +58,7 @@ class DataValidator:
         file_presence: bool = False,
         remove_duplicates: bool = True,
         extract_clean_dataframes: bool = False,
+        known_files: Optional[Set[str]] = None,
     ):
         """Main function to run data validation."""
         logging.info("Error validation started")
@@ -65,6 +66,7 @@ class DataValidator:
             file_presence=file_presence,
             remove_duplicates=remove_duplicates,
             extract_clean_dataframes=extract_clean_dataframes,
+            known_files=known_files,
         )
 
         result_df = self.validate_with_config(config)
@@ -142,7 +144,8 @@ class DataValidator:
 
         if config.file_presence:
             file_presence_errors = self.file_presence_validator.validate(
-                config.file_presence_rules
+                config.file_presence_rules,
+                known_files=config.known_files
             )
             self.errors.extend(file_presence_errors)
 
@@ -201,34 +204,28 @@ class DataValidator:
             subset=key_cols, ignore_index=True
         )
 
-    def export_to_csv(self):
+    def export_to_csv(self, drop_id: Optional[str] = None):
         """
         Export validation errors to a CSV file or S3 bucket.
-
-        Saves the errors DataFrame to a CSV file for analysis and reporting.
-        The CSV will contain all validation errors with their associated metadata.
-
-        Side Effects:
-            - Creates a CSV file with the specified name
-            - Logs the export operation
-
-        Note:
-            The CSV is exported without the DataFrame index to keep the
-            output clean and focused on the error data.
+        If a drop_id is given, it's saved into that drop's log folder.
         """
-        if config.export_local:
-            path = Path(self.local_folder_path) / config.errors_filename
+        # TODO check when this is used and if necessary
+
+        if drop_id:
+            # Save to per-drop log folder
+            path = config.data_quality_dir / drop_id / "logs" / "validation_errors.csv"
             path.parent.mkdir(parents=True, exist_ok=True)
             self.errors_df.to_csv(path, index=False)
-            logging.info(f"Errors exported locally to csv file {path}.")
+            logging.info(f"Errors for {drop_id} exported to {path}")
+            return
         else:
-            self.s3_handler.upload_updated_df_to_s3(
-                df=self.errors_df,
-                key=config.s3_errors_csv,
-                filename=config.errors_filename,
-                keep_df_index=False,
-            )
-            logging.info(f"Errors exported to S3: {config.s3_errors_csv}")
+
+
+            # Fallback/Centralized (deprecated - we should ideally move towards per-drop or per-survey)
+            path = Path(self.local_folder_path) / "validation_errors_summary.csv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.errors_df.to_csv(path, index=False)
+            logging.info(f"Errors exported locally to {path}")
 
     def export_clean_dataframes_to_csv(self) -> None:
         """
@@ -245,7 +242,6 @@ class DataValidator:
             - CSV files are exported without DataFrame index
             - Empty dataframes are skipped
         """
-        # TODO: Add S3 export for clean dataframes (will go to kso folder eventually)
         if not config.export_local:
             logging.warning(
                 "Clean dataframe export to S3 not yet implemented. Skipping."

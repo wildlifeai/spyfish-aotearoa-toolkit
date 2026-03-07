@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import seconds_to_time
 from panoptes_client import Panoptes, Project, Subject, SubjectSet
 
 
@@ -88,22 +89,26 @@ def upload_clips_to_zooniverse(
             logging.warning(f"Clip file missing, skipping: {clip_path.name}")
             continue
 
+        # Derive human-readable times for volunteers from numeric columns
+        start_sec = float(row[config.csv_clip_start_column])
+        end_sec = float(row[config.csv_clip_end_column])
+
         # Metadata hidden from volunteers (prefix '#')
         # These help trace classifications back to source deployments and inform QA
         meta = {
-            "#DropID": row.get("DropID", drop_id),
+            "#DropID": row.get(config.drop_id_column, drop_id),
             "#SelectionReason": row.get("SelectionReason", ""),
             "#TargetSpecies": row.get("TargetSpecies", ""),
             "#MaxInterval": row.get("MaxInterval", ""),
-            "#ConfidenceAgreement": row.get("ConfidenceAgreement", ""),
-            "#StartTime": row.get("StartTime", ""),
-            "#EndTime": row.get("EndTime", ""),
-            "#SamplingStart": row.get("SamplingStart", 0),
+            "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+            "#StartTime": seconds_to_time(start_sec),
+            "#EndTime": seconds_to_time(end_sec),
+            "#SamplingStart": row.get(config.csv_sampling_start_column, 0),
         }
 
         subject = Subject()
         subject.links.project = zoo_project
-        subject.add_location(str(clip_path))
+        subject.add_location({'video/mp4': str(clip_path)})
         subject.metadata.update(meta)
         subject.save()
         new_subjects.append(subject)
@@ -156,23 +161,25 @@ def upload_frames_to_zooniverse(
             logging.warning(f"Frame file missing, skipping: {frame_path.name}")
             continue
         # Metadata strictly mirrors standardized selections outputs. Legacy selections are handled separately.
+        time_of_max = float(row[config.csv_clip_max_time_column])
+
         meta = {
-            "#DropID": row.get("DropID", drop_id),
+            "#DropID": row.get(config.drop_id_column, drop_id),
             "#SelectionReason": row.get("SelectionReason", ""),
             "#TargetSpecies": row.get("TargetSpecies", ""),
             "#MaxInterval": row.get("MaxInterval", ""),
-            "#ConfidenceAgreement": row.get("ConfidenceAgreement", ""),
-            "#TimeOfMaxnMs": row.get("TimeOfMaxnMs", ""),
-            "#SamplingStart": row.get("SamplingStart", 0),
+            "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+            "#TimeOfMaxnMs": seconds_to_time(time_of_max),
+            "#SamplingStart": row.get(config.csv_sampling_start_column, 0),
         }
 
         subject = Subject()
         subject.links.project = zoo_project
-        subject.add_location(str(frame_path))
+        subject.add_location({'image/jpeg': str(frame_path)})
         subject.metadata.update(meta)
         subject.save()
         new_subjects.append(subject)
         logging.info(f"  Saved: {frame_path.name} ({row.get('SelectionReason', '')})")
-    logging.warning(f"This is what the rows have {uploadable.columns} check if metadata is good {meta}")
+    logging.info(f"!!!!! !!!! !!!This is what the rows have {uploadable.columns} check if metadata is good {meta}")
     subject_set.add(new_subjects)
     logging.info(f"Uploaded {len(new_subjects)}/{n} frames to subject set '{set_name}'.")

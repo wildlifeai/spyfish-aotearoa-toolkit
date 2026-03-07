@@ -264,7 +264,7 @@ def upload_frames_to_biigle(
 
     # Step 4: Upload COCO bounding box annotations to the new volume
     # The JSON lives in the drop's annotation folder
-    annotations_dir = Path(frames_df["FramePath"].iloc[0]).parent.parent / "annotations"
+    annotations_dir = config.get_drop_annotations_dir(drop_id)
     coco_json_path = annotations_dir / f"{drop_id}_coco_annotations.json"
 
     if volume_id and coco_json_path.exists():

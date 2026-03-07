@@ -4,6 +4,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
 
 from spyfish.biigle.biigle_handler import BiigleHandler
+from spyfish.biigle.biigle_parser import BiigleParser
 from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.config import PipelineStatus, config
@@ -131,11 +132,19 @@ def sync_biigle_annotations():
                 logging.debug(f"  Volume {volume_id} for {drop_id} not marked Done yet. Skipping.")
                 continue
 
-            logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report...")
+            logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report (with caching)...")
 
-            # 3. Download annotation report
+            # 3. Download annotation report (using Parser for per-drop caching)
+            parser = BiigleParser(drop_id=drop_id)
             report_type = config.biigle_annotation_report_type_video if media_type == "video" else config.biigle_annotation_report_type_images
-            fish_annotations_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
+
+            # TODO: Add a check here to see if the report has already been downloaded
+            # This will use the cache if it exists, otherwise download and cache in data_quality/{drop_id}/biigle_cache
+            fish_annotations_df = parser._export_report_with_cache(
+                resource="volumes",
+                resource_id=volume_id,
+                type_id=report_type
+            )
 
             if fish_annotations_df.empty:
                 logging.debug(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")

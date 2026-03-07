@@ -54,9 +54,9 @@ def select_maxn_clips_for_review(
     interval_sec = config.interval_seconds
 
     # Use sub-second precise timing from the raw ML output if available.
-    df["TimeOfMaxnMs"] = df["time_of_maxn_ms"].astype(float)
-    df["ConfidenceAgreement"] = df["ConfidenceAgreement"].replace(0, 0.001)
-    df["ConfusionScore"] = df["MaxInterval"] / df["ConfidenceAgreement"]
+    df[config.csv_clip_max_time_column] = df[config.csv_maxn_time_ms_column].astype(float)
+    df[config.csv_confidence_agreement_column] = df[config.csv_confidence_agreement_column].replace(0, 0.001)
+    df[config.csv_confusion_score_column] = df[config.csv_max_interval_column] / df[config.csv_confidence_agreement_column]
 
     selected_clip_starts: set = set()
     selection_rows: list = []
@@ -67,17 +67,15 @@ def select_maxn_clips_for_review(
             return False
         selected_clip_starts.add(clip_start)
         selection_rows.append({
-            "DropID": drop_id,
-            "SamplingStart": sampling_start,
-            "ClipStartRelative": clip_start,                       # seconds since SamplingStart (snapped to interval)
-            "ClipEndRelative": clip_start + interval_sec,
-            "TimeOfMaxnMs": float(row.get("TimeOfMaxnMs", clip_start)),  # exact ML peak seconds (sub-second precision)
-            "StartTime": seconds_to_time(clip_start),            # HH:MM:SS relative
-            "EndTime": seconds_to_time(clip_start + interval_sec),
-            "TargetSpecies": species,
+            config.drop_id_column: drop_id,
+            config.csv_sampling_start_column: sampling_start,
+            config.csv_clip_start_column: clip_start,                       # seconds since SamplingStart (snapped to interval)
+            config.csv_clip_end_column: clip_start + interval_sec,
+            config.csv_clip_max_time_column: float(row.get(config.csv_clip_max_time_column, clip_start)),  # exact ML peak seconds (sub-second precision)
+            config.csv_scientific_name_column: species,
             "SelectionReason": reason,
-            "MaxCount": row["MaxInterval"],
-            "Confidence": row["ConfidenceAgreement"],
+            config.csv_max_interval_column: row[config.csv_max_interval_column],
+            config.csv_confidence_agreement_column: row[config.csv_confidence_agreement_column],
         })
         return True
 
@@ -85,7 +83,7 @@ def select_maxn_clips_for_review(
         candidate_start = int((candidate_sec // interval_sec) * interval_sec)
         return all(abs(candidate_start - s) >= spacing for s in selected_clip_starts)
 
-    unique_species = df["ScientificName"].unique()
+    unique_species = df[config.csv_scientific_name_column].unique()
     is_binary = len(unique_species) <= 1
     logging.info(f"{'Binary' if is_binary else 'Multi-class'} strategy ({len(unique_species)} species)")
 
@@ -97,26 +95,26 @@ def select_maxn_clips_for_review(
         n_start      = strat.get("start_clips", 2)
         spacing      = strat.get("temporal_spacing_seconds", 30)
 
-        for _, row in df.nlargest(n_maxn, "MaxInterval").iterrows():
-            _add_interval(row, "Absolute MaxN", row["ScientificName"])
+        for _, row in df.nlargest(n_maxn, config.csv_max_interval_column).iterrows():
+            _add_interval(row, "Absolute MaxN", row[config.csv_scientific_name_column])
 
         added = 0
-        for _, row in df.sort_values("ConfusionScore", ascending=False).iterrows():
+        for _, row in df.sort_values(config.csv_confusion_score_column, ascending=False).iterrows():
             if added >= n_confusing:
                 break
             if _temporal_ok(row["TimeOfMaxnMs"], spacing):
-                if _add_interval(row, "Confusing (high count, low conf)", row["ScientificName"]):
+                if _add_interval(row, "Confusing (high count, low conf)", row[config.csv_scientific_name_column]):
                     added += 1
 
-        empty_df = df[df["MaxInterval"] == 0]
+        empty_df = df[df[config.csv_max_interval_column] == 0]
         if not empty_df.empty:
             for _, row in empty_df.sample(min(n_empty, len(empty_df))).iterrows():
-                _add_interval(row, "Empty (false-negative check)", row["ScientificName"])
+                _add_interval(row, "Empty (false-negative check)", row[config.csv_scientific_name_column])
 
         start_df = df[df["TimeOfMaxnMs"] < 60]
         if not start_df.empty:
             for _, row in start_df.sample(min(n_start, len(start_df))).iterrows():
-                _add_interval(row, "Video Start", row["ScientificName"])
+                _add_interval(row, "Video Start", row[config.csv_scientific_name_column])
 
     else:
         strat = z_config.get("multiclass_strategy", {})
@@ -127,26 +125,26 @@ def select_maxn_clips_for_review(
         spacing        = strat.get("temporal_spacing_seconds", 30)
 
         for species in unique_species:
-            sp_df = df[df["ScientificName"] == species]
-            for _, row in sp_df.nlargest(n_maxn_per_sp, "MaxInterval").iterrows():
+            sp_df = df[df[config.csv_scientific_name_column] == species]
+            for _, row in sp_df.nlargest(n_maxn_per_sp, config.csv_max_interval_column).iterrows():
                 _add_interval(row, f"MaxN ({species})", species)
             added = 0
-            for _, row in sp_df.sort_values("ConfusionScore", ascending=False).iterrows():
+            for _, row in sp_df.sort_values(config.csv_confusion_score_column, ascending=False).iterrows():
                 if added >= n_conf_per_sp:
                     break
                 if _temporal_ok(row["TimeOfMaxnMs"], spacing):
                     if _add_interval(row, f"Confusing ({species})", species):
                         added += 1
 
-        global_counts = df.groupby("TimeOfMaxnMs")["MaxInterval"].sum().reset_index()
-        empty_times = global_counts[global_counts["MaxInterval"] == 0]["TimeOfMaxnMs"]
+        global_counts = df.groupby(config.csv_clip_max_time_column)[config.csv_max_interval_column].sum().reset_index()
+        empty_times = global_counts[global_counts[config.csv_max_interval_column] == 0][config.csv_clip_max_time_column]
         for t in empty_times.sample(min(n_empty, len(empty_times))):
-            _add_interval({"TimeOfMaxnMs": t, "MaxInterval": 0, "ConfidenceAgreement": 1.0},
+            _add_interval({config.csv_clip_max_time_column: t, config.csv_max_interval_column: 0, config.csv_confidence_agreement_column: 1.0},
                           "Global Empty", "All")
 
-        start_times = pd.Series([t for t in df["TimeOfMaxnMs"].unique() if t < 60])
+        start_times = pd.Series([t for t in df[config.csv_clip_max_time_column].unique() if t < 60])
         for t in start_times.sample(min(n_start, len(start_times))):
-            _add_interval({"TimeOfMaxnMs": t, "MaxInterval": -1, "ConfidenceAgreement": -1.0},
+            _add_interval({config.csv_clip_max_time_column: t, config.csv_max_interval_column: -1, config.csv_confidence_agreement_column: -1.0},
                           "Global Video Start", "All")
 
     if not selection_rows:
@@ -157,7 +155,7 @@ def select_maxn_clips_for_review(
 
     # Sort chronologically
     if not selections_df.empty:
-        selections_df = selections_df.sort_values("ClipStartRelative").reset_index(drop=True)
+        selections_df = selections_df.sort_values(config.csv_clip_start_column).reset_index(drop=True)
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
     selections_df.to_csv(output_selections_path, index=False)
@@ -165,25 +163,17 @@ def select_maxn_clips_for_review(
     return selections_df
 
 
-def main():
-    logging.info("Running clip selection in standalone test mode.")
-    # The original content of main is now handled by argparse in __main__ block
-    pass
-
-
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser(description="Select clips for Zooniverse.")
     parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
     args = parser.parse_args()
 
     drop_id = args.drop_id
-    model_name = config.pipeline_model_path
+    # Use the model name from config
+    model_name = Path(config.pipeline_model_path).stem
 
     input_maxn = str(config.get_maxn_csv_path(drop_id, model_name))
     output_selections = str(config.get_selections_csv_path(drop_id))
 
-    select_zooniverse_clips(input_maxn, output_selections, drop_id, sampling_start=0)
-
-
-if __name__ == "__main__":
-    main()
+    select_maxn_clips_for_review(input_maxn, output_selections, drop_id, sampling_start=0)

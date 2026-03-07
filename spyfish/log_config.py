@@ -13,7 +13,8 @@ def _set_logging_path() -> str:
     Returns:
         str: The path to the log file.
     """
-    log_dir = Path.home() / ".spyfish" / "logs"
+    from spyfish.config import config
+    log_dir = config.logs_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     log_filename = dt.strftime(dt.now(), "%Y-%m-%d_%H-%M-%S") + ".log"
     log_file = log_dir / log_filename

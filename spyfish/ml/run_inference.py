@@ -37,18 +37,16 @@ def run_yolo_inference(video_url, model_path, conf, imgsz, output_csv, true_fps,
         if not cap.isOpened():
             raise ValueError(f"Could not open video {video_url} during inference.")
 
-        start_frame = int(sampling_start * true_fps) if sampling_start > 0 else 0
-        # Align start frame to stride to ensure exact matching behavior
-        aligned_start_frame = start_frame + (vid_stride - (start_frame % vid_stride)) % vid_stride
-        if aligned_start_frame > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, aligned_start_frame)
+        if sampling_start > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, sampling_start * 1000.0)
 
-        current_frame = aligned_start_frame
+        # align current frame after precise seek
+        current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         end_frame = int(sampling_end * true_fps) if sampling_end else total_video_frames
         end_frame = min(end_frame, total_video_frames)
-        total_frames_to_process = max(1, (end_frame - aligned_start_frame) // vid_stride)
+        total_frames_to_process = max(1, (end_frame - current_frame) // vid_stride)
 
         frames_processed = 0
 
@@ -65,8 +63,7 @@ def run_yolo_inference(video_url, model_path, conf, imgsz, output_csv, true_fps,
                 if sampling_end is not None and real_video_seconds > sampling_end:
                     break
 
-                # The original code's idx index was equivalent to current_frame // vid_stride
-                idx = current_frame // vid_stride
+                # Use absolute video time for all filenames and metadata
                 ml_timeline_seconds = real_video_seconds - sampling_start if sampling_start > 0 else real_video_seconds
 
                 # Run prediction on single frame
@@ -85,7 +82,9 @@ def run_yolo_inference(video_url, model_path, conf, imgsz, output_csv, true_fps,
                     cls = int(box.cls[0])
                     class_name = model.names[cls]
 
-                    writer.writerow([idx, ml_timeline_seconds, class_name, confidence, x, y, w, h])
+                    # IMPORTANT: Store absolute current_frame, NOT index // stride
+                    # This ensures extraction tools can seek back pixel-perfectly.
+                    writer.writerow([current_frame, ml_timeline_seconds, class_name, confidence, x, y, w, h])
 
                 # Fast forward vid_stride frames using grab()
                 end_of_video = False
