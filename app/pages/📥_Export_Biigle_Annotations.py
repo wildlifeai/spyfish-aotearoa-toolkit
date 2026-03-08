@@ -6,13 +6,14 @@ Retrieves MaxN, 30-second interval counts, and size annotations from a Biigle vo
 import pandas as pd
 import streamlit as st
 
-from spyfish.biigle.biigle_parser import BiigleParser
 from spyfish.config import config
+from utils import render_sidebar_refresh
 
 st.set_page_config(
     page_title="Biigle Annotation Fetcher", page_icon="📥", layout="wide"
 )
 st.title("📥 Biigle Annotation Fetcher")
+render_sidebar_refresh()
 st.markdown(
     "Retrieve and parse annotation reports from Biigle clip volumes.  \n"
     "Exports MaxN (whole video), MaxN (every 30s), and size annotations.  \n"

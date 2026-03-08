@@ -1,7 +1,7 @@
 """
-Extract Zooniverse clips from source video files using ffmpeg.
+Extract clips from source video files using ffmpeg.
 
-Reads the selections CSV produced by select_clips.py and cuts one mp4 per row.
+Reads the selections CSV produced by selection strategies and cuts one mp4 per row.
 Clip timestamps are stored relative to SamplingStart in the selections CSV.
 sampling_start is added back to get the correct seek position in the full source video.
 """
@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import time_to_seconds, generate_clip_filename
 
 
 def extract_clips_from_selections(
@@ -49,18 +50,28 @@ def extract_clips_from_selections(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    drop_id = df["DropID"].iloc[0]
-    sampling_start = int(df["SamplingStart"].iloc[0]) if "SamplingStart" in df.columns else 0
+    if config.csv_sampling_start_column not in df.columns:
+        raise ValueError(f"Missing mandatory column '{config.csv_sampling_start_column}' in selections CSV. "
+                         "This is required to calculate absolute seek times.")
 
+    drop_id = df[config.drop_id_column].iloc[0]
+    sampling_start = int(df[config.csv_sampling_start_column].iloc[0])
 
     clip_paths = []
     for idx, row in df.iterrows():
-        clip_start_relative = float(row["ClipStartRelative"]) if "ClipStartRelative" in row else 0.0
-        clip_end_relative = float(row["ClipEndRelative"]) if "ClipEndRelative" in row else clip_start_relative + 10.0
+        if config.csv_clip_start_column not in row:
+            logging.error(f"Missing {config.csv_clip_start_column} in row: {row}")
+            clip_paths.append(None)
+            continue
+
+        clip_start_relative = float(row[config.csv_clip_start_column])
+        # Use config-defined clip length as fallback
+        clip_end_relative = float(row[config.csv_clip_end_column]) if config.csv_clip_end_column in row else clip_start_relative + config.zooniverse_clip_length
+
         clip_duration = clip_end_relative - clip_start_relative
         seek_seconds = sampling_start + clip_start_relative
 
-        out_filename = f"{drop_id}_{int(clip_start_relative):05d}s_{int(clip_duration):02d}s.mp4"
+        out_filename = generate_clip_filename(drop_id, clip_duration, seek_seconds)
         out_path = Path(output_dir) / out_filename
 
         cmd = [
@@ -68,14 +79,20 @@ def extract_clips_from_selections(
             "-ss", str(seek_seconds),
             "-i", str(video_path),
             "-t", str(clip_duration),
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "22",
-            "-an",   # remove audio — standard for Zooniverse clips
+            "-c:v", config.ffmpeg_codec,
+            "-preset", config.ffmpeg_preset,
+            "-crf", config.ffmpeg_crf,
+            "-an",   # remove audio — standard for processed clips
             str(out_path),
         ]
 
-        logging.info(f"  [{idx+1}/{n}] {seek_seconds:.1f}s → {out_filename}")
+        logging.info(f"  [{idx+1}/{len(df)}] {seek_seconds:.1f}s → {out_filename}")
+
+        if out_path.exists():
+            logging.info(f"    Skipping: File already exists at {out_path}")
+            clip_paths.append(str(out_path))
+            continue
+
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             clip_paths.append(str(out_path))
@@ -89,19 +106,17 @@ def extract_clips_from_selections(
     return df
 
 
-def main():
-
-    logging.info("Running clip extraction in standalone test mode.")
-    repo_root = Path(__file__).parent.parent.parent
-    drop_id = config.test_drops[0][0]
-
-    annotations_dir = repo_root / config.local_manifest_dir_path
-    selections_csv = str(annotations_dir / f"{drop_id}_zooniverse_selections.csv")
-    video_path = str(repo_root / config.mock_video_dir / f"{drop_id}.mp4")
-    output_dir = str(repo_root / config.local_data_quality_dir / drop_id / "zooniverse_clips")
-
-    extract_clips_from_selections(selections_csv, video_path, output_dir)
-
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Extract clips from selections.")
+    parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
+    args = parser.parse_args()
+
+    drop_id = args.drop_id
+    logging.info(f"Running clip extraction for Drop ID: {drop_id}")
+    selections_csv = str(config.get_selections_csv_path(drop_id))
+    video_path = str(config.get_video_path(drop_id))
+    output_dir = str(config.get_clips_dir(drop_id))
+
+    extract_clips_from_selections(selections_csv, video_path, output_dir)

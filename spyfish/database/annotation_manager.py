@@ -111,19 +111,20 @@ class AnnotationDatabaseManager:
 
         # Map internal schema strictly to requested export columns using the exact casing
         df = df.rename(columns={
-            "drop_id": "DropID",
-            "scientific_name": "ScientificName",
-            "time_of_max": "TimeOfMax",
-            "max_interval": "MaxInterval",
-            "annotated_by": "AnnotatedBy",
-            "interval_annotation": "IntervalAnnotation",
-            "confidence_agreement": "ConfidenceAgreement"
+            "drop_id": config.drop_id_column,
+            "scientific_name": config.csv_scientific_name_column,
+            "time_of_max": config.csv_maxn_time_column,
+            "max_interval": config.csv_max_interval_column,
+            "annotated_by": config.csv_annotated_by_column,
+            "interval_annotation": config.csv_interval_annotation_column,
+            "confidence_agreement": config.csv_confidence_agreement_column
         })
 
         # We drop any internal columns (like id, external_id, created_at) by strictly selecting
         export_cols = [
-            "DropID", "ScientificName", "TimeOfMax", "MaxInterval",
-            "AnnotatedBy", "IntervalAnnotation", "ConfidenceAgreement"
+            config.drop_id_column, config.csv_scientific_name_column, config.csv_maxn_time_column,
+            config.csv_max_interval_column, config.csv_annotated_by_column,
+            config.csv_interval_annotation_column, config.csv_confidence_agreement_column
         ]
 
         return df[export_cols]

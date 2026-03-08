@@ -79,6 +79,7 @@ class ValidationConfig:
     remove_duplicates: bool = True
     extract_clean_dataframes: bool = False
     max_errors_per_validator: int = 10000
+    known_files: Optional[Set[str]] = None
 
 
 class CleanRowTracker:
@@ -509,7 +510,7 @@ class FilePresenceValidator:
             )
         return None, None
 
-    def validate(self, rules: Dict[str, Any]) -> List[ErrorChecking]:
+    def validate(self, rules: Dict[str, Any], known_files: Optional[Set[str]] = None) -> List[ErrorChecking]:
         """Validate file presence between CSV references and S3 storage."""
         errors: List[ErrorChecking] = []
         file_presence_config = rules.get("file_presence", {})
@@ -518,7 +519,7 @@ class FilePresenceValidator:
 
         csv_filename = file_presence_config.get("csv_filename")
         try:
-            _, missing_files, extra_files = self.get_file_differences(rules)
+            _, missing_files, extra_files = self.get_file_differences(rules, known_files=known_files)
 
             for file_path in missing_files:
                 if len(errors) >= self.max_errors:
@@ -559,7 +560,7 @@ class FilePresenceValidator:
             )
         return errors
 
-    def get_file_differences(self, rules: Dict[str, Any]) -> tuple[set, set, set]:
+    def get_file_differences(self, rules: Dict[str, Any], known_files: Optional[Set[str]] = None) -> tuple[set, set, set]:
         """Get file differences between CSV references and S3 storage."""
         file_presence_config = rules.get("file_presence", {})
         if not file_presence_config:
@@ -589,9 +590,12 @@ class FilePresenceValidator:
         csv_filepaths_all = csv_paths_result["all"]
         csv_filepaths_filtered = csv_paths_result["filtered"]
 
-        s3_video_filepaths = self.s3_handler.get_paths_from_s3(
-            path_prefix=path_prefix, valid_extensions=valid_extensions
-        )
+        if known_files is not None:
+            s3_video_filepaths = known_files
+        else:
+            s3_video_filepaths = self.s3_handler.get_paths_from_s3(
+                path_prefix=path_prefix, valid_extensions=valid_extensions
+            )
 
         missing_files = csv_filepaths_filtered - s3_video_filepaths
         extra_files = s3_video_filepaths - csv_filepaths_all
