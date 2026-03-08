@@ -158,6 +158,14 @@ def sync_annotations(upload_videos: bool = False) -> bool:
         filters += ["--include", f"{pattern}.jpeg"]
         filters += ["--include", f"{pattern}.png"]
 
+    # Include training results (models, metrics, curves)
+    training_prefix = str(config.training_dir.relative_to(config.data_quality_dir))
+    filters += ["--include", f"{training_prefix}/**"]
+
+    # Include promoted models
+    models_prefix = str(config.models_root_dir.relative_to(config.data_quality_dir))
+    filters += ["--include", f"{models_prefix}/**"]
+
     # Optionally include videos
     if upload_videos:
         filters += ["--include", "*.mp4"]

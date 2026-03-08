@@ -19,6 +19,8 @@ If no step flags are given, ALL steps run.
 
 import argparse
 import logging
+import os
+import sys
 import traceback
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.ingest import run_ingestion, check_pending_arrivals
 from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
 from spyfish.zooniverse.upload import upload_frames_to_zooniverse
+from spyfish.orchestrator.retrain_runner import run_retraining
 from spyfish.test_setup import inject_test_drops
 from spyfish.storage.db_sync import download_db, download_annotations_db
 
@@ -113,7 +116,8 @@ def _run_step4_zooniverse_clips(db: DatabaseManager):
 
         selections_df = process_zooniverse_clips(paths["maxn_csv"], paths["selections_csv"], drop_id, config)
         if selections_df is None or selections_df.empty:
-            logging.info(f"No high-confidence clips found for {drop_id}.")
+            logging.info(f"No high-confidence clips found for {drop_id}. Advancing to ML_COMPLETE.")
+            db.update_status(drop_id, PipelineStatus.CITSCI_CLIPS_COMPLETE)
             continue
 
         clips_df = extract_clips_from_selections(selections_csv_path=paths["selections_csv"], video_path=paths["video_path"], output_dir=paths["zooniverse_clips"])
@@ -138,7 +142,8 @@ def _run_step5_zooniverse_images(db: DatabaseManager):
         paths = _get_common_paths(drop_id)
 
         if not Path(paths["selections_csv"]).exists():
-            logging.warning(f"Missing {paths['selections_csv']} for {drop_id}. Skipping.")
+            logging.warning(f"Missing {paths['selections_csv']} for {drop_id}. Advancing to CITSCI_COMPLETE.")
+            db.update_status(drop_id, PipelineStatus.CITSCI_COMPLETE)
             continue
 
         frames_df = extract_frames_from_selections(
@@ -171,7 +176,8 @@ def _run_step6_biigle_upload(db: DatabaseManager, include_ml_complete: bool = Fa
         paths = _get_common_paths(drop_id)
 
         if not Path(paths["selections_csv"]).exists():
-            logging.error(f"Missing {paths['selections_csv']} for {drop_id}.")
+            logging.error(f"Missing {paths['selections_csv']} for {drop_id}. Advancing to AWAITING_EXPERT_REVIEW (skipped upload).")
+            db.update_status(drop_id, PipelineStatus.AWAITING_EXPERT_REVIEW)
             continue
 
         # Extract clean JPEGs + COCO JSON
@@ -211,6 +217,8 @@ def main():
     parser.add_argument("--zooniverse-images",action="store_true", help="Run Step 5: Zooniverse image extraction")
     parser.add_argument("--biigle-upload", action="store_true", help="Run Step 6: Biigle frame extraction + upload")
     parser.add_argument("--biigle-sync",   action="store_true", help="Run Step 7: Biigle annotation sync")
+    parser.add_argument("--retrain",       action="store_true", help="Step 8: Run the full retraining pipeline")
+    parser.add_argument("--no-upload",     action="store_true", help="Skip all S3 uploads (DB, models, results)")
     parser.add_argument("--upload-videos", action="store_true", help="Upload videos to S3 during final sync")
     parser.add_argument("--staged-test",   action="store_true", help="Seed DB with staggered drops across all pipeline stages")
     parser.add_argument("--test-run",      action="store_true", help="Run in test mode with mock data")
@@ -219,18 +227,24 @@ def main():
     db = DatabaseManager()
 
     # If no step flags are given, run everything
-    run_all = not any([args.ingest, args.check_arrivals, args.ml, args.zooniverse_clips, args.zooniverse_images, args.biigle_upload, args.biigle_sync, args.staged_test])
+    run_all = not any([
+        args.ingest, args.check_arrivals, args.ml,
+        args.zooniverse_clips, args.zooniverse_images,
+        args.biigle_upload, args.biigle_sync,
+        args.retrain, args.staged_test
+    ])
 
-    active_steps = "ALL" if run_all else ", ".join(
-        s for s, v in [("ingest", args.ingest), ("ml", args.ml),
-                       ("zooniverse-clips", args.zooniverse_clips), ("zooniverse-images", args.zooniverse_images),
-                       ("biigle-upload", args.biigle_upload), ("biigle-sync", args.biigle_sync),
-                       ("staged-test", args.staged_test)] if v
+    active_steps = ", ".join(
+        s for s, v in [("ingest", run_all or args.ingest), ("ml", run_all or args.ml),
+                       ("zooniverse-clips", run_all or args.zooniverse_clips), ("zooniverse-images", run_all or args.zooniverse_images),
+                       ("biigle-upload", run_all or args.biigle_upload), ("biigle-sync", run_all or args.biigle_sync),
+                       ("retrain", run_all or args.retrain), ("staged-test", args.staged_test)] if v
     )
 
     logging.info("═" * 60)
     logging.info(" SPYFISH AOTEAROA PIPELINE ".center(60, "═"))
     logging.info(f" STEPS: {active_steps} ".center(60, "═"))
+    logging.info(f" NO-UPLOAD: {args.no_upload} ".center(60, "═"))
     logging.info("═" * 60)
 
     # --- PULL PHASE ---
@@ -268,20 +282,35 @@ def main():
         # If we are running biigle_upload but NOT running Zooniverse steps,
         # tell Step 6 to pull directly from ML_COMPLETE.
         skip_zooniverse = not (run_all or args.zooniverse_clips or args.zooniverse_images)
-        logging.info(f"!!!!!!!!!!!!!Skipping Zooniverse steps: {skip_zooniverse}")
+        logging.info(f"Skipping Zooniverse steps: {skip_zooniverse}")
         execute_step(_run_step6_biigle_upload, db, include_ml_complete=skip_zooniverse)
 
     if run_all or args.biigle_sync:
         execute_step(_run_step7_biigle_sync)
 
-    # Push final state (DBs + ML CSVs) to S3
-    logging.info("Syncing final results to S3...")
-    if not config.is_test_run:
-        sync_pipeline_results(upload_videos=args.upload_videos)
-    else:
-        logging.debug("Test run: skipping final S3 sync of annotations directory.")
+    if run_all or args.retrain:
+        log_header("STEP 8: RETRAINING PIPELINE")
+        execute_step(run_retraining, auto_promote=True)
 
-    log_header("PIPELINE COMPLETE", character="═")
+    # Push final state (DBs + ML CSVs) to S3
+    if args.no_upload:
+        logging.info("No-upload set: skipping final S3 sync.")
+        log_header("PIPELINE COMPLETE (LOCAL ONLY)", character="═")
+    elif config.is_test_run:
+        logging.debug("Test run: skipping final S3 sync of annotations directory.")
+        log_header("PIPELINE COMPLETE (TEST RUN)", character="═")
+    else:
+        logging.info("Syncing final results to S3...")
+        # Note: sync_pipeline_results uses `aws s3 sync` which handles file comparison.
+        # It won't override files that haven't changed locally.
+        # TODO add a system to review if it's completely updated
+        if sync_pipeline_results(upload_videos=args.upload_videos):
+            log_header("PIPELINE SUCCESS (SYNCED TO S3)", character="═")
+        else:
+            logging.critical("CRITICAL: S3 Sync failed. Pipeline state might be inconsistent on S3.")
+            log_header("PIPELINE FAILED (SYNC ERROR)", character="═")
+            sys.exit(1)
+
     logging.info(f"Processed {len(results)} drops successfully.")
 
 if __name__ == "__main__":

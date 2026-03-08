@@ -92,7 +92,8 @@ zooniverse_extraction:
     temporal_spacing_seconds: 10
 
 orchestrator:
-  is_test_run: false
+  is_test_run: true
+  log_output: "console"
 
 ffmpeg:
   crf: 22
