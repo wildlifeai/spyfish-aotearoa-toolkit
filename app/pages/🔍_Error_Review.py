@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from spyfish.database.manager import DatabaseManager
-from utils import check_password, sync_db_if_needed
+from utils import check_password, sync_db_if_needed, render_sidebar_refresh
 
 @st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
 def load_error_data():
@@ -72,6 +72,7 @@ def display_error_table(errors_df: pd.DataFrame, title: str, filters: dict = Non
         hide_index=True,
         column_config={
             "ErrorMessage": st.column_config.TextColumn("Message", width="large"),
+            "status": st.column_config.TextColumn("Deployment Status"),
         }
     )
 
@@ -79,43 +80,72 @@ def main():
     st.set_page_config(page_title="Error Review", page_icon="🔍", layout="wide")
     if not check_password(): st.stop()
 
+    # --- Sidebar ---
+    render_sidebar_refresh()
+
     st.title("🔍 Data Validation & Error Review")
     st.caption("Review pipeline errors directly pulled and parsed from spyfish_pipeline.db")
 
     st.divider()
-    errors_df = load_error_data()
+    raw_errors_df = load_error_data()
 
+    if raw_errors_df.empty:
+        st.success("🎉 No validation errors found in the data!")
+        return
+
+    # --- Header with Filters and Overview ---
+    # Move filters up so they affect all subsequent charts
     st.header("📈 Overview")
+
+
+
+    fcol1, fcol2 = st.columns(2)
+    with fcol1:
+        show_sampling_errors = st.checkbox("Show Sampling Errors", value=False)
+    with fcol2:
+        show_complete = st.checkbox("Show Complete", value=False)
+
+    # Apply global filters
+    errors_df = raw_errors_df.copy()
+    if not show_sampling_errors and "ColumnName" in errors_df.columns:
+        errors_df = errors_df[~errors_df["ColumnName"].isin(["SamplingStart", "SamplingEnd"])]
+    if not show_complete and "status" in errors_df.columns:
+        errors_df = errors_df[errors_df["status"] != "PIPELINE_COMPLETE"]
+
+    # Now display metrics based on filtered data
     display_error_summary(errors_df)
     st.divider()
 
-    if not errors_df.empty:
-        col1, col2 = st.columns(2)
-        with col1: display_error_type_breakdown(errors_df)
-        with col2: display_file_breakdown(errors_df)
+    # --- Overview Breakdown ---
+    display_error_type_breakdown(errors_df)
+    st.divider()
 
-        st.divider()
-        st.header("🔎 Detailed Error Exploration")
+    st.header("🔎 Detailed Error Exploration")
 
-        tab1, tab2, tab3 = st.tabs(["🎯 By Error Type", "🗺️ By Survey", "📋 All Errors"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🎯 By Error Type", "🗺️ By Survey", "📁 By File", "📋 All Errors"])
 
-        with tab1:
-            st.subheader("Filter by Error Type")
-            selected_error_types = st.multiselect("Select error types", options=sorted(errors_df["ErrorType"].unique()))
-            if selected_error_types:
-                display_error_table(errors_df[errors_df["ErrorType"].isin(selected_error_types)], "Errors by Type")
+    with tab1:
+        st.subheader("Filter by Error Type")
+        selected_error_types = st.multiselect("Select error types", options=sorted(errors_df["ErrorType"].unique()))
+        if selected_error_types:
+            display_error_table(errors_df[errors_df["ErrorType"].isin(selected_error_types)], "Errors by Type")
 
-        with tab2:
-            st.subheader("Filter by Survey")
-            selected_surveys = st.multiselect("Select surveys to view", options=sorted(errors_df["SurveyID"].unique()))
-            if selected_surveys:
-                display_error_table(errors_df[errors_df["SurveyID"].isin(selected_surveys)], "Errors by Survey")
+    with tab2:
+        st.subheader("Filter by Survey")
+        selected_surveys = st.multiselect("Select surveys to view", options=sorted(errors_df["SurveyID"].unique()))
+        if selected_surveys:
+            display_error_table(errors_df[errors_df["SurveyID"].isin(selected_surveys)], "Errors by Survey")
 
-        with tab3:
-            st.subheader("All Validation Errors")
-            display_error_table(errors_df, "All Errors", None)
-    else:
-        st.success("🎉 No validation errors found in the data!")
+    with tab3:
+        display_file_breakdown(errors_df)
+        st.subheader("Filter by File")
+        selected_files = st.multiselect("Select specific files to view", options=sorted(errors_df["FileName"].unique()))
+        if selected_files:
+            display_error_table(errors_df[errors_df["FileName"].isin(selected_files)], "Errors by File")
+
+    with tab4:
+        st.subheader("All Validation Errors")
+        display_error_table(errors_df, "All Errors", None)
 
 if __name__ == "__main__":
     main()

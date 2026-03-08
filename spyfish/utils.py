@@ -158,3 +158,11 @@ def get_survey_summary(deployment_df: pd.DataFrame) -> pd.DataFrame:
     ).round(1).astype(str) + "%"
 
     return survey_summary
+
+def generate_clip_filename(drop_id: str, duration: float, start_seconds: float) -> str:
+    """Standardizes Zooniverse/Biigle MP4 clip naming."""
+    return f"{drop_id}__clip_{int(duration):02d}s_{int(start_seconds):05d}s.mp4"
+
+def generate_frame_filename(drop_id: str, time_seconds: float) -> str:
+    """Standardizes Zooniverse/Biigle JPEG frame naming."""
+    return f"{drop_id}__frame_{time_seconds:.3f}s.jpg"

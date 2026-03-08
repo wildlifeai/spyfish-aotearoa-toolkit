@@ -175,8 +175,8 @@ db/
 .DS_Store
 notes/
 kso/
-mock_model/
-mock_media/
+model/
+media/
 wip/
 hold*
 .streamlit/

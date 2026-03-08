@@ -23,6 +23,7 @@ Dependencies:
 import datetime
 import io
 import logging
+import subprocess
 import mimetypes
 import os
 import threading
@@ -443,6 +444,45 @@ class S3Handler:
         finally:
             if delete_file_after_upload:
                 delete_file(filename)
+
+    def sync_local_to_s3(self, local_dir: str, s3_prefix: str, filters: Optional[List[str]] = None, extra_args: Optional[List[str]] = None) -> bool:
+        """
+        Uses 'aws s3 sync' to recursively synchronize a local directory to S3.
+        Much more efficient for large batches of files than individual uploads.
+
+        Args:
+            local_dir (str): Local directory path.
+            s3_prefix (str): Target S3 prefix (e.g. 'process_files/annotations').
+            filters (list): Optional list of S3 sync filters (e.g. ['--exclude', '*', '--include', '*.csv']).
+            extra_args (list): Optional extra arguments for aws cli.
+
+        Returns:
+            bool: True if sync succeeded, False otherwise.
+        """
+        if not os.path.isdir(local_dir):
+            logging.warning(f"Local directory {local_dir} does not exist. Skipping sync.")
+            return False
+
+        s3_uri = f"s3://{self.bucket}/{s3_prefix}"
+        logging.info(f"Syncing {local_dir} -> {s3_uri}...")
+
+        try:
+            # We use subprocess to leverage the highly optimized 'aws s3 sync' command
+            cmd = ["aws", "s3", "sync", local_dir, s3_uri, "--no-progress"]
+            if filters:
+                cmd.extend(filters)
+            if extra_args:
+                cmd.extend(extra_args)
+
+            subprocess.run(cmd, check=True)
+            logging.info(f"Successfully synced {local_dir} to S3.")
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to sync {local_dir} to S3: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error during S3 sync: {e}")
+            return False
 
     def upload_updated_df_to_s3(
         self,

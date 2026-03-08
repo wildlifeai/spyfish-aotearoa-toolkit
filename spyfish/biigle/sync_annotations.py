@@ -4,6 +4,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
 
 from spyfish.biigle.biigle_handler import BiigleHandler
+from spyfish.biigle.biigle_parser import BiigleParser
 from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.config import PipelineStatus, config
@@ -45,7 +46,9 @@ def _map_biigle_to_spyfish_schema(row: pd.Series, label_col: str, drop_id: str, 
     species = str(row.get(label_col, 'unknown_species')).strip()
     # Clean up "Kina - Evechinus chloroticus" to "Evechinus chloroticus"
     if " - " in species:
-        species = species.split(" - ")[1]
+        parts = species.split(" - ", 1)
+        if len(parts) == 2:
+            species = parts[1]
 
     # Use empty string instead of None to allow sorting
     sortable_time = timestamp or ""
@@ -120,23 +123,31 @@ def sync_biigle_annotations():
         drop_id = dep["drop_id"]
         volume_id = int(dep["biigle_volume_id"])
 
-        logging.info(f"Checking Biigle volume {volume_id} for {drop_id}")
+        logging.debug(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
             # 2. Check presence of labels that define the volume as done via file-level labels
             is_done, media_type = handler.volume_is_done(volume_id)
             if not is_done:
-                logging.info(f"  Volume {volume_id} for {drop_id} not marked 'Done' yet. Skipping.")
+                logging.debug(f"  Volume {volume_id} for {drop_id} not marked Done yet. Skipping.")
                 continue
 
-            logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report...")
+            logging.info(f"  ✅ Volume {volume_id} for {drop_id} is DONE ({media_type} volume). Downloading annotation report (with caching)...")
 
-            # 3. Download annotation report
+            # 3. Download annotation report (using Parser for per-drop caching)
+            parser = BiigleParser(drop_id=drop_id)
             report_type = config.biigle_annotation_report_type_video if media_type == "video" else config.biigle_annotation_report_type_images
-            fish_annotations_df = handler.export_report_to_df("volumes", volume_id, type_id=report_type)
+
+            # TODO: Add a check here to see if the report has already been downloaded
+            # This will use the cache if it exists, otherwise download and cache in data_quality/{drop_id}/biigle_cache
+            fish_annotations_df = parser._export_report_with_cache(
+                resource="volumes",
+                resource_id=volume_id,
+                type_id=report_type
+            )
 
             if fish_annotations_df.empty:
-                logging.info(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")
+                logging.debug(f"  No annotations found for {drop_id} (volume may be done but have no annotations).")
                 db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 continue
 

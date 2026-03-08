@@ -6,10 +6,10 @@ import logging
 import pandas as pd
 from pathlib import Path
 
-from spyfish.config import config
+from spyfish.config import config, PipelineStatus
 from spyfish.database.manager import DatabaseManager
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
-from spyfish.ml.draw_frames import draw_boxes_on_frames
+from spyfish.ml.draw_frames import draw_boxes_on_video_frames
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
 from spyfish.utils import seconds_to_time
@@ -34,8 +34,7 @@ def process_maxn(raw_df, output_csv_path, drop_id,
     Returns:
         DataFrame with MaxN results.
     """
-    logging.info(f"Processing MaxN for {drop_id}")
-    logging.info(f"Settings - Interval: {interval_seconds}s, MaxN Confidence Threshold: {confidence_threshold}")
+    logging.debug(f"Processing MaxN for {drop_id} (Interval: {interval_seconds}s, MaxN Threshold: {confidence_threshold})")
 
     if raw_df.empty:
         logging.warning(f"Empty CSV for {drop_id}")
@@ -80,24 +79,24 @@ def process_maxn(raw_df, output_csv_path, drop_id,
                 best_second = all_boxes_in_frame['time_seconds'].iloc[0]
 
         maxn_results.append({
-            'DropID': drop_id,
-            'ScientificName': cls,
-            'TimeOfMax': seconds_to_time(best_second),
-            'MaxInterval': max_count,
-            'AnnotatedBy': model_name,
-            'Interval_annotation': interval_seconds,
-            'ConfidenceAgreement': round(best_confidence, 4),
-            'time_of_maxn_ms': best_second   # float seconds of the MaxN peak frame (sub-second precision)
+            config.drop_id_column: drop_id,
+            config.csv_scientific_name_column: cls,
+            config.csv_maxn_time_column: seconds_to_time(best_second),
+            config.csv_max_interval_column: max_count,
+            config.csv_annotated_by_column: model_name,
+            config.csv_interval_annotation_column: interval_seconds,
+            config.csv_confidence_agreement_column: round(best_confidence, 4),
+            config.csv_maxn_time_ms_column: best_second   # float seconds of the MaxN peak frame (sub-second precision)
         })
 
     maxn_df = pd.DataFrame(maxn_results)
 
     if not maxn_df.empty:
-        maxn_df = maxn_df.sort_values(['time_of_maxn_ms', 'ScientificName'])
+        maxn_df = maxn_df.sort_values([config.csv_maxn_time_ms_column, config.csv_scientific_name_column])
 
     Path(output_csv_path).parent.mkdir(parents=True, exist_ok=True)
     maxn_df.to_csv(output_csv_path, index=False)
-    logging.info(f"Saved MaxN results: {len(maxn_df)} rows to {output_csv_path}")
+    logging.info(f" Saved MaxN {len(maxn_df)} rows for {drop_id} to {output_csv_path}")
 
     return maxn_df
 
@@ -107,12 +106,12 @@ def _ingest_ml_annotations(ann_db: AnnotationDatabaseManager, drop_id: str, maxn
     for _, row in maxn_df.iterrows():
         annotations_to_add.append({
             "drop_id": drop_id,
-            "scientific_name": row["ScientificName"],
-            "time_of_max": row["TimeOfMax"],
-            "max_interval": row["MaxInterval"],
+            "scientific_name": row[config.csv_scientific_name_column],
+            "time_of_max": row[config.csv_maxn_time_column],
+            "max_interval": row[config.csv_max_interval_column],
             "annotated_by": "ml",
             "interval_annotation": "",
-            "confidence_agreement": row["ConfidenceAgreement"],
+            "confidence_agreement": row[config.csv_confidence_agreement_column],
             "external_id": model_name
         })
 
@@ -120,12 +119,14 @@ def _ingest_ml_annotations(ann_db: AnnotationDatabaseManager, drop_id: str, maxn
         # Clear previous ML syncs for this drop
         ann_db.clear_annotations(drop_id, "ml")
         ann_db.add_annotations(annotations_to_add)
-        logging.info(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
+        logging.debug(f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}")
 
-def _generate_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, drop_id: str,
-                                video_dir: Path, output_root: Path, base_conf: float,
-                                maxn_conf: float, interval: float, sampling_start: int):
-    """Draw max-N plots and frame extractions for human QA."""
+
+def _run_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, drop_id: str,
+                            video_dir: Path, output_root: Path, base_conf: float,
+                            maxn_conf: float, interval: float, sampling_start: int,
+                            raw_csv_path: str = None):
+    """Draw MaxN timeline plot and lowest-confidence annotated frames for human QA review."""
     # Save MaxN timeline visualisation
     plot_maxn_timeline(
         raw_df=raw_df,
@@ -138,28 +139,29 @@ def _generate_qa_visualizations(raw_df: pd.DataFrame, maxn_df: pd.DataFrame, dro
     )
 
     # Draw lowest-confidence frames for QA review
-    review_df = maxn_df.sort_values('ConfidenceAgreement').head(10)
+    review_df = maxn_df.sort_values(config.csv_confidence_agreement_column).head(10)
 
     # Map time_of_maxn_ms back to raw CSV frame numbers
     frame_indices = []
-    for t_sec in review_df['time_of_maxn_ms']:
+    for t_sec in review_df[config.csv_maxn_time_ms_column]:
         closest = raw_df.iloc[(raw_df['time_seconds'] - t_sec).abs().argsort()[:1]]
         frame_indices.append(int(closest['frame'].iloc[0]))
 
     # Find video file
     video_path = video_dir / f"{drop_id}.mp4"
     if not video_path.exists():
-        logging.warning(f"Video not found at {video_path}, skipping frame drawing")
+        logging.warning(f"Video not found at {video_path}, skipping QA frame drawing")
         return
 
-    frames_dir = str(output_root / drop_id / "frames")
-    draw_boxes_on_frames(
-        video_path=str(video_path),
-        raw_csv_path=None, # In case module requires it. Wait, the original passed raw_csv. We'll pass raw_df context? Wait, no, it needs raw_csv_path.
+    frames_dir = str(output_root / drop_id / "qa_frames")
+    draw_boxes_on_video_frames(
+        video_path=video_path,
+        raw_csv_path=raw_csv_path,
         output_dir=frames_dir,
         frame_list=frame_indices,
         confidence_threshold=base_conf,
-        sampling_start=sampling_start
+        sampling_start=sampling_start,
+        drop_id=drop_id
     )
 
 def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
@@ -176,32 +178,45 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         output_root: Root directory for data quality outputs.
         draw_images: Whether to draw QA review frames (default: True).
     """
+    model_name = Path(config.pipeline_model_path).stem
+
+    # Initialize shared resources
     db = DatabaseManager()
-    model_name = Path(config.model_path or config.mock_model_path).stem
-    base_conf = float(config.confidence_threshold)
-    maxn_conf = float(config.maxn_confidence_threshold)
-    interval = config.interval_seconds
-    annotations_dir = Path(annotations_dir)
-    video_dir = Path(video_dir)
-    output_root = Path(output_root)
     ann_db = AnnotationDatabaseManager()
 
-    for drop_id in drop_ids:
-        logging.info(f"Post-ML processing: {drop_id}")
+    # Pre-fetch configuration values
+    interval = config.interval_seconds
+    base_conf = config.confidence_threshold
+    maxn_conf = config.maxn_confidence_threshold
 
-        raw_csv = str(annotations_dir / f"{drop_id}_{model_name}_raw.csv")
-        maxn_csv = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
+    # Batch fetch sampling_start for all relevant drop_ids
+    sampling_starts = {}
+    if drop_ids:
+        with db.get_connection() as conn:
+            # SQL IN clause with placeholders
+            placeholders = ', '.join(['?'] * len(drop_ids))
+            query = f'SELECT drop_id, sampling_start FROM deployments WHERE drop_id IN ({placeholders})'
+            cursor = conn.cursor()
+            cursor.execute(query, drop_ids)
+            for row in cursor.fetchall():
+                d = dict(row)
+                sampling_starts[d['drop_id']] = d['sampling_start'] if d['sampling_start'] else 0
+
+    for drop_id in drop_ids:
+        logging.debug(f"Post-ML processing: {drop_id}")
+
+        drop_annotations_dir = Path(output_root) / drop_id / "annotations"
+        drop_annotations_dir.mkdir(parents=True, exist_ok=True)
+        raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
+        maxn_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
 
         # Read raw CSV once — shared by process_maxn and draw_frames lookup
-        raw_df = pd.read_csv(raw_csv)
+        if not Path(raw_csv).exists():
+            logging.warning(f"Raw CSV not found for {drop_id} at {raw_csv}. Skipping.")
+            continue
 
-        # Get sampling_start from DB. We do this in a short-lived block to prevent holding locks.
-        db = DatabaseManager()
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT sampling_start FROM deployments WHERE drop_id = ?', (drop_id,))
-            row = cursor.fetchone()
-            sampling_start = dict(row)['sampling_start'] if row and row['sampling_start'] else 0
+        raw_df = pd.read_csv(raw_csv)
+        sampling_start = sampling_starts.get(drop_id, 0)
 
         # 1. Extract MaxN (uses higher threshold than base inference)
         maxn_df = process_maxn(
@@ -212,55 +227,39 @@ def run_post_ml(drop_ids: list, annotations_dir: str, video_dir: str,
         )
 
         if maxn_df.empty:
-            logging.warning(f"No MaxN results for {drop_id}, skipping ingestion and QA drawing")
-            continue
+            logging.warning(f"No MaxN results for {drop_id}. Saving empty CSV for health checks.")
+            # Create a placeholder empty MaxN CSV with the correct headers
+            maxn_df = pd.DataFrame(columns=[
+                config.drop_id_column, config.csv_scientific_name_column,
+                config.csv_maxn_time_column, config.csv_max_interval_column,
+                config.csv_annotated_by_column, config.csv_interval_annotation_column,
+                config.csv_confidence_agreement_column, config.csv_maxn_time_ms_column
+            ])
+            maxn_df.to_csv(maxn_csv, index=False)
 
         # 2. Ingest into detailed annotations database
         _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
 
-        if not draw_images:
-            logging.info(f"Post-ML processing complete for {drop_id} (frame & plot drawing skipped)")
-            continue
+        if draw_images:
 
-        # 3. Save MaxN timeline visualisation and draw frames
+            # 3. Draw QA visualisations (MaxN timeline + lowest-confidence frames)
+            _run_qa_visualizations(
+                raw_df=raw_df,
+                maxn_df=maxn_df,
+                drop_id=drop_id,
+                video_dir=Path(video_dir),
+                output_root=Path(output_root),
+                base_conf=base_conf,
+                maxn_conf=maxn_conf,
+                interval=interval,
+                sampling_start=sampling_start,
+                raw_csv_path=raw_csv,
+            )
 
-        # Save MaxN timeline visualisation
-        plot_maxn_timeline(
-            raw_df=raw_df,
-            maxn_df=maxn_df,
-            drop_id=drop_id,
-            output_dir=output_root / drop_id,
-            base_conf=base_conf,
-            maxn_conf=maxn_conf,
-            interval_seconds=interval,
-        )
+        logging.info(f"  → Post-ML processing complete for: {drop_id}")
 
-        # Draw lowest-confidence frames for QA review
-        review_df = maxn_df.sort_values('ConfidenceAgreement').head(10)
-
-        # Map time_of_maxn_ms back to raw CSV frame numbers
-        frame_indices = []
-        for t_sec in review_df['time_of_maxn_ms']:
-            closest = raw_df.iloc[(raw_df['time_seconds'] - t_sec).abs().argsort()[:1]]
-            frame_indices.append(int(closest['frame'].iloc[0]))
-
-        # Find video file
-        video_path = video_dir / f"{drop_id}.mp4"
-        if not video_path.exists():
-            logging.warning(f"Video not found at {video_path}, skipping frame drawing")
-            continue
-
-        frames_dir = str(output_root / drop_id / "frames")
-        draw_boxes_on_frames(
-            video_path=str(video_path),
-            raw_csv_path=raw_csv,
-            output_dir=frames_dir,
-            frame_list=frame_indices,
-            confidence_threshold=base_conf,
-            sampling_start=sampling_start
-        )
-
-        logging.info(f"Post-ML processing complete for {drop_id}")
+        # Update status to AWAITING_CITSCI_CLIPS
+        db.update_status(drop_id, PipelineStatus.AWAITING_CITSCI_CLIPS)
 
     # 4. Finally sync all updated drops to the main pipeline DB
     if drop_ids:

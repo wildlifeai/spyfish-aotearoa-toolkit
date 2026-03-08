@@ -9,10 +9,11 @@ import os
 import cv2
 import pandas as pd
 import logging
+from spyfish.utils import generate_frame_filename
 
 
-def draw_boxes_on_frames(video_path, raw_csv_path, output_dir, frame_list,
-                         confidence_threshold, sampling_start):
+def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
+                         confidence_threshold, sampling_start, drop_id="UNKNOWN"):
     """
     Draws ML bounding boxes on specific frames and saves them as JPEGs.
 
@@ -51,10 +52,12 @@ def draw_boxes_on_frames(video_path, raw_csv_path, output_dir, frame_list,
             logging.warning(f"No CSV data for frame {csv_frame}")
             continue
 
-        # ML time is relative to sampling_start. Add it back for the real video position.
+        # The 'frame' column in the raw CSV is already an absolute frame index from the source video
+        video_frame_num = csv_frame
+
+        # Calculate absolute video time for filename matching (sampling_start + ML relative time)
         ml_time = frame_rows['time_seconds'].iloc[0]
         video_time = ml_time + sampling_start
-        video_frame_num = int(video_time * fps)
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, video_frame_num)
         ret, frame = cap.read()
@@ -82,13 +85,9 @@ def draw_boxes_on_frames(video_path, raw_csv_path, output_dir, frame_list,
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
         # Filename uses absolute video time
-        h_part = int(video_time // 3600)
-        m_part = int((video_time % 3600) // 60)
-        s_part = int(video_time % 60)
-        ms_part = int((video_time % 1) * 1000)
-        time_str = f"{h_part:02d}h{m_part:02d}m{s_part:02d}s{ms_part:03d}ms"
+        out_filename = generate_frame_filename(drop_id, video_time)
 
-        out_path = os.path.join(output_dir, f"frame_{time_str}_f{video_frame_num}.jpg")
+        out_path = os.path.join(output_dir, out_filename)
         cv2.imwrite(out_path, frame)
         saved_frames.append(out_path)
         logging.info(f"Saved {out_path} (csv_frame={csv_frame}, video_frame={video_frame_num})")

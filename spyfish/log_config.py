@@ -13,7 +13,8 @@ def _set_logging_path() -> str:
     Returns:
         str: The path to the log file.
     """
-    log_dir = Path.home() / ".spyfish" / "logs"
+    from spyfish.config import config
+    log_dir = config.logs_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     log_filename = dt.strftime(dt.now(), "%Y-%m-%d_%H-%M-%S") + ".log"
     log_file = log_dir / log_filename
@@ -47,3 +48,10 @@ else:
         format=format_string,
         force=True,
     )
+
+def log_header(title: str, character: str = "═"):
+    """Logs a visually distinct header for a pipeline step."""
+    width = 60
+    logging.info(character * width)
+    logging.info(f" {title} ".center(width, character))
+    logging.info(character * width)

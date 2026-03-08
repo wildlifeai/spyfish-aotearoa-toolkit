@@ -1,16 +1,16 @@
 """
 Extract frames at MaxN peak times from source videos using ffmpeg.
 
-Reads the selections CSV output from select_clips.py and extracts one clean JPEG
+Reads the selections CSV output from selection strategies and extracts one clean JPEG
 per row at the exact TimeOfMax moment (sampling_start + time_of_maxn_ms).
 
 Also converts the corresponding YOLO bounding boxes from the raw ML CSV into
-COCO-format JSON alongside the frames — ready for Biigle upload.
+COCO-format JSON alongside the frames — ready for upload (e.g., to Biigle).
 
 Separation of concerns:
   - select_clips.py  → which intervals are interesting (selections CSV)
-  - extract_clips.py → cut 10-second video clips for Zooniverse
-  - extract_frames.py (THIS FILE) → grab the single decisive frame for Biigle
+  - extract_clips.py → cut video clips
+  - extract_frames.py (THIS FILE) → grab the single decisive frame
 """
 import cv2
 import json
@@ -18,53 +18,45 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import generate_frame_filename
 
 
 # ── ffmpeg frame extraction ──────────────────────────────────────────────────
 
-def extract_frame(video_path: str, seek_seconds: float, out_path: Path, fast: bool = True) -> bool:
+def extract_frame(video_path: str, seek_seconds: float, out_path: Path, frame_index: Optional[int] = None) -> bool:
     """
-    Extract a single JPEG frame from a video at the given seek position using ffmpeg.
+    Extract a single JPEG frame from a video at the given seek position using OpenCV.
+    Using cv2 (instead of ffmpeg) ensures 100% parity with the YOLO inference stream.
 
     Args:
         video_path: Path to the source video.
-        seek_seconds: Absolute seek position in the video (sampling_start + time_of_max).
+        seek_seconds: Absolute seek position in the video (fallback if frame_index is missing).
         out_path: Output JPEG path.
-        fast: If True, use fast pre-input seek (-ss before -i). Slightly less accurate
-              but 10-100x faster. Set False only if exact frame precision is critical.
-
-    Returns:
-        True if successful, False otherwise.
+        frame_index: Exact frame index (0-based) from the raw ML CSV.
     """
-    if fast:
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", f"{seek_seconds:.6f}",
-            "-i", str(video_path),
-            "-frames:v", "1", "-q:v", "2",
-            str(out_path),
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-i", str(video_path),
-            "-ss", f"{seek_seconds:.6f}",
-            "-frames:v", "1", "-q:v", "2",
-            str(out_path),
-        ]
-
-    try:
-        subprocess.run(cmd, check=True)
-        if not out_path.exists() or out_path.stat().st_size == 0:
-            raise RuntimeError("Output file missing or empty after ffmpeg")
-        return True
-    except (subprocess.CalledProcessError, RuntimeError) as e:
-        logging.error(f"ffmpeg failed for {out_path.name}: {e}")
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        logging.error(f"Could not open video with cv2: {video_path}")
         return False
+
+    if frame_index is not None:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    else:
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_seconds * 1000.0)
+
+    ret, frame = cap.read()
+    if ret:
+        cv2.imwrite(str(out_path), frame)
+    else:
+        logging.error(f"cv2 failed to read frame at {'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}")
+
+    cap.release()
+    return ret
 
 
 # ── YOLO → COCO conversion ───────────────────────────────────────────────────
@@ -162,7 +154,6 @@ def extract_frames_from_selections(
     video_path: str,
     raw_csv_path: str,
     output_dir: str,
-    fast: bool = True,
 ) -> pd.DataFrame:
     """
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
@@ -173,14 +164,13 @@ def extract_frames_from_selections(
 
     Unlike draw_frames.py (which draws boxes ON the frame using cv2 for QA),
     this extracts a clean frame with annotations stored separately as COCO JSON —
-    suitable for upload to Biigle as new annotations.
+    suitable for upload.
 
     Args:
         selections_csv_path: CSV from select_clips.select_zooniverse_clips().
         video_path: Full path to the source video file.
         raw_csv_path: Raw YOLO CSV ({drop_id}_{model}_raw.csv), for COCO annotations.
         output_dir: Directory to write JPEG frames and coco_annotations.json.
-        fast: Use fast ffmpeg seek (default True; trades ~1 frame accuracy for speed).
 
     Returns:
         selections_df with 'FramePath' column added.
@@ -199,14 +189,17 @@ def extract_frames_from_selections(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    drop_id = df["DropID"].iloc[0]
-    sampling_start = int(df["SamplingStart"].iloc[0]) if "SamplingStart" in df.columns else 0
+    drop_id = df[config.drop_id_column].iloc[0]
+    sampling_start = int(df[config.csv_sampling_start_column].iloc[0]) if config.csv_sampling_start_column in df.columns else 0
 
-    # Read video dimensions once from metadata — no need to re-read every extracted frame
+    raw_df = pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+
+    # Read video dimensions once from metadata
     cap = cv2.VideoCapture(str(video_path))
     vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
+
     if vid_w == 0 or vid_h == 0:
         logging.warning(f"Could not read video dimensions for {video_path}. COCO image sizes will default to 0.")
 
@@ -215,15 +208,23 @@ def extract_frames_from_selections(
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
         # TimeOfMaxnMs: exact ML peak in seconds (sub-second precision from raw CSV).
-        time_of_max_relative = float(row["TimeOfMaxnMs"])
+        time_of_max_relative = float(row[config.csv_clip_max_time_column])
 
         seek_seconds = sampling_start + time_of_max_relative
+        frame_index = None
 
-        out_filename = f"{drop_id}__frame_{time_of_max_relative:.3f}s.jpg"
+        if not raw_df.empty:
+            # Find the nearest frame in the raw ML CSV to this peak time
+            # Using the exact same matching logic as the COCO builder ensures alignment
+            nearest = raw_df.iloc[(raw_df["time_seconds"] - time_of_max_relative).abs().argsort()[:1]]
+            if not nearest.empty:
+                frame_index = int(nearest["frame"].iloc[0])
+
+        out_filename = generate_frame_filename(drop_id, seek_seconds)
         out_path = out_dir / out_filename
 
-        logging.info(f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s → {out_filename}")
-        success = extract_frame(video_path, seek_seconds, out_path, fast=fast)
+        logging.info(f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}")
+        success = extract_frame(video_path, seek_seconds, out_path, frame_index=frame_index)
         frame_paths.append(str(out_path) if success else None)
 
         img_w, img_h = vid_w, vid_h
@@ -242,7 +243,12 @@ def extract_frames_from_selections(
 
     # Build and save COCO JSON
     coco = build_coco_from_raw_csv(raw_csv_path, frame_records)
-    coco_path = out_dir / f"{drop_id}_coco_annotations.json"
+
+    # Save the COCO annotations to a dedicated annotations directory, separate from the frames
+    annotations_dir = out_dir.parent / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    coco_path = annotations_dir / f"{drop_id}_coco_annotations.json"
     with open(coco_path, "w") as f:
         json.dump(coco, f, indent=2)
     logging.info(f"COCO annotations → {coco_path} ({len(coco['images'])} images, {len(coco['annotations'])} annotations)")

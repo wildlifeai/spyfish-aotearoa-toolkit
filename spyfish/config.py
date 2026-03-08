@@ -66,16 +66,44 @@ class ConfigWrapper:
         return self._project_root
 
     @property
+    def base_dir(self) -> str:
+        return self.paths.get("base_dir", "process_files")
+
+    def db_rel_path(self, filename: str) -> str:
+        """The relative path (key) for a database file, starting from base_dir."""
+        db_dir = self.sub_dirs.get("db", "db")
+        return f"{self.base_dir}/{db_dir}/{filename}"
+
+    def get_db_path(self, filename: str) -> Path:
+        """LOCAL path to a SQLite database by name."""
+        path = self.project_root / self.db_rel_path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def get_s3_db_key(self, filename: str) -> str:
+        """S3 key for a database by name."""
+        return self.db_rel_path(filename)
+
+    @property
     def db_path(self) -> Path:
-        return self._project_root / "spyfish_pipeline.db"
+        """LOCAL path to the main pipeline database."""
+        return self.get_db_path("spyfish_pipeline.db")
 
     @property
     def csv_mapping(self):
         return self._yaml_config.get("csv_mapping", {})
 
     @property
-    def storage(self):
-        return self._yaml_config.get("storage", {})
+    def s3_bucket(self):
+        return self.paths.get("bucket_name")
+
+    @property
+    def sub_dirs(self):
+        return self.paths.get("sub_dirs", {})
+
+    @property
+    def metadata(self):
+        return self.paths.get("metadata", {})
 
     @property
     def aws_access_key_id(self):
@@ -99,8 +127,7 @@ class ConfigWrapper:
 
     @property
     def zooniverse_project_id(self) -> int | None:
-        val = os.getenv("ZOONIVERSE_PROJECT_ID")
-        return int(val) if val else None
+        return self._yaml_config.get("zooniverse_extraction", {}).get("project_id")
 
     @property
     def biigle_email(self) -> str | None:
@@ -138,18 +165,25 @@ class ConfigWrapper:
         return self._yaml_config.get("biigle", {}).get("done_labels", ["Done Volume", "Done QA Review"])
 
     @property
-    def biigle_volume_report_type(self) -> int:
-        return self._yaml_config.get("biigle", {}).get("volume_report_type", 10)
+    def paths(self):
+        return self._yaml_config.get("paths", {})
+
+    @property
+    def sub_dirs(self):
+        return self.paths.get("sub_dirs", {})
+
+    # S3 Prefixes / Local Dirs are now unified in sub_dirs
 
     @property
     def biigle_s3_images_prefix(self) -> str:
-        """S3 prefix for Biigle JPEG frames — append /{survey_id}/{drop_id}/ at runtime."""
-        return self._yaml_config.get("biigle", {}).get("s3_images_prefix", "process_files/media/biigle_images")
+        """S3 prefix for Biigle JPEG frames."""
+        return f"{self.base_dir}/{self.sub_dirs.get('biigle_images', 'media/biigle_images')}"
 
+    # TODO is this used somewhere
     @property
     def biigle_s3_clips_prefix(self) -> str:
-        """S3 prefix for Biigle video clips — append /{survey_id}/{drop_id}/ at runtime."""
-        return self._yaml_config.get("biigle", {}).get("s3_clips_prefix", "process_files/media/biigle_clips")
+        """S3 prefix for Biigle video clips."""
+        return f"{self.base_dir}/{self.sub_dirs.get('biigle_clips', 'media/biigle_clips')}"
 
     @property
     def export_local(self):
@@ -160,72 +194,57 @@ class ConfigWrapper:
         return os.getenv("LOCAL_DATA_FOLDER_PATH", str(Path.cwd() / "data"))
 
     @property
-    def s3_bucket(self):
-        return self._yaml_config.get("storage", {}).get("bucket_name")
+    def metadata_root(self) -> str:
+        """The root directory for metadata in S3."""
+        return self.metadata.get("root", "spyfish_metadata")
 
     @property
-    def s3_spyfish_metadata(self):
-        return "spyfish_metadata"
+    def sharepoint_root(self) -> str:
+        """The full S3 path to sharepoint lists."""
+        return f"{self.metadata_root}/{self.metadata.get('sharepoint_dir', 'sharepoint_lists')}"
 
     @property
-    def s3_sharepoint_path(self):
-        return os.path.join(self.s3_spyfish_metadata, "sharepoint_lists")
+    def status_root(self) -> str:
+        """The full S3 path to status reports."""
+        return f"{self.metadata_root}/{self.metadata.get('status_dir', 'status')}"
+
+    @property
+    def metadata_files(self) -> dict:
+        """Dictionary of metadata filenames."""
+        return self.metadata.get("files", {})
 
     @property
     def s3_sharepoint_deployment_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "BUV Deployment.csv")
+        return f"{self.sharepoint_root}/{self.metadata_files.get('deployment_csv', 'BUV Deployment.csv')}"
+
+    @property
+    def test_deployment_metadata_csv(self) -> Path:
+        """The path to the test deployment metadata CSV."""
+        return self.project_root / self.metadata_files.get("test_deployment_csv", "manual_testing/test_deployment_metadata.csv")
 
     @property
     def s3_sharepoint_survey_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "BUV Survey Metadata.csv")
+        return f"{self.sharepoint_root}/{self.metadata_files.get('survey_csv', 'BUV Survey Metadata.csv')}"
 
     @property
     def s3_sharepoint_site_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "BUV Survey Sites.csv")
+        return f"{self.sharepoint_root}/{self.metadata_files.get('site_csv', 'BUV Survey Sites.csv')}"
 
     @property
     def s3_sharepoint_species_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "BUV Species.csv")
+        return f"{self.sharepoint_root}/{self.metadata_files.get('species_csv', 'BUV Species.csv')}"
 
     @property
     def s3_sharepoint_reserves_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "Marine Reserves.csv")
+        return f"{self.sharepoint_root}/{self.metadata_files.get('reserves_csv', 'Marine Reserves.csv')}"
 
     @property
     def s3_sharepoint_annotations_legacy_experts_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "BUV Annotations Legacy Experts.csv")
+        return f"{self.sharepoint_root}/{self.metadata_files.get('legacy_experts_csv', 'BUV Annotations Legacy Experts.csv')}"
 
     @property
-    def s3_sharepoint_test_csv(self):
-        return os.path.join(self.s3_sharepoint_path, "Test.csv")
-
-    @property
-    def s3_kso_path(self):
-        return os.path.join(self.s3_spyfish_metadata, "kso_csvs")
-
-    @property
-    def s3_kso_annotations_csv(self):
-        return os.path.join(self.s3_kso_path, "annotations_buv_doc.csv")
-
-    @property
-    def s3_kso_movie_csv(self):
-        return os.path.join(self.s3_kso_path, "movies_buv_doc.csv")
-
-    @property
-    def s3_kso_site_csv(self):
-        return os.path.join(self.s3_kso_path, "sites_buv_doc.csv")
-
-    @property
-    def s3_kso_species_csv(self):
-        return os.path.join(self.s3_kso_path, "species_buv_doc.csv")
-
-    @property
-    def s3_kso_survey_csv(self):
-        return os.path.join(self.s3_kso_path, "surveys_buv_doc.csv")
-
-    @property
-    def s3_kso_test_csv(self):
-        return os.path.join(self.s3_kso_path, "test_buv_doc.csv")
+    def s3_sharepoint_path(self):
+        return self.sharepoint_root
 
     @property
     def drop_id_column(self):
@@ -257,11 +276,7 @@ class ConfigWrapper:
 
     @property
     def s3_status_path(self):
-        return os.path.join(self.s3_spyfish_metadata, "status")
-
-    @property
-    def errors_filename(self):
-        return "data_errors.csv"
+        return self.status_root
 
     @property
     def missing_files_filename(self):
@@ -272,20 +287,16 @@ class ConfigWrapper:
         return "extra_files_in_aws.txt"
 
     @property
-    def s3_errors_csv(self):
-        return os.path.join(self.s3_status_path, self.errors_filename)
-
-    @property
     def s3_missing_files(self):
-        return os.path.join(self.s3_status_path, self.missing_files_filename)
+        return f"{self.s3_status_path}/{self.missing_files_filename}"
 
     @property
     def s3_extra_files(self):
-        return os.path.join(self.s3_status_path, self.extra_files_filename)
+        return f"{self.s3_status_path}/{self.extra_files_filename}"
 
     @property
     def s3_deployment_status_csv(self):
-        return os.path.join(self.s3_status_path, "deployments_status.csv")
+        return f"{self.s3_status_path}/deployments_status.csv"
 
     @property
     def s3_survey_status_csv(self):
@@ -337,6 +348,54 @@ class ConfigWrapper:
         return self._yaml_config.get("validation_rules", {})
 
     @property
+    def zooniverse_extraction(self):
+        return self._yaml_config.get("zooniverse_extraction", {})
+
+    @property
+    def zooniverse_clip_length(self) -> int:
+        return int(self.zooniverse_extraction.get("clip_length_seconds", 10))
+
+    @property
+    def zooniverse_health_check_count(self) -> int:
+        return int(self.zooniverse_extraction.get("health_check_count", 6))
+
+    @property
+    def zooniverse_video_start_threshold(self) -> int:
+        return int(self.zooniverse_extraction.get("video_start_threshold_seconds", 60))
+
+    @property
+    def zooniverse_clip_cap(self) -> int:
+        return int(self.zooniverse_extraction.get("clip_cap", 50))
+
+    @property
+    def zooniverse_force_binary_strategy(self) -> bool:
+        return bool(self.zooniverse_extraction.get("force_binary_strategy", False))
+
+    @property
+    def zooniverse_temporal_spacing(self) -> int:
+        return int(self.zooniverse_extraction.get("temporal_spacing_seconds", 0))
+
+    @property
+    def zooniverse_binary_strategy(self) -> dict:
+        return self.zooniverse_extraction.get("binary_strategy", {
+            "maxn_clips": 10,
+            "confusing_clips": 20,
+            "empty_clips": 5,
+            "start_clips": 2,
+            "temporal_spacing_seconds": 10
+        })
+
+    @property
+    def zooniverse_multiclass_strategy(self) -> dict:
+        return self.zooniverse_extraction.get("multiclass_strategy", {
+            "per_species_maxn_clips": 5,
+            "per_species_confusing_clips": 10,
+            "per_video_empty_clips": 3,
+            "per_video_start_clips": 2,
+            "temporal_spacing_seconds": 10
+        })
+
+    @property
     def ml_inference(self):
         return self._yaml_config.get("ml_inference", {})
 
@@ -346,24 +405,94 @@ class ConfigWrapper:
 
     @property
     def test_drops(self):
-        """Returns list of (drop_id, drop_key, sampling_start, sampling_end) tuples."""
+        """Returns list of (drop_id, video_path, sampling_start, sampling_end) tuples."""
         try:
-            from spyfish.test_setup import TEST_DROPS
-            return TEST_DROPS
-        except ImportError:
+            import pandas as pd
+            csv_path = self.project_root / self.test_deployment_metadata_csv
+            if not csv_path.exists():
+                return []
+            df = pd.read_csv(csv_path)
+            drops = []
+            for _, row in df.iterrows():
+                drops.append((
+                    str(row['drop_id']),
+                    str(row['video_path']),
+                    int(row['sampling_start']),
+                    int(row['sampling_end'])
+                ))
+            return drops
+        except Exception as e:
+            logging.error(f"Failed to load test drops: {e}")
             return []
+    @property
+    def training_config(self):
+        return self._yaml_config.get("training", {})
 
     @property
-    def model_path(self):
-        return self.ml_inference.get("model_path")
+    def models_root_dir(self) -> Path:
+        """Local root for all models."""
+        return self.project_root / self.base_dir / self.sub_dirs.get("models", "models")
 
     @property
-    def mock_model_path(self):
-        return self.ml_inference.get("mock_model_path")
+    def base_model_dir(self) -> Path:
+        """Directory for base models."""
+        return self.models_root_dir / self.sub_dirs.get("base_model", "base_model")
+
+    @property
+    def pipeline_model_dir(self) -> Path:
+        """Directory for the active pipeline model."""
+        return self.models_root_dir / self.sub_dirs.get("pipeline_model", "pipeline_model")
+
+    @property
+    def trained_model_dir(self) -> Path:
+        """Directory for newly trained models."""
+        return self.models_root_dir / self.sub_dirs.get("trained", "trained")
+
+    @property
+    def pipeline_model_path(self) -> Path:
+        """Path to the active model file. Defaults to first .pt file in the pipeline_model_dir."""
+        # Check if there's a specific .pt file in the directory
+        if self.pipeline_model_dir.exists():
+            pt_files = list(self.pipeline_model_dir.glob("*.pt"))
+            if pt_files:
+                # TODO Return the most recent or first one? Usually there should only be one main one.
+                return pt_files[0]
+
+        # Fallback to a default filename
+        else:
+            raise FileNotFoundError(f"No model file found in {self.pipeline_model_dir}")
+
+    @property
+    def s3_model_key(self):
+        """S3 key for the active ML model, mimicking local structure."""
+        return f"{self.base_dir}/models/pipeline_model/{self.pipeline_model_path.name}"
+
+    @property
+    def s3_training_base_model_key(self):
+        """S3 key for the starting base model."""
+        # Find the base model name
+        if self.base_model_dir.exists():
+            pt_files = list(self.base_model_dir.glob("*.pt"))
+            if pt_files:
+                return f"{self.base_dir}/models/base_model/{pt_files[0].name}"
+        return f"{self.base_dir}/models/base_model/model.pt"
+
+    @property
+    def s3_training_output_prefix(self):
+        """S3 prefix for artifacts produced during training."""
+        return f"{self.base_dir}/{self.sub_dirs.get('training', 'training')}/"
 
     @property
     def frame_skip(self):
         return get_required(self.ml_inference, "frame_skip", "ml_inference")
+
+    @property
+    def ml_log_interval_frames(self) -> int:
+        return int(self.ml_inference.get("log_interval_frames", 10))
+
+    @property
+    def imgsz(self):
+        return self.ml_inference.get("imgsz", 640)
 
     @property
     def confidence_threshold(self):
@@ -382,52 +511,208 @@ class ConfigWrapper:
         return self._yaml_config.get("orchestrator", {})
 
     @property
-    def mock_video_dir(self):
-        return self.orchestrator.get("mock_video_dir", "mock_media")
+    def media_dir(self) -> Path:
+        return self.project_root / self.sub_dirs.get("media", "media")
 
     @property
     def is_test_run(self):
         return bool(self.orchestrator.get("is_test_run", False))
 
     @property
-    def is_local(self):
-        return bool(self.orchestrator.get("is_local", False))
+    def data_quality_dir(self) -> Path:
+        return self.project_root / self.base_dir / self.sub_dirs.get("data_quality", "data_quality")
 
     @property
-    def local_manifest_dir_path(self):
-        return self.orchestrator.get("local_manifest_dir_path", "process_files/annotations/")
+    def logs_dir(self) -> Path:
+        return self.project_root / self.base_dir / self.sub_dirs.get("logs", "logs")
 
     @property
-    def local_data_quality_dir(self):
-        return self.orchestrator.get("local_data_quality_dir", "process_files/data_quality/")
-
-    @property
-    def local_manifest_name(self):
-        return self.orchestrator.get("local_manifest_name", "videos_to_ml.csv")
-
-    @property
-    def local_logs_dir(self):
-        return self.orchestrator.get("local_logs_dir", "process_files/logs")
+    def s3_data_quality_dir(self):
+        return f"{self.base_dir}/{self.sub_dirs.get('data_quality', 'data_quality')}"
 
     @property
     def s3_annotations_dir(self):
-        return self.orchestrator.get("s3_annotations_dir", "process_files/annotations")
+        return f"{self.base_dir}/{self.sub_dirs.get('annotations', 'annotations')}"
 
     @property
-    def nesi_video_dir(self):
-        return self.orchestrator.get("nesi_video_dir")
+    def biigle_default_fish_label_id(self) -> int:
+        return int(get_required(self._yaml_config.get("biigle", {}), "default_fish_label_id"))
 
+    @property
+    def biigle_label_mapping(self) -> dict:
+        mapping = self._yaml_config.get("biigle", {}).get("label_mapping")
+        return mapping if mapping is not None else {}
+
+    @property
+    def biigle_default_label_tree_id(self) -> int:
+        return int(get_required(self._yaml_config.get("biigle", {}), "default_label_tree_id"))
+
+    @property
+    def volume_finalize_max_retries(self) -> int:
+        return int(self._yaml_config.get("biigle", {}).get("volume_finalize_max_retries", 10))
+
+    @property
+    def volume_finalize_retry_interval_secs(self) -> float:
+        return float(self._yaml_config.get("biigle", {}).get("volume_finalize_retry_interval_secs", 3.0))
+
+    @property
+    def report_download_max_retries(self) -> int:
+        return int(self._yaml_config.get("biigle", {}).get("report_download_max_retries", 60))
+
+    @property
+    def report_download_retry_interval_secs(self) -> float:
+        return float(self._yaml_config.get("biigle", {}).get("report_download_retry_interval_secs", 2.0))
+
+
+    # TODO not sure we need this,  there is structural validation performed by the DataValidator
+    # (in spyfish/validation/data_validator.py) using the regex patterns defined in config.py
+    # This method is now called by every path-generating helper for security
+    def validate_drop_id(self, drop_id: str) -> str:
+        """
+        Validates that a drop_id matches the expected pattern and contains no path traversal.
+        Raises ValueError if invalid.
+        """
+        import re
+        pattern = self.validation_patterns.get(self.drop_id_column)
+        if not pattern:
+            # Fallback to a safe default if pattern is missing
+            pattern = r"^[A-Z0-9_\-]+$"
+
+        if not re.match(pattern, drop_id):
+            raise ValueError(f"Invalid DropID format: '{drop_id}'. Must match {pattern}")
+
+        # Explicit check for directory traversal characters
+        if ".." in drop_id or "/" in drop_id or "\\" in drop_id:
+            raise ValueError(f"Security Alert: Malicious DropID detected (potential path traversal): '{drop_id}'")
+
+        return drop_id
+
+    def get_drop_annotations_dir(self, drop_id: str) -> Path:
+        """Helper to consistently get the annotations directory for a drop."""
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.data_quality_dir / val_drop_id / "annotations"
+
+    def get_video_path(self, drop_id: str) -> Path:
+        """Helper to get the correct video path depending on the environment."""
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.media_dir / f"{val_drop_id}.mp4"
+
+    def get_maxn_csv_path(self, drop_id: str, model_name: str) -> Path:
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.get_drop_annotations_dir(val_drop_id) / f"{val_drop_id}_{model_name}_maxn.csv"
+
+    def get_selections_csv_path(self, drop_id: str) -> Path:
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.get_drop_annotations_dir(val_drop_id) / f"{val_drop_id}_frames_selection.csv"
+
+    def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.get_drop_annotations_dir(val_drop_id) / f"{val_drop_id}_{model_name}_raw.csv"
+
+    # TODO I do not think we need the target argument here
+    def get_clips_dir(self, drop_id: str, target: str = "") -> Path:
+        """Get the localized clips directory for a drop."""
+        val_drop_id = self.validate_drop_id(drop_id)
+        sub_path = f"{target}_clips" if target else "clips"
+        return self.data_quality_dir / val_drop_id / sub_path
+
+    def get_frames_dir(self, drop_id: str, target: str = "") -> Path:
+        """Get the localized frames directory for a drop."""
+        val_drop_id = self.validate_drop_id(drop_id)
+        sub_path = f"{target}_frames" if target else "frames"
+        return self.data_quality_dir / val_drop_id / sub_path
+
+    @property
+    def csv_video_file_link_column(self) -> str:
+        return self.csv_mapping.get("video_file_link_column", "LinkToVideoFile")
+
+    @property
+    def csv_sampling_start_column(self) -> str:
+        return self.csv_mapping.get("sampling_start_column", "SamplingStart")
+
+    @property
+    def csv_sampling_end_column(self) -> str:
+        return self.csv_mapping.get("sampling_end_column", "SamplingEnd")
+
+    @property
+    def csv_clip_start_column(self) -> str:
+        return self.csv_mapping.get("clip_start_column", "ClipStartRelative")
+
+    @property
+    def csv_clip_end_column(self) -> str:
+        return self.csv_mapping.get("clip_end_column", "ClipEndRelative")
+
+    @property
+    def csv_clip_max_time_column(self) -> str:
+        return self.csv_mapping.get("clip_max_time_column", "TimeOfMaxnMs")
+
+    @property
+    def csv_confidence_agreement_column(self) -> str:
+        return self.csv_mapping.get("confidence_agreement_column", "ConfidenceAgreement")
+
+    @property
+    def csv_confusion_score_column(self) -> str:
+        return self.csv_mapping.get("confusion_score_column", "ConfusionScore")
+
+    @property
+    def csv_scientific_name_column(self) -> str:
+        return self.csv_mapping.get("scientific_name_column", "ScientificName")
+
+    @property
+    def csv_maxn_time_column(self) -> str:
+        return self.csv_mapping.get("maxn_time_column", "TimeOfMax")
+
+    @property
+    def csv_maxn_time_ms_column(self) -> str:
+        return self.csv_mapping.get("maxn_time_ms_column", "TimeOfMaxnMs")
+
+    @property
+    def csv_max_interval_column(self) -> str:
+        return self.csv_mapping.get("max_interval_column", "MaxInterval")
+
+    @property
+    def csv_annotated_by_column(self) -> str:
+        return self.csv_mapping.get("annotated_by_column", "AnnotatedBy")
+
+    @property
+    def csv_interval_annotation_column(self) -> str:
+        return self.csv_mapping.get("interval_annotation_column", "IntervalAnnotation")
+
+    @property
+    def csv_time_seconds_column(self) -> str:
+        return self.csv_mapping.get("time_seconds_column", "TimeSeconds")
+
+    # TODO we shoudn't need the extra db, the path should mimic local, the only difference is that it will have the s3key
     @property
     def s3_db_key(self) -> str:
-        return self.orchestrator.get("s3_db_key", "process_files/spyfish_pipeline.db")
+        """S3 key for the main pipeline database."""
+        return self.get_s3_db_key("spyfish_pipeline.db")
 
     @property
     def annotations_db_path(self) -> Path:
-        return self.project_root / "process_files" / "spyfish_annotations.db"
+        """LOCAL path to the annotations database."""
+        return self.get_db_path("spyfish_annotations.db")
 
     @property
     def s3_annotations_db_key(self) -> str:
-        return "process_files/spyfish_annotations.db"
+        """S3 key for the annotations database."""
+        return self.get_s3_db_key("spyfish_annotations.db")
+
+    @property
+    def ffmpeg_config(self) -> dict:
+        return self._yaml_config.get("ffmpeg", {})
+
+    @property
+    def ffmpeg_crf(self) -> str:
+        return str(self.ffmpeg_config.get("crf", "22"))
+
+    @property
+    def ffmpeg_preset(self) -> str:
+        return str(self.ffmpeg_config.get("preset", "fast"))
+
+    @property
+    def ffmpeg_codec(self) -> str:
+        return str(self.ffmpeg_config.get("codec", "libx264"))
 
 config = ConfigWrapper()
 
@@ -446,35 +731,31 @@ class PipelineStatus:
     READY_FOR_ML = "READY_FOR_ML"
     PROCESSING_ML = "PROCESSING_ML"
     ML_COMPLETE = "ML_COMPLETE"
-    READY_FOR_CITSCI = "READY_FOR_CITSCI"
-    PROCESSING_CITSCI = "PROCESSING_CITSCI"
+    AWAITING_CITSCI_CLIPS = "AWAITING_CITSCI_CLIPS"
+    CITSCI_CLIPS_COMPLETE = "CITSCI_CLIPS_COMPLETE"
+    AWAITING_CITSCI_FRAMES = "AWAITING_CITSCI_FRAMES"
     CITSCI_COMPLETE = "CITSCI_COMPLETE"
-    READY_FOR_EXPERT = "READY_FOR_EXPERT"
-    PROCESSING_EXPERT = "PROCESSING_EXPERT"
-    EXPERT_COMPLETE = "EXPERT_COMPLETE"
+    AWAITING_EXPERT_REVIEW = "AWAITING_EXPERT_REVIEW"
     PIPELINE_COMPLETE = "PIPELINE_COMPLETE"
 
     VIDEO_PRESENT_STATUSES = [
         READY_FOR_ML, PROCESSING_ML, ML_COMPLETE,
-        READY_FOR_CITSCI, PROCESSING_CITSCI, CITSCI_COMPLETE,
-        READY_FOR_EXPERT, PROCESSING_EXPERT, EXPERT_COMPLETE,
-        PIPELINE_COMPLETE
+        CITSCI_CLIPS_COMPLETE, CITSCI_COMPLETE, AWAITING_EXPERT_REVIEW, PIPELINE_COMPLETE
     ]
 
     STAGE_ORDER = [
-        ("PENDING_ARRIVAL",      "⏳ Pending Arrival",       "Waiting for video to arrive in S3"),
-        ("READY_FOR_ML",         "🤖 Ready for ML",          "Video present, queued for ML inference"),
-        ("PROCESSING_ML",        "⚙️ Processing ML",         "ML inference actively running"),
-        ("ML_COMPLETE",          "✅ ML Complete",            "ML done, awaiting Zooniverse/Biigle"),
-        ("READY_FOR_CITSCI",     "🌍 Ready for CitSci",      "Queued for citizen science upload"),
-        ("PROCESSING_CITSCI",    "⚙️ Processing CitSci",    "CitSci workflow running"),
-        ("CITSCI_COMPLETE",      "✅ CitSci Complete",       "CitSci done, awaiting expert review"),
-        ("READY_FOR_EXPERT",     "🔬 Ready for Expert",      "Queued for expert annotation in Biigle"),
-        ("PROCESSING_EXPERT",    "⚙️ Processing Expert",    "Expert annotation in progress"),
-        ("EXPERT_COMPLETE",      "✅ Expert Complete",       "Expert done, syncing annotations"),
-        ("PIPELINE_COMPLETE",    "🎉 Pipeline Complete",     "Fully processed"),
-        ("ON_HOLD",              "⏸️ On Hold",               "Paused for investigation"),
-        ("EXCLUDED",             "🚫 Excluded",              "Bad deployment, not processing"),
-        ("ERROR",                "❌ Error",                 "Failed a pipeline step"),
-        ("MISSING_METADATA",     "⚠️ Missing Metadata",     "Required metadata absent"),
+        ("PENDING_ARRIVAL",        "⏳ Pending Arrival",        "Waiting for video to arrive in S3"),
+        ("READY_FOR_ML",           "🤖 Ready for ML",           "Video present, queued for ML inference"),
+        ("PROCESSING_ML",          "⚙️ Processing ML",          "ML inference actively running"),
+        ("ML_COMPLETE",            "✅ ML Complete",            "ML done, awaiting next steps"),
+        ("AWAITING_CITSCI_CLIPS",  "⏳ Awaiting CitSci Clips",  "Queued for Zooniverse clip selection"),
+        ("CITSCI_CLIPS_COMPLETE",  "✅ CitSci Clips Complete",  "CitSci clips extracted, awaiting CitSci annotations"),
+        ("AWAITING_CITSCI_FRAMES", "⏳ Awaiting CitSci Frames", "Zooniverse frames extracted, awaiting annotations"),
+        ("CITSCI_COMPLETE",        "✅ CitSci Complete",        "CitSci fully done"),
+        ("AWAITING_EXPERT_REVIEW", "🔬 Awaiting Expert",        "Volume created in Biigle, awaiting expert annotation"),
+        ("PIPELINE_COMPLETE",      "🎉 Pipeline Complete",      "Fully processed and synced from Biigle"),
+        ("ON_HOLD",                "⏸️ On Hold",                "Paused for investigation"),
+        ("EXCLUDED",               "🚫 Excluded",               "Bad deployment, not processing"),
+        ("ERROR",                  "❌ Error",                  "Failed a pipeline step"),
+        ("MISSING_METADATA",       "⚠️ Missing Metadata",       "Required metadata absent"),
     ]

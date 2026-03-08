@@ -5,9 +5,12 @@ Usage:
     python run_pipeline.py                   # Run all steps (default)
     python run_pipeline.py --ingest          # Only run Step 1 (metadata ingestion)
     python run_pipeline.py --ml              # Only run Steps 2+3 (ML inference + post-processing)
-    python run_pipeline.py --biigle-upload   # Only run Step 5 (Biigle frame extraction + upload)
-    python run_pipeline.py --biigle-sync     # Only run Step 6 (Biigle annotation sync)
-    python run_pipeline.py --biigle-test     # Seed DB with test Biigle drops + run Step 6
+    python run_pipeline.py --zooniverse-clips# Only run Step 4 (Zooniverse clip extraction)
+    python run_pipeline.py --zooniverse-images# Only run Step 5 (Zooniverse image extraction)
+    python run_pipeline.py --biigle-upload   # Only run Step 6 (Biigle frame extraction + upload)
+    python run_pipeline.py --biigle-sync     # Only run Step 7 (Biigle annotation sync)
+    python run_pipeline.py --biigle-test     # Seed DB with test Biigle drops + run Step 7
+    python run_pipeline.py --staged-test     # Seed DB with staggered drops across all pipeline stages
     python run_pipeline.py --test-run        # Run in test mode with mock data
 
 Steps can be combined: python run_pipeline.py --ingest --biigle-sync
@@ -20,40 +23,50 @@ import traceback
 from pathlib import Path
 
 from spyfish.config import config, PipelineStatus
-from spyfish.storage.db_sync import upload_db, upload_annotations_db
+from spyfish.log_config import log_header
+from spyfish.storage.db_sync import sync_pipeline_results
 from spyfish.database.manager import DatabaseManager
-from spyfish.extraction.select_clips import select_maxn_clips_for_review
 from spyfish.extraction.extract_clips import extract_clips_from_selections
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.extraction.extract_frames import extract_frames_from_selections
 from spyfish.biigle.upload_frames import upload_frames_to_biigle
+from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
+from spyfish.zooniverse.upload import upload_clips_to_zooniverse, check_clip_sizes
 from spyfish.ml.process_ml_annotations import run_post_ml
 from spyfish.orchestrator.ml_runner import MLRunner
-from spyfish.orchestrator.ingest import run_ingestion
+from spyfish.orchestrator.ingest import run_ingestion, check_pending_arrivals
 from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
+from spyfish.zooniverse.upload import upload_frames_to_zooniverse
+from spyfish.test_setup import inject_test_drops
+from spyfish.storage.db_sync import download_db, download_annotations_db
+
+
+def _sync_from_s3():
+    log_header("CORE: SYNCING DATABASE FROM S3 (PULL)")
+    if not config.is_test_run:
+        download_db()
+        download_annotations_db()
+    else:
+        logging.info("Test run: skipping database pull from S3.")
 
 
 def _run_step1_ingest():
-    logging.info("─── STEP 1: Ingesting metadata into pipeline database ───")
+    log_header("STEP 1: METADATA INGESTION: Ingesting metadata into pipeline database")
     run_ingestion()
     ingest_legacy_expert_annotations()
 
-def _run_biigle_test_seed():
-    logging.info("─── BIIGLE TEST: Seeding DB with test Biigle drops ───")
-    from spyfish.test_setup import inject_biigle_test_drops
-    db = DatabaseManager()
-    inject_biigle_test_drops(db)
-    logging.info("Biigle test drops seeded. Will now run Step 6 (Biigle sync).")
+def _run_arrival_check():
+    log_header("ORCHESTRATION: CHECKING FOR NEW VIDEO ARRIVALS")
+    check_pending_arrivals()
 
-def _run_step2_ml_inference(is_test_run: bool) -> list:
-    logging.info("─── STEP 2: Running ML inference loop ───")
+
+def _run_step2_ml_inference() -> list:
+    log_header("STEP 2: ML INFERENCE")
     runner = MLRunner()
-    if is_test_run:
-        runner.is_test_run = True
-    targets = runner.generate_manifest()
+    targets = runner.get_inference_targets()
 
     if not targets:
-        logging.info("No targets to process.")
+        logging.info("No drops available for ML processing.")
         return []
 
     results = runner.run_inference_loop(targets)
@@ -61,50 +74,122 @@ def _run_step2_ml_inference(is_test_run: bool) -> list:
     return results
 
 def _run_step3_post_ml(drop_ids: list):
-    logging.info("─── STEP 3: Post-ML processing (MaxN + QA frames) ───")
+    log_header("STEP 3: POST-ML Processing (MaxN + QA frames)")
     run_post_ml(
         drop_ids=drop_ids,
-        annotations_dir=config.local_manifest_dir_path,
-        video_dir=config.mock_video_dir,
-        output_root=config.local_data_quality_dir,
+        annotations_dir=config.data_quality_dir,
+        video_dir=config.media_dir,
+        output_root=config.data_quality_dir,
     )
 
-def _run_step5_biigle_upload(drop_ids: list):
-    logging.info("─── STEP 5: Biigle frame extraction + volume upload ───")
+def _get_common_paths(drop_id: str):
+    """Helper to get standardized paths for a drop."""
+    model_name = Path(config.pipeline_model_path).stem
+    return {
+        "model_name": model_name,
+        "maxn_csv": str(config.get_maxn_csv_path(drop_id, model_name)),
+        "selections_csv": str(config.get_selections_csv_path(drop_id)),
+        "raw_csv": str(config.get_raw_csv_path(drop_id, model_name)),
+        "video_path": str(config.get_video_path(drop_id)),
+        "zooniverse_clips": str(config.get_clips_dir(drop_id, target="zooniverse")),
+        "zooniverse_frames": str(config.get_frames_dir(drop_id, target="zooniverse")),
+        "biigle_frames": str(config.get_frames_dir(drop_id, target="biigle")),
+    }
+
+
+def _run_step4_zooniverse_clips(db: DatabaseManager):
+    log_header("STEP 4: Zooniverse clip selection + extraction")
+
+    records = db.get_deployments_by_status(PipelineStatus.AWAITING_CITSCI_CLIPS)
+    drop_ids = [r['drop_id'] for r in records]
+
     if not drop_ids:
-        logging.info("No ML results to upload to Biigle.")
+        logging.info(f"No deployments found with status {PipelineStatus.AWAITING_CITSCI_CLIPS}. Skipping Step 4.")
         return
 
-    db = DatabaseManager()
-    annotations_dir = Path(config.local_manifest_dir_path)
-    video_dir = Path(config.mock_video_dir)
-    dq_dir = Path(config.local_data_quality_dir)
-    model_name = Path(config.model_path or config.mock_model_path).stem
+    for drop_id in drop_ids:
+        logging.info(f"Processing clips for {drop_id}...")
+        paths = _get_common_paths(drop_id)
+
+        selections_df = process_zooniverse_clips(paths["maxn_csv"], paths["selections_csv"], drop_id, config)
+        if selections_df is None or selections_df.empty:
+            logging.info(f"No high-confidence clips found for {drop_id}.")
+            continue
+
+        clips_df = extract_clips_from_selections(selections_csv_path=paths["selections_csv"], video_path=paths["video_path"], output_dir=paths["zooniverse_clips"])
+        clips_df = check_clip_sizes(clips_df)
+
+        logging.info(f"Uploading {len(clips_df)} clips for {drop_id} to Zooniverse.")
+        upload_clips_to_zooniverse(clips_df)
+        db.update_status(drop_id, PipelineStatus.CITSCI_CLIPS_COMPLETE)
+
+def _run_step5_zooniverse_images(db: DatabaseManager):
+    log_header("STEP 5: Zooniverse frame extraction + upload")
+
+    records = db.get_deployments_by_status(PipelineStatus.CITSCI_CLIPS_COMPLETE)
+    drop_ids = [r['drop_id'] for r in records]
+
+    if not drop_ids:
+        logging.info("No deployments ready for Zooniverse images. Skipping Step 5.")
+        return
 
     for drop_id in drop_ids:
-        record = db.get_deployment(drop_id)
-        sampling_start = int(record["sampling_start"]) if record and record.get("sampling_start") else 0
+        logging.info(f"Processing frames for {drop_id}...")
+        paths = _get_common_paths(drop_id)
 
-        maxn_csv       = str(annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
-        selections_csv = str(annotations_dir / f"{drop_id}_biigle_selections.csv")
-        raw_csv        = str(annotations_dir / f"{drop_id}_{model_name}_raw.csv")
-        video_path     = str(video_dir / f"{drop_id}.mp4")
-        frames_dir     = str(dq_dir / drop_id / "biigle_frames")
+        if not Path(paths["selections_csv"]).exists():
+            logging.warning(f"Missing {paths['selections_csv']} for {drop_id}. Skipping.")
+            continue
 
-        # 5a — Select the MaxN peak frames
-        select_maxn_clips_for_review(maxn_csv_path=maxn_csv, output_selections_path=selections_csv, drop_id=drop_id, sampling_start=sampling_start)
+        frames_df = extract_frames_from_selections(
+            selections_csv_path=paths["selections_csv"],
+            video_path=paths["video_path"],
+            raw_csv_path=paths["raw_csv"],
+            output_dir=paths["zooniverse_frames"]
+        )
+        logging.info(f"Uploading {len(frames_df)} frames for {drop_id} to Zooniverse.")
+        upload_frames_to_zooniverse(frames_df)
+        db.update_status(drop_id, PipelineStatus.CITSCI_COMPLETE)
 
-        # 5b — Extract clean JPEGs + COCO JSON
-        frames_df = extract_frames_from_selections(selections_csv_path=selections_csv, video_path=video_path, raw_csv_path=raw_csv, output_dir=frames_dir)
+def _run_step6_biigle_upload(db: DatabaseManager, include_ml_complete: bool = False):
+    log_header("─── STEP 6: Biigle frame extraction + volume upload ───")
 
-        # 5c — Upload to S3 + create Biigle volume
+    statuses = [PipelineStatus.CITSCI_COMPLETE]
+    if include_ml_complete:
+        statuses.append(PipelineStatus.ML_COMPLETE)
+        logging.info(f"Including {PipelineStatus.ML_COMPLETE} deployments as requested.")
+
+    records = db.get_deployments_by_statuses(statuses)
+    drop_ids = [r['drop_id'] for r in records]
+
+    if not drop_ids:
+        logging.info("No deployments ready for Biigle upload. Skipping Step 6.")
+        return
+
+    for drop_id in drop_ids:
+        logging.info(f"Uploading volume for {drop_id} to Biigle...")
+        paths = _get_common_paths(drop_id)
+
+        if not Path(paths["selections_csv"]).exists():
+            logging.error(f"Missing {paths['selections_csv']} for {drop_id}.")
+            continue
+
+        # Extract clean JPEGs + COCO JSON
+        frames_df = extract_frames_from_selections(
+            selections_csv_path=paths["selections_csv"],
+            video_path=paths["video_path"],
+            raw_csv_path=paths["raw_csv"],
+            output_dir=paths["biigle_frames"]
+        )
+
+        # Upload to S3 + create Biigle volume
         volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
-        logging.info(f"Step 5 complete for {drop_id}: Biigle volume id={volume_info.get('id')}")
+        logging.info(f"Biigle volume created for {drop_id}: id={volume_info.get('id')}")
 
-        db.update_status(drop_id, PipelineStatus.READY_FOR_CITSCI)
+        db.update_status(drop_id, PipelineStatus.AWAITING_EXPERT_REVIEW)
 
-def _run_step6_biigle_sync():
-    logging.info("─── STEP 6: Syncing Biigle annotations ───")
+def _run_step7_biigle_sync():
+    log_header("STEP 7:  Sync Biigle annotations ")
     sync_biigle_annotations()
 
 def execute_step(step_func, *args, **kwargs):
@@ -120,63 +205,84 @@ def execute_step(step_func, *args, **kwargs):
 def main():
     parser = argparse.ArgumentParser(description="Run the Spyfish pipeline. Runs all steps by default.")
     parser.add_argument("--ingest",        action="store_true", help="Run Step 1: metadata ingestion")
+    parser.add_argument("--check-arrivals", action="store_true", help="Check S3 for video arrivals (advances PENDING_ARRIVAL)")
     parser.add_argument("--ml",            action="store_true", help="Run Steps 2+3: ML inference + post-processing")
-    parser.add_argument("--biigle-upload", action="store_true", help="Run Step 5: Biigle frame extraction + volume upload")
-    parser.add_argument("--biigle-sync",   action="store_true", help="Run Step 6: Biigle annotation sync")
-    parser.add_argument("--biigle-test",   action="store_true", help="Seed DB with BIIGLE_TEST_DROPS (READY_FOR_EXPERT + known volume ID), then run Step 6")
+    parser.add_argument("--zooniverse-clips", action="store_true", help="Run Step 4: Zooniverse clip extraction")
+    parser.add_argument("--zooniverse-images",action="store_true", help="Run Step 5: Zooniverse image extraction")
+    parser.add_argument("--biigle-upload", action="store_true", help="Run Step 6: Biigle frame extraction + upload")
+    parser.add_argument("--biigle-sync",   action="store_true", help="Run Step 7: Biigle annotation sync")
+    parser.add_argument("--upload-videos", action="store_true", help="Upload videos to S3 during final sync")
+    parser.add_argument("--staged-test",   action="store_true", help="Seed DB with staggered drops across all pipeline stages")
     parser.add_argument("--test-run",      action="store_true", help="Run in test mode with mock data")
     args = parser.parse_args()
 
+    db = DatabaseManager()
+
     # If no step flags are given, run everything
-    run_all = not any([args.ingest, args.ml, args.biigle_upload, args.biigle_sync, args.biigle_test])
+    run_all = not any([args.ingest, args.check_arrivals, args.ml, args.zooniverse_clips, args.zooniverse_images, args.biigle_upload, args.biigle_sync, args.staged_test])
 
     active_steps = "ALL" if run_all else ", ".join(
         s for s, v in [("ingest", args.ingest), ("ml", args.ml),
+                       ("zooniverse-clips", args.zooniverse_clips), ("zooniverse-images", args.zooniverse_images),
                        ("biigle-upload", args.biigle_upload), ("biigle-sync", args.biigle_sync),
-                       ("biigle-test", args.biigle_test)] if v
+                       ("staged-test", args.staged_test)] if v
     )
 
-    logging.info("=" * 60)
-    logging.info("SPYFISH PIPELINE")
-    logging.info(f"STEPS: {active_steps}")
-    logging.info("=" * 60)
+    logging.info("═" * 60)
+    logging.info(" SPYFISH AOTEAROA PIPELINE ".center(60, "═"))
+    logging.info(f" STEPS: {active_steps} ".center(60, "═"))
+    logging.info("═" * 60)
+
+    # --- PULL PHASE ---
+    # The local DB is the ultimate truth. We only sync down at the very start.
+    _sync_from_s3()
 
     results = []
 
     if run_all or args.ingest:
         execute_step(_run_step1_ingest)
-    else:
-        logging.info("─── STEP 1: SKIPPED (--skip-ingest) ───")
 
-    if args.biigle_test:
-        execute_step(_run_biigle_test_seed)
+    if args.check_arrivals:
+        execute_step(_run_arrival_check)
+
+    if config.is_test_run:
+        inject_test_drops(db=db, use_pipeline_status=args.staged_test)
+        logging.info("Test drops seeded.")
 
     if run_all or args.ml:
-        results = execute_step(_run_step2_ml_inference, args.test_run)
+        results = execute_step(_run_step2_ml_inference)
         if results:
             execute_step(_run_step3_post_ml, results)
 
-    # Step 4: Zooniverse skipped
-    logging.info("─── SKIPPING STEP 4: Zooniverse clip selection + extraction ───")
+    if run_all or args.zooniverse_clips:
+        execute_step(_run_step4_zooniverse_clips, db)
+    else:
+        logging.info("─── STEP 4: SKIPPED (--zooniverse-clips not set) ───")
+
+    if run_all or args.zooniverse_images:
+        execute_step(_run_step5_zooniverse_images, db)
+    else:
+        logging.info("─── STEP 5: SKIPPED (--zooniverse-images not set) ───")
 
     if run_all or args.biigle_upload:
-        if run_all and not results:
-            logging.info("─── STEP 5: Skipped (No ML results to process) ───")
-        else:
-            execute_step(_run_step5_biigle_upload, results)
+        # If we are running biigle_upload but NOT running Zooniverse steps,
+        # tell Step 6 to pull directly from ML_COMPLETE.
+        skip_zooniverse = not (run_all or args.zooniverse_clips or args.zooniverse_images)
+        logging.info(f"!!!!!!!!!!!!!Skipping Zooniverse steps: {skip_zooniverse}")
+        execute_step(_run_step6_biigle_upload, db, include_ml_complete=skip_zooniverse)
+
+    if run_all or args.biigle_sync:
+        execute_step(_run_step7_biigle_sync)
+
+    # Push final state (DBs + ML CSVs) to S3
+    logging.info("Syncing final results to S3...")
+    if not config.is_test_run:
+        sync_pipeline_results(upload_videos=args.upload_videos)
     else:
-        logging.info("─── STEP 5: SKIPPED (--skip-biigle-upload) ───")
+        logging.debug("Test run: skipping final S3 sync of annotations directory.")
 
-    if run_all or args.biigle_sync or args.biigle_test:
-        execute_step(_run_step6_biigle_sync)
-
-    # Push final DB state to S3 for Streamlit apps to read
-    upload_db()
-    upload_annotations_db()
-
-    logging.info("=" * 60)
-    logging.info(f"PIPELINE COMPLETE — {len(results)} drops processed")
-    logging.info("=" * 60)
+    log_header("PIPELINE COMPLETE", character="═")
+    logging.info(f"Processed {len(results)} drops successfully.")
 
 if __name__ == "__main__":
     main()

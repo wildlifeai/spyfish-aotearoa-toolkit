@@ -33,17 +33,17 @@ def ingest_legacy_expert_annotations():
         # We map these to our annotation schema
         annotations = []
         for _, row in df.iterrows():
-            scientific_name = row["ScientificName"] if not pd.isna(row["ScientificName"]) else None
-            conf = row["ConfidenceAgreement"]
+            scientific_name = row[config.csv_scientific_name_column] if not pd.isna(row[config.csv_scientific_name_column]) else None
+            conf = row[config.csv_confidence_agreement_column]
             confidence = None if (pd.isna(conf) or conf == "NA") else float(conf)
 
             annotations.append({
-                "drop_id": row["DropID"],
+                "drop_id": row[config.drop_id_column],
                 "scientific_name": scientific_name,
-                "time_of_max": row["TimeOfMax"] if not pd.isna(row["TimeOfMax"]) else None,
-                "max_interval": row["MaxInterval"] if not pd.isna(row["MaxInterval"]) else 0,
+                "time_of_max": row[config.csv_maxn_time_column] if not pd.isna(row[config.csv_maxn_time_column]) else None,
+                "max_interval": row[config.csv_max_interval_column] if not pd.isna(row[config.csv_max_interval_column]) else 0,
                 "annotated_by": "expert",
-                "interval_annotation": row.get("IntervalAnnotation", None) if not pd.isna(row.get("IntervalAnnotation")) else None,
+                "interval_annotation": row.get(config.csv_interval_annotation_column, None) if not pd.isna(row.get(config.csv_interval_annotation_column)) else None,
                 "confidence_agreement": confidence,
                 "external_id": "legacy"  # distinguishes these from Biigle-synced expert annotations
             })

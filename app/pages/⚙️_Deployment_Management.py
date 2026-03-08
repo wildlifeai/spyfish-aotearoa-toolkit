@@ -5,7 +5,7 @@ from pathlib import Path
 from spyfish.config import config, PipelineStatus
 from spyfish.utils import extract_survey_id, get_survey_summary
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
-from utils import sync_db_if_needed, check_password
+from utils import sync_db_if_needed, check_password, render_sidebar_refresh
 
 @st.cache_data(ttl=1)  # Refresh UI instantly
 def load_deployment_status():
@@ -25,13 +25,14 @@ def load_deployment_status():
             "expert_annotations": "ExpertAnnotations",
             "ml_annotations": "MlAnnotations",
             "citsci_annotations": "CitSciAnnotations",
-            "is_bad_deployment": "IsBadDeployment"
+            "is_bad_deployment": "IsBadDeployment",
+            "sampling_start": "SamplingStart"
         }, inplace=True)
         df["IsBadDeployment"] = df["IsBadDeployment"].astype(bool)
         df["SurveyID"] = extract_survey_id(df["DropID"])
 
         # Map Pipeline Complete (excluding EXCLUDED/bad deployments)
-        df["Complete"] = df["Status"] == "PIPELINE_COMPLETE"
+        df["Complete"] = df["Status"] == PipelineStatus.PIPELINE_COMPLETE
         # Read the new native SQLite database columns
         df["ExpertAnnotations"] = df["ExpertAnnotations"].fillna(0).astype(int)
         df["MlAnnotations"] = df["MlAnnotations"].fillna(0).astype(int)
@@ -61,21 +62,22 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         st.metric("Total Deployments", len(df))
     with col2: st.metric("Action Req.", (~df["Complete"]).sum())
     with col3:
-        st.metric("Unique Surveys", df["SurveyID"].nunique())
-    with col4:
         # User request: get this info from status (READY_FOR_ML, PIPELINE_COMPLETE, etc) rather than mocked VideoStatus
         videos_present = df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()
         st.metric("Videos Present", videos_present)
+
+    with col4:
+        st.metric("Unique Surveys", df["SurveyID"].nunique())
 
     with col5: st.metric("ML Ann.", (df["MlAnnotations"] > 0).sum())
 
     with col6: st.metric("CitSci Ann.", (df["CitSciAnnotations"] > 0).sum())
     with col7: st.metric("Expert Ann.", (df["ExpertAnnotations"] > 0).sum())
 
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        show_annotations = st.checkbox("Show Annotation Columns", key=f"show_ann_{title}", value=False)
 
-    show_annotations = st.checkbox("Show Annotation Columns", key=f"show_ann_{title}", value=False)
-
-    display_cols = ["DropID", "SurveyID", "Status", "Complete"]
+    display_cols = ["DropID", "SurveyID", "SamplingStart", "Status","Complete"]
     if show_annotations:
         display_cols.extend(["MlAnnotations", "CitSciAnnotations","ExpertAnnotations" ])
 
@@ -207,7 +209,7 @@ def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
         "Use filters above to narrow down results"
     )
 
-def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
+def render_detailed_annotation_tab(deployment_df: pd.DataFrame, ann_db):
     st.header("🔍 Detailed Annotation View")
     st.caption("Select a deployment to view individual annotation records from the annotations database")
 
@@ -216,7 +218,6 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
         options=["None"] + sorted(deployment_df["DropID"].tolist()),
         index=0
     )
-    ann_db = AnnotationDatabaseManager()
 
     if selected_drop_id != "None":
         # Load detailed annotations
@@ -233,17 +234,28 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame):
             with s_cols[2]: st.metric("CitSci", len(ann_df[ann_df["annotated_by"] == "citsci"]))
 
             st.dataframe(
-                ann_df[["scientific_name", "time_of_max", "max_interval", "annotated_by", "interval_annotation", "confidence_agreement", "external_id"]],
+                ann_df[[
+                    "scientific_name", "time_of_max", "max_interval",
+                    "annotated_by", "interval_annotation", "confidence_agreement", "external_id"
+                ]],
                 width='stretch',
-                hide_index=True
+                hide_index=True,
+                column_config={
+                    "scientific_name":      st.column_config.TextColumn("Scientific Name"),
+                    "time_of_max":          st.column_config.TextColumn("Time of MaxN"),
+                    "max_interval":         st.column_config.NumberColumn("MaxN Count", width="small"),
+                    "annotated_by":         st.column_config.TextColumn("Annotated By", width="small"),
+                    "interval_annotation":  st.column_config.TextColumn("Interval (s)", width="small"),
+                    "confidence_agreement": st.column_config.NumberColumn("Confidence", format="%.2f", width="small"),
+                    "external_id":          st.column_config.TextColumn("External ID", width="small"),
+                },
             )
         else:
             st.info(f"No detailed annotations found for {selected_drop_id} in the annotations database.")
 
 @st.cache_data(ttl=600)
-def get_all_annotations_export():
-    adb = AnnotationDatabaseManager()
-    df = adb.get_all_annotations_export_df()
+def get_all_annotations_export(_adb):
+    df = _adb.get_all_annotations_export_df()
     if df is None or df.empty:
         return None
     return df.to_csv(index=False).encode('utf-8')
@@ -253,20 +265,17 @@ def main():
     if not check_password():
         st.stop()
 
+    render_sidebar_refresh()
+
     st.title("⚙️ Deployment Management")
     st.caption("Dashboard deployment")
-
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("🔄 Refresh DB", help="Read latest SQLite pipeline status"):
-            sync_db_if_needed.clear()
-            st.rerun()
 
     st.divider()
     deployment_df = load_deployment_status()
     if deployment_df is None: return
 
     render_overview(deployment_df)
+    ann_db = AnnotationDatabaseManager()
 
     tab1, tab2, tab3 = st.tabs(["📋 Deployments Overview", "📊 Survey Overview", "🐟 Annotations Overview"])
 
@@ -277,7 +286,7 @@ def main():
         render_pipeline_stage_tab(deployment_df)
 
     with tab3:
-        render_detailed_annotation_tab(deployment_df)
+        render_detailed_annotation_tab(deployment_df, ann_db)
 
     st.divider()
 
@@ -302,7 +311,7 @@ def main():
         )
 
     with col3:
-        annotations_csv = get_all_annotations_export()
+        annotations_csv = get_all_annotations_export(ann_db)
         if annotations_csv:
             st.download_button(
                 label="Download All Annotations",
