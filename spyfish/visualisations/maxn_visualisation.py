@@ -13,6 +13,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
+from spyfish.config import config
 
 
 def plot_maxn_timeline(

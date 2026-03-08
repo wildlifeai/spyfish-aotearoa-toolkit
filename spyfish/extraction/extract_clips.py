@@ -50,9 +50,12 @@ def extract_clips_from_selections(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # TODO what is the 0 here?
+    if config.csv_sampling_start_column not in df.columns:
+        raise ValueError(f"Missing mandatory column '{config.csv_sampling_start_column}' in selections CSV. "
+                         "This is required to calculate absolute seek times.")
+
     drop_id = df[config.drop_id_column].iloc[0]
-    sampling_start = int(df[config.csv_sampling_start_column].iloc[0]) if config.csv_sampling_start_column in df.columns else 0
+    sampling_start = int(df[config.csv_sampling_start_column].iloc[0])
 
     clip_paths = []
     for idx, row in df.iterrows():
@@ -62,8 +65,8 @@ def extract_clips_from_selections(
             continue
 
         clip_start_relative = float(row[config.csv_clip_start_column])
-        # TODO remove magic numbers
-        clip_end_relative = float(row[config.csv_clip_end_column]) if config.csv_clip_end_column in row else clip_start_relative + 10.0
+        # Use config-defined clip length as fallback
+        clip_end_relative = float(row[config.csv_clip_end_column]) if config.csv_clip_end_column in row else clip_start_relative + config.zooniverse_clip_length
 
         clip_duration = clip_end_relative - clip_start_relative
         seek_seconds = sampling_start + clip_start_relative
@@ -76,14 +79,20 @@ def extract_clips_from_selections(
             "-ss", str(seek_seconds),
             "-i", str(video_path),
             "-t", str(clip_duration),
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "22",
+            "-c:v", config.ffmpeg_codec,
+            "-preset", config.ffmpeg_preset,
+            "-crf", config.ffmpeg_crf,
             "-an",   # remove audio — standard for processed clips
             str(out_path),
         ]
 
         logging.info(f"  [{idx+1}/{len(df)}] {seek_seconds:.1f}s → {out_filename}")
+
+        if out_path.exists():
+            logging.info(f"    Skipping: File already exists at {out_path}")
+            clip_paths.append(str(out_path))
+            continue
+
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             clip_paths.append(str(out_path))

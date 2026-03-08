@@ -154,7 +154,6 @@ def extract_frames_from_selections(
     video_path: str,
     raw_csv_path: str,
     output_dir: str,
-    fast: bool = False,
 ) -> pd.DataFrame:
     """
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
@@ -172,7 +171,6 @@ def extract_frames_from_selections(
         video_path: Full path to the source video file.
         raw_csv_path: Raw YOLO CSV ({drop_id}_{model}_raw.csv), for COCO annotations.
         output_dir: Directory to write JPEG frames and coco_annotations.json.
-        fast: Use fast ffmpeg seek (default True; trades ~1 frame accuracy for speed).
 
     Returns:
         selections_df with 'FramePath' column added.

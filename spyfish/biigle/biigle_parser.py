@@ -38,10 +38,10 @@ class BiigleParser:
             self.cache_dir = Path(cache_dir)
         elif drop_id:
             # Use per-drop cache folder
-            self.cache_dir = config.data_quality_dir / drop_id / "biigle_cache"
+            self.cache_dir = config.get_biigle_cache_dir(drop_id)
         else:
-            # Fallback to general cache in data_quality folder
-            self.cache_dir = config.data_quality_dir / "biigle_cache"
+            # Fallback to general cache in data_quality folder (root)
+            self.cache_dir = config.data_quality_dir / config.sub_dirs.get("biigle_cache", "biigle_cache")
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Biigle cache directory: {self.cache_dir}")

@@ -5,7 +5,7 @@ from pathlib import Path
 from spyfish.config import config, PipelineStatus
 from spyfish.utils import extract_survey_id, get_survey_summary
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
-from utils import sync_db_if_needed, check_password
+from utils import sync_db_if_needed, check_password, render_sidebar_refresh
 
 @st.cache_data(ttl=1)  # Refresh UI instantly
 def load_deployment_status():
@@ -62,11 +62,12 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         st.metric("Total Deployments", len(df))
     with col2: st.metric("Action Req.", (~df["Complete"]).sum())
     with col3:
-        st.metric("Unique Surveys", df["SurveyID"].nunique())
-    with col4:
         # User request: get this info from status (READY_FOR_ML, PIPELINE_COMPLETE, etc) rather than mocked VideoStatus
         videos_present = df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()
         st.metric("Videos Present", videos_present)
+
+    with col4:
+        st.metric("Unique Surveys", df["SurveyID"].nunique())
 
     with col5: st.metric("ML Ann.", (df["MlAnnotations"] > 0).sum())
 
@@ -264,14 +265,10 @@ def main():
     if not check_password():
         st.stop()
 
+    render_sidebar_refresh()
+
     st.title("⚙️ Deployment Management")
     st.caption("Dashboard deployment")
-
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("🔄 Refresh DB", help="Read latest SQLite pipeline status"):
-            sync_db_if_needed.clear()
-            st.rerun()
 
     st.divider()
     deployment_df = load_deployment_status()

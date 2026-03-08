@@ -14,8 +14,6 @@ from spyfish.ml.run_inference import main as run_inference_main
 
 class MLRunner:
     def __init__(self):
-        self.is_local = config.is_local
-
         # S3 properties
         self.bucket = config.s3_bucket
         self.s3_db_key = config.s3_db_key

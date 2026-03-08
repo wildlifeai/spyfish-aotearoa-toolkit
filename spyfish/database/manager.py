@@ -167,6 +167,13 @@ class DatabaseManager:
             cursor.execute(f'SELECT * FROM deployments WHERE drop_id IN ({placeholders})', drop_ids)
             return {row['drop_id']: dict(row) for row in cursor.fetchall()}
 
+    def get_all_deployments_map(self) -> Dict[str, Dict[str, Any]]:
+        """Fetch all deployment records and return them as a dictionary {drop_id: record}."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM deployments')
+            return {row['drop_id']: dict(row) for row in cursor.fetchall()}
+
     def clear_pipeline_errors(self, drop_id: str):
         """Remove all PIPELINE_ERROR rows from validation_errors for a specific drop.
         Call this when manually fixing a drop and retrying it.
@@ -200,10 +207,15 @@ class DatabaseManager:
             conn.commit()
 
     def get_all_validation_errors(self) -> List[Dict[str, Any]]:
-        """Returns all stored validation errors."""
+        """Returns all stored validation errors, including deployment status where possible."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT SurveyID, DropID, ErrorType, FileName, ColumnName, ErrorMessage, InvalidValue FROM validation_errors')
+            query = '''
+                SELECT v.SurveyID, v.DropID, v.ErrorType, v.FileName, v.ColumnName, v.ErrorMessage, v.InvalidValue, d.status
+                FROM validation_errors v
+                LEFT JOIN deployments d ON v.DropID = d.drop_id
+            '''
+            cursor.execute(query)
             return [dict(row) for row in cursor.fetchall()]
 
     def sync_annotation_counts(self, drop_ids: Optional[List[str]] = None):

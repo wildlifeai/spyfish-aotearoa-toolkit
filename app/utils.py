@@ -6,7 +6,7 @@ from spyfish.storage.db_sync import download_db, download_annotations_db
 import logging
 
 
-@st.cache_data(ttl=300)  # Check S3 at most every 5 minutes
+@st.cache_data(ttl=None)  # Only sync once per session unless 'Refresh Cache' is clicked
 def sync_db_if_needed():
     """Helper to sync database from S3 if in AWS mode or missing locally."""
 
@@ -18,6 +18,14 @@ def sync_db_if_needed():
 
     return True
 
+
+def render_sidebar_refresh():
+    """Renders a common sidebar button to clear cache and refresh data."""
+    st.sidebar.header("Controls")
+    if st.sidebar.button("🔄 Refresh Cache", help="Clears local cache and re-syncs from S3 if needed"):
+        st.cache_data.clear()
+        st.sidebar.success("Cache cleared!")
+        st.rerun()
 
 # --- Password protection ---
 def check_password():

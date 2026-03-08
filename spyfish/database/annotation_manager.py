@@ -58,9 +58,9 @@ class AnnotationDatabaseManager:
             return
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany(f'''
+            cursor.executemany('''
                 INSERT INTO annotations (drop_id, scientific_name, time_of_max, max_interval, annotated_by, interval_annotation, confidence_agreement, external_id)
-                VALUES (:{config.drop_id_column}, :{config.csv_scientific_name_column}, :{config.csv_maxn_time_column}, :{config.csv_max_interval_column}, :{config.csv_annotated_by_column}, :{config.csv_interval_annotation_column}, :{config.csv_confidence_agreement_column}, :external_id)
+                VALUES (:drop_id, :scientific_name, :time_of_max, :max_interval, :annotated_by, :interval_annotation, :confidence_agreement, :external_id)
             ''', annotations)
             conn.commit()
 

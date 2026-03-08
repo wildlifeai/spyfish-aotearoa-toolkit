@@ -118,10 +118,16 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
 
     new_count = 0
     expt_count = 0
+    existing_deployments = db.get_all_deployments_map()
+
     # Iterate over all drops and sync them into our SQLite brain
     for _, row in deployments_df.iterrows():
-        drop_id = str(row.get(drop_col, "")).strip()
-        if not drop_id or drop_id == "nan":
+        # Strict validation of drop_id to prevent path traversal and ensure format
+        try:
+            raw_drop_id = str(row.get(drop_col, "")).strip()
+            drop_id = config.validate_drop_id(raw_drop_id)
+        except ValueError as e:
+            logging.error(f"Skipping malicious or invalid DropID in CSV: {row.get(drop_col)}. Error: {e}")
             continue
 
         video_path = str(row.get(video_col, "")).strip()
@@ -131,9 +137,10 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
 
         # Parse Sampling offsets — these MUST exist in the BUV Deployment CSV
         try:
-            sampling_start = int(pd.to_numeric(row.get(config.csv_sampling_start_column)))
-            sampling_end = int(pd.to_numeric(row.get(config.csv_sampling_end_column)))
-        except (ValueError, TypeError) as e:
+            # We strictly require these to be numeric
+            sampling_start = float(row[config.csv_sampling_start_column])
+            sampling_end = float(row[config.csv_sampling_end_column])
+        except (ValueError, TypeError, KeyError) as e:
             if drop_id not in structural_error_drops:
                 structural_error_drops.add(drop_id)
             sampling_start = None
@@ -149,10 +156,10 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             status = PipelineStatus.PIPELINE_COMPLETE
         elif is_bad_deployment:
             status = PipelineStatus.EXCLUDED
-        elif drop_id in structural_error_drops and not config.is_test_run:
+        elif drop_id in structural_error_drops:
             status = PipelineStatus.ERROR
         else:
-            existing_record = db.get_deployment(drop_id)
+            existing_record = existing_deployments.get(drop_id)
             if existing_record and existing_record["status"] not in [
                 PipelineStatus.PENDING_ARRIVAL,
                 PipelineStatus.ERROR,

@@ -18,6 +18,7 @@ csv_mapping:
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
+  time_seconds_column: "TimeSeconds"
 
 # Centralized path and storage configuration
 paths:
@@ -32,7 +33,7 @@ paths:
     status_dir: "status"
     files:
       deployment_csv: "BUV Deployment.csv"
-      test_deployment_csv: "test/test_deployment_metadata.csv"
+      test_deployment_csv: "manual_testing/test_deployment_metadata.csv"
       survey_csv: "BUV Survey Metadata.csv"
       site_csv: "BUV Survey Sites.csv"
       species_csv: "BUV Species.csv"
@@ -53,11 +54,13 @@ paths:
     trained: "trained"
     biigle_images: "media/biigle_images"
     biigle_clips: "media/biigle_clips"
+    biigle_cache: "biigle_cache"
 
 
 ml_inference:
   limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
-  frame_skip: 10   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
+  log_interval_frames: 10 # Log every N frames during ML inference
+  frame_skip: 15   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
   imgsz: 640  #1920
   confidence_threshold: 0.25      # Base YOLO inference threshold
   maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
@@ -69,6 +72,12 @@ ml_inference:
 
 zooniverse_extraction:
   project_id: 32041
+  # TODO: what are these 2 things about
+  health_check_count: 6 # Number of health checks to perform
+  video_start_threshold_seconds: 120 # Number of seconds to sample from the start of the video to do the start of the video health check
+  clip_cap: 50 # Maximum number of clips to extract per video
+  force_binary_strategy: false # If true, use binary strategy regardless of species count
+  temporal_spacing_seconds: 0 # Minimum seconds between selected clips (0 to disable)
   binary_strategy:
     maxn_clips: 10
     confusing_clips: 20
@@ -83,8 +92,12 @@ zooniverse_extraction:
     temporal_spacing_seconds: 10
 
 orchestrator:
-  is_test_run: true
-  is_local: true
+  is_test_run: false
+
+ffmpeg:
+  crf: 22
+  preset: "fast" # TODO is this ok
+  codec: "libx264"
 
 
 biigle:
@@ -133,7 +146,7 @@ training:
 validation_rules:
   deployments:
     file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
-    required: ["DropID", "SurveyID", "SiteID"] #,"SamplingStart", "SamplingEnd"]
+    required: ["DropID", "SurveyID", "SiteID","SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     info_columns: ["SurveyID", "SiteID"]
     foreign_keys:

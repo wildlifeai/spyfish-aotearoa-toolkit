@@ -29,7 +29,7 @@ def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
     if not over_limit.empty:
         logging.warning(
             f"{len(over_limit)} clips exceed 12 MB and may be rejected by Zooniverse. "
-            "Consider re-encoding with a higher CRF."
+            f"Consider re-encoding with a higher CRF.{clips_df["SizeMB"]}"
         )
     else:
         logging.info(f"All {clips_df['SizeMB'].notna().sum()} clips are under 12 MB. Ready to upload.")
@@ -76,11 +76,18 @@ def upload_clips_to_zooniverse(
     zoo_project = Project.find(config.zooniverse_project_id)
 
     set_name = subject_set_name or f"spyfish_{drop_id}_{n}clips"
-    subject_set = SubjectSet()
-    subject_set.links.project = zoo_project
-    subject_set.display_name = set_name
-    subject_set.save()
-    logging.info(f"Subject set created: '{set_name}'")
+
+    # Check if subject set already exists to avoid "Display name has already been taken"
+    existing_sets = list(SubjectSet.where(project_id=zoo_project.id, display_name=set_name))
+    if existing_sets:
+        logging.info(f"Using existing subject set: '{set_name}'")
+        subject_set = existing_sets[0]
+    else:
+        subject_set = SubjectSet()
+        subject_set.links.project = zoo_project
+        subject_set.display_name = set_name
+        subject_set.save()
+        logging.info(f"Subject set created: '{set_name}'")
 
     new_subjects = []
     for _, row in uploadable.iterrows():
@@ -148,11 +155,18 @@ def upload_frames_to_zooniverse(
     zoo_project = Project.find(config.zooniverse_project_id)
 
     set_name = subject_set_name or f"spyfish_{drop_id}_{n}images"
-    subject_set = SubjectSet()
-    subject_set.links.project = zoo_project
-    subject_set.display_name = set_name
-    subject_set.save()
-    logging.info(f"Subject set created: '{set_name}'")
+
+    # Check if subject set already exists
+    existing_sets = list(SubjectSet.where(project_id=zoo_project.id, display_name=set_name))
+    if existing_sets:
+        logging.info(f"Using existing subject set: '{set_name}'")
+        subject_set = existing_sets[0]
+    else:
+        subject_set = SubjectSet()
+        subject_set.links.project = zoo_project
+        subject_set.display_name = set_name
+        subject_set.save()
+        logging.info(f"Subject set created: '{set_name}'")
 
     new_subjects = []
     for _, row in uploadable.iterrows():

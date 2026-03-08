@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 
 from ultralytics import YOLO
+from spyfish.config import config
 
 
 def get_video_fps(video_path):
@@ -67,11 +68,19 @@ def run_yolo_inference(video_url, model_path, conf, imgsz, output_csv, true_fps,
                 ml_timeline_seconds = real_video_seconds - sampling_start if sampling_start > 0 else real_video_seconds
 
                 # Run prediction on single frame
-                results = model.predict(source=frame, conf=float(conf), imgsz=int(imgsz), verbose=False)
+                # TODO checkif we need this, project=None prevents the creation of the 'runs' directory
+                results = model.predict(
+                    source=frame,
+                    conf=float(conf),
+                    imgsz=int(imgsz),
+                    verbose=False,
+                    project=None,
+                    save=False
+                )
                 r = results[0]
 
                 frames_processed += 1
-                if frames_processed % 10 == 0 or frames_processed == total_frames_to_process:
+                if frames_processed % config.ml_log_interval_frames == 0 or frames_processed == total_frames_to_process:
                     percent = (frames_processed / total_frames_to_process) * 100
                     logging.info(f"Inference progress for {drop_id}: {frames_processed}/{total_frames_to_process} frames ({percent:.1f}%) at {real_video_seconds:.1f}s")
 
@@ -119,10 +128,8 @@ def main(args=None):
     # If running standalone via CLI, parse args.
     # If called from orchestrator, args will be passed as a dict or object.
 
-    from spyfish.config import config
-
     # Default values from config
-    repo_root = Path(__file__).parent.parent.parent
+    repo_root = config.project_root
 
     if args is None:
         import argparse
@@ -148,8 +155,14 @@ def main(args=None):
         # Called from Orchestrator (ml_runner.py)
         drop_id = args.get('drop_id')
         video_url = args.get('video_url')
-        sampling_start = args.get('sampling_start', 0)
+        sampling_start = args.get('sampling_start')
         sampling_end = args.get('sampling_end')
+
+        if sampling_start is None or sampling_end is None:
+            raise ValueError(f"Missing mandatory sampling metadata for {drop_id}. Both start and end times must be provided.")
+
+        sampling_start = float(sampling_start)
+        sampling_end = float(sampling_end)
         model_path = args.get('model_path')
         vid_stride = int(args.get('frame_skip', config.frame_skip))
         imgsz = int(args.get('imgsz', config.imgsz))

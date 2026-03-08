@@ -69,21 +69,25 @@ class ConfigWrapper:
     def base_dir(self) -> str:
         return self.paths.get("base_dir", "process_files")
 
-    @property
-    def db_dir(self) -> str:
-        """The sub-directory for databases (relative to base_dir)."""
-        return self.sub_dirs.get("db", "db")
-
     def db_rel_path(self, filename: str) -> str:
         """The relative path (key) for a database file, starting from base_dir."""
-        return f"{self.base_dir}/{self.db_dir}/{filename}"
+        db_dir = self.sub_dirs.get("db", "db")
+        return f"{self.base_dir}/{db_dir}/{filename}"
+
+    def get_db_path(self, filename: str) -> Path:
+        """LOCAL path to a SQLite database by name."""
+        path = self.project_root / self.db_rel_path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def get_s3_db_key(self, filename: str) -> str:
+        """S3 key for a database by name."""
+        return self.db_rel_path(filename)
 
     @property
     def db_path(self) -> Path:
-        """LOCAL path to the SQLite state database."""
-        path = self.project_root / self.db_rel_path("spyfish_pipeline.db")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
+        """LOCAL path to the main pipeline database."""
+        return self.get_db_path("spyfish_pipeline.db")
 
     @property
     def csv_mapping(self):
@@ -214,9 +218,9 @@ class ConfigWrapper:
         return f"{self.sharepoint_root}/{self.metadata_files.get('deployment_csv', 'BUV Deployment.csv')}"
 
     @property
-    def test_deployment_metadata_csv(self):
-        # This one is relative to base_dir (process_files/test/...)
-        return self.project_root / self.base_dir / self.metadata_files.get("test_deployment_csv", "test/test_deployment_metadata.csv")
+    def test_deployment_metadata_csv(self) -> Path:
+        """The path to the test deployment metadata CSV."""
+        return self.project_root / self.metadata_files.get("test_deployment_csv", "manual_testing/test_deployment_metadata.csv")
 
     @property
     def s3_sharepoint_survey_csv(self):
@@ -352,6 +356,46 @@ class ConfigWrapper:
         return int(self.zooniverse_extraction.get("clip_length_seconds", 10))
 
     @property
+    def zooniverse_health_check_count(self) -> int:
+        return int(self.zooniverse_extraction.get("health_check_count", 6))
+
+    @property
+    def zooniverse_video_start_threshold(self) -> int:
+        return int(self.zooniverse_extraction.get("video_start_threshold_seconds", 60))
+
+    @property
+    def zooniverse_clip_cap(self) -> int:
+        return int(self.zooniverse_extraction.get("clip_cap", 50))
+
+    @property
+    def zooniverse_force_binary_strategy(self) -> bool:
+        return bool(self.zooniverse_extraction.get("force_binary_strategy", False))
+
+    @property
+    def zooniverse_temporal_spacing(self) -> int:
+        return int(self.zooniverse_extraction.get("temporal_spacing_seconds", 0))
+
+    @property
+    def zooniverse_binary_strategy(self) -> dict:
+        return self.zooniverse_extraction.get("binary_strategy", {
+            "maxn_clips": 10,
+            "confusing_clips": 20,
+            "empty_clips": 5,
+            "start_clips": 2,
+            "temporal_spacing_seconds": 10
+        })
+
+    @property
+    def zooniverse_multiclass_strategy(self) -> dict:
+        return self.zooniverse_extraction.get("multiclass_strategy", {
+            "per_species_maxn_clips": 5,
+            "per_species_confusing_clips": 10,
+            "per_video_empty_clips": 3,
+            "per_video_start_clips": 2,
+            "temporal_spacing_seconds": 10
+        })
+
+    @property
     def ml_inference(self):
         return self._yaml_config.get("ml_inference", {})
 
@@ -411,18 +455,12 @@ class ConfigWrapper:
         if self.pipeline_model_dir.exists():
             pt_files = list(self.pipeline_model_dir.glob("*.pt"))
             if pt_files:
-                # Return the most recent or first one? Usually there should only be one main one.
+                # TODO Return the most recent or first one? Usually there should only be one main one.
                 return pt_files[0]
 
         # Fallback to a default filename
         else:
             raise FileNotFoundError(f"No model file found in {self.pipeline_model_dir}")
-
-
-    @property
-    def model_path(self):
-        """DEPRECATED: Use pipeline_model_path or s3_model_key instead."""
-        return self.pipeline_model_path
 
     @property
     def s3_model_key(self):
@@ -447,6 +485,10 @@ class ConfigWrapper:
     @property
     def frame_skip(self):
         return get_required(self.ml_inference, "frame_skip", "ml_inference")
+
+    @property
+    def ml_log_interval_frames(self) -> int:
+        return int(self.ml_inference.get("log_interval_frames", 10))
 
     @property
     def imgsz(self):
@@ -475,10 +517,6 @@ class ConfigWrapper:
     @property
     def is_test_run(self):
         return bool(self.orchestrator.get("is_test_run", False))
-
-    @property
-    def is_local(self):
-        return bool(self.orchestrator.get("is_local", False))
 
     @property
     def data_quality_dir(self) -> Path:
@@ -526,34 +564,63 @@ class ConfigWrapper:
         return float(self._yaml_config.get("biigle", {}).get("report_download_retry_interval_secs", 2.0))
 
 
+    # TODO not sure we need this,  there is structural validation performed by the DataValidator
+    # (in spyfish/validation/data_validator.py) using the regex patterns defined in config.py
+    # This method is now called by every path-generating helper for security
+    def validate_drop_id(self, drop_id: str) -> str:
+        """
+        Validates that a drop_id matches the expected pattern and contains no path traversal.
+        Raises ValueError if invalid.
+        """
+        import re
+        pattern = self.validation_patterns.get(self.drop_id_column)
+        if not pattern:
+            # Fallback to a safe default if pattern is missing
+            pattern = r"^[A-Z0-9_\-]+$"
+
+        if not re.match(pattern, drop_id):
+            raise ValueError(f"Invalid DropID format: '{drop_id}'. Must match {pattern}")
+
+        # Explicit check for directory traversal characters
+        if ".." in drop_id or "/" in drop_id or "\\" in drop_id:
+            raise ValueError(f"Security Alert: Malicious DropID detected (potential path traversal): '{drop_id}'")
+
+        return drop_id
 
     def get_drop_annotations_dir(self, drop_id: str) -> Path:
         """Helper to consistently get the annotations directory for a drop."""
-        return self.data_quality_dir / drop_id / "annotations"
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.data_quality_dir / val_drop_id / "annotations"
 
     def get_video_path(self, drop_id: str) -> Path:
         """Helper to get the correct video path depending on the environment."""
-        return self.media_dir / f"{drop_id}.mp4"
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.media_dir / f"{val_drop_id}.mp4"
 
     def get_maxn_csv_path(self, drop_id: str, model_name: str) -> Path:
-        return self.get_drop_annotations_dir(drop_id) / f"{drop_id}_{model_name}_maxn.csv"
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.get_drop_annotations_dir(val_drop_id) / f"{val_drop_id}_{model_name}_maxn.csv"
 
     def get_selections_csv_path(self, drop_id: str) -> Path:
-        return self.get_drop_annotations_dir(drop_id) / f"{drop_id}_frames_selection.csv"
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.get_drop_annotations_dir(val_drop_id) / f"{val_drop_id}_frames_selection.csv"
 
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:
-        return self.get_drop_annotations_dir(drop_id) / f"{drop_id}_{model_name}_raw.csv"
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.get_drop_annotations_dir(val_drop_id) / f"{val_drop_id}_{model_name}_raw.csv"
 
     # TODO I do not think we need the target argument here
     def get_clips_dir(self, drop_id: str, target: str = "") -> Path:
         """Get the localized clips directory for a drop."""
+        val_drop_id = self.validate_drop_id(drop_id)
         sub_path = f"{target}_clips" if target else "clips"
-        return self.data_quality_dir / drop_id / sub_path
+        return self.data_quality_dir / val_drop_id / sub_path
 
     def get_frames_dir(self, drop_id: str, target: str = "") -> Path:
         """Get the localized frames directory for a drop."""
+        val_drop_id = self.validate_drop_id(drop_id)
         sub_path = f"{target}_frames" if target else "frames"
-        return self.data_quality_dir / drop_id / sub_path
+        return self.data_quality_dir / val_drop_id / sub_path
 
     @property
     def csv_video_file_link_column(self) -> str:
@@ -580,10 +647,6 @@ class ConfigWrapper:
         return self.csv_mapping.get("clip_max_time_column", "TimeOfMaxnMs")
 
     @property
-    def csv_maxn_time_ms_column(self) -> str:
-        return self.csv_mapping.get("maxn_time_ms_column", "time_of_maxn_ms")
-
-    @property
     def csv_confidence_agreement_column(self) -> str:
         return self.csv_mapping.get("confidence_agreement_column", "ConfidenceAgreement")
 
@@ -600,6 +663,10 @@ class ConfigWrapper:
         return self.csv_mapping.get("maxn_time_column", "TimeOfMax")
 
     @property
+    def csv_maxn_time_ms_column(self) -> str:
+        return self.csv_mapping.get("maxn_time_ms_column", "TimeOfMaxnMs")
+
+    @property
     def csv_max_interval_column(self) -> str:
         return self.csv_mapping.get("max_interval_column", "MaxInterval")
 
@@ -611,21 +678,41 @@ class ConfigWrapper:
     def csv_interval_annotation_column(self) -> str:
         return self.csv_mapping.get("interval_annotation_column", "IntervalAnnotation")
 
+    @property
+    def csv_time_seconds_column(self) -> str:
+        return self.csv_mapping.get("time_seconds_column", "TimeSeconds")
+
     # TODO we shoudn't need the extra db, the path should mimic local, the only difference is that it will have the s3key
     @property
     def s3_db_key(self) -> str:
         """S3 key for the main pipeline database."""
-        return self.db_rel_path("spyfish_pipeline.db")
+        return self.get_s3_db_key("spyfish_pipeline.db")
 
     @property
     def annotations_db_path(self) -> Path:
         """LOCAL path to the annotations database."""
-        return self.project_root / self.db_rel_path("spyfish_annotations.db")
+        return self.get_db_path("spyfish_annotations.db")
 
     @property
     def s3_annotations_db_key(self) -> str:
         """S3 key for the annotations database."""
-        return self.db_rel_path("spyfish_annotations.db")
+        return self.get_s3_db_key("spyfish_annotations.db")
+
+    @property
+    def ffmpeg_config(self) -> dict:
+        return self._yaml_config.get("ffmpeg", {})
+
+    @property
+    def ffmpeg_crf(self) -> str:
+        return str(self.ffmpeg_config.get("crf", "22"))
+
+    @property
+    def ffmpeg_preset(self) -> str:
+        return str(self.ffmpeg_config.get("preset", "fast"))
+
+    @property
+    def ffmpeg_codec(self) -> str:
+        return str(self.ffmpeg_config.get("codec", "libx264"))
 
 config = ConfigWrapper()
 

@@ -26,12 +26,11 @@ from spyfish.config import config, PipelineStatus
 from spyfish.log_config import log_header
 from spyfish.storage.db_sync import sync_pipeline_results
 from spyfish.database.manager import DatabaseManager
-from spyfish.extraction.select_clips import select_maxn_clips_for_review
 from spyfish.extraction.extract_clips import extract_clips_from_selections
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.extraction.extract_frames import extract_frames_from_selections
 from spyfish.biigle.upload_frames import upload_frames_to_biigle
-from spyfish.ml.select_zooniverse_clips import process_zooniverse_clips
+from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
 from spyfish.zooniverse.upload import upload_clips_to_zooniverse, check_clip_sizes
 from spyfish.ml.process_ml_annotations import run_post_ml
 from spyfish.orchestrator.ml_runner import MLRunner
@@ -39,6 +38,16 @@ from spyfish.orchestrator.ingest import run_ingestion, check_pending_arrivals
 from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
 from spyfish.zooniverse.upload import upload_frames_to_zooniverse
 from spyfish.test_setup import inject_test_drops
+from spyfish.storage.db_sync import download_db, download_annotations_db
+
+
+def _sync_from_s3():
+    log_header("CORE: SYNCING DATABASE FROM S3 (PULL)")
+    if not config.is_test_run:
+        download_db()
+        download_annotations_db()
+    else:
+        logging.info("Test run: skipping database pull from S3.")
 
 
 def _run_step1_ingest():
@@ -53,6 +62,7 @@ def _run_arrival_check():
 
 def _run_step2_ml_inference() -> list:
     log_header("STEP 2: ML INFERENCE")
+    runner = MLRunner()
     targets = runner.get_inference_targets()
 
     if not targets:
@@ -158,7 +168,6 @@ def _run_step6_biigle_upload(db: DatabaseManager, include_ml_complete: bool = Fa
 
     for drop_id in drop_ids:
         logging.info(f"Uploading volume for {drop_id} to Biigle...")
-        record = records_by_id.get(drop_id, {})
         paths = _get_common_paths(drop_id)
 
         if not Path(paths["selections_csv"]).exists():
@@ -224,6 +233,10 @@ def main():
     logging.info(f" STEPS: {active_steps} ".center(60, "═"))
     logging.info("═" * 60)
 
+    # --- PULL PHASE ---
+    # The local DB is the ultimate truth. We only sync down at the very start.
+    _sync_from_s3()
+
     results = []
 
     if run_all or args.ingest:
@@ -237,7 +250,7 @@ def main():
         logging.info("Test drops seeded.")
 
     if run_all or args.ml:
-        results = execute_step(_run_step2_ml_inference, args.test_run)
+        results = execute_step(_run_step2_ml_inference)
         if results:
             execute_step(_run_step3_post_ml, results)
 
