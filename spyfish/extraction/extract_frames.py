@@ -170,7 +170,7 @@ def extract_frames_from_selections(
         selections_csv_path: CSV from select_clips.select_zooniverse_clips().
         video_path: Full path to the source video file.
         raw_csv_path: Raw YOLO CSV ({drop_id}_{model}_raw.csv), for COCO annotations.
-        output_dir: Directory to write JPEG frames and coco_annotations.json.
+        output_dir: Directory to write JPEG frames and _coco_annotations_for_biigle.json.
 
     Returns:
         selections_df with 'FramePath' column added.
@@ -248,7 +248,7 @@ def extract_frames_from_selections(
     annotations_dir = out_dir.parent / "annotations"
     annotations_dir.mkdir(parents=True, exist_ok=True)
 
-    coco_path = annotations_dir / f"{drop_id}_coco_annotations.json"
+    coco_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
     with open(coco_path, "w") as f:
         json.dump(coco, f, indent=2)
     logging.info(f"COCO annotations → {coco_path} ({len(coco['images'])} images, {len(coco['annotations'])} annotations)")

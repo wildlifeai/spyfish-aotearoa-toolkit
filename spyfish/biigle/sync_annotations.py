@@ -110,7 +110,7 @@ def sync_biigle_annotations():
             SELECT drop_id, biigle_volume_id
             FROM deployments
             WHERE biigle_volume_id IS NOT NULL
-              AND status != '{PipelineStatus.PIPELINE_COMPLETE}'
+              AND status = '{PipelineStatus.AWAITING_EXPERT_REVIEW}'
         """)
         deployments = cursor.fetchall()
 
