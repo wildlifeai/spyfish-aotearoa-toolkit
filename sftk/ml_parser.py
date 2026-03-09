@@ -30,10 +30,8 @@ class MLParser:
         annotations_df = pd.read_csv(input_file_name)
         logging.info(f"Processing ML annotations from {annotations_df.shape[0]} rows.")
 
-        confident_annotations_df = annotations_df.copy()
-
         # 1. Filter by confidence score
-        confident_annotations_df = confident_annotations_df[confident_annotations_df["conf"] >= confidence_threshold]
+        confident_annotations_df = annotations_df[annotations_df["conf"] >= confidence_threshold].copy()
         logging.info(f"{annotations_df.shape[0] - confident_annotations_df.shape[0]} rows filtered out due to low confidence.")
 
         # 2. Extract video_id and calculate seconds
