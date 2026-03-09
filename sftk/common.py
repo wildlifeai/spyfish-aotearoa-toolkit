@@ -65,6 +65,10 @@ BIIGLE_DISK_ID = int(os.getenv("BIIGLE_DISK_ID", "134"))  # S3 bucket reference
 BIIGLE_ANNOTATION_REPORT_TYPE = 8
 BIIGLE_VOLUME_REPORT_TYPE = 10
 
+# ML Parser configuration
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.5"))
+FRAME_RATE = int(os.getenv("FRAME_RATE", "30"))
+
 
 # S3 configuration.
 # TODO check ways to set variables, if there are issues reading the .env file
@@ -121,6 +125,21 @@ S3_EXTRA_FILES = os.path.join(S3_STATUS_PATH, EXTRA_FILES_FILENAME)
 # TODO create variables for all columns used below
 # TODO check templates that use these column names hardcoded
 DROP_ID_COLUMN = "DropID"
+SCIENTIFIC_NAME_COLUMN = "ScientificName"
+TIME_OF_MAX_COLUMN = "TimeOfMax"
+MAX_INTERVAL_COLUMN = "MaxInterval"
+ANNOTATED_BY_COLUMN = "AnnotatedBy"
+INTERVAL_ANNOTATION_COLUMN = "IntervalAnnotation"
+CONFIDENCE_AGREEMENT_COLUMN = "ConfidenceAgreement"
+ANNOTATION_EXPORT_COLUMNS = [
+    DROP_ID_COLUMN,
+    SCIENTIFIC_NAME_COLUMN,
+    TIME_OF_MAX_COLUMN,
+    MAX_INTERVAL_COLUMN,
+    ANNOTATED_BY_COLUMN,
+    INTERVAL_ANNOTATION_COLUMN,
+    CONFIDENCE_AGREEMENT_COLUMN,
+]
 SURVEY_ID_COLUMN = "SurveyID"
 SITE_ID_COLUMN = "SiteID"
 REPLICATE_COLUMN = "ReplicateWithinSite"
