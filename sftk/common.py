@@ -65,6 +65,10 @@ BIIGLE_DISK_ID = int(os.getenv("BIIGLE_DISK_ID", "134"))  # S3 bucket reference
 BIIGLE_ANNOTATION_REPORT_TYPE = 8
 BIIGLE_VOLUME_REPORT_TYPE = 10
 
+# ML Parser configuration
+CONFIDENCE_THRESHOLD = 0.5
+FRAME_RATE = 30
+
 
 # S3 configuration.
 # TODO check ways to set variables, if there are issues reading the .env file
