@@ -44,13 +44,9 @@ from spyfish.test_setup import inject_test_drops
 from spyfish.storage.db_sync import download_db, download_annotations_db
 
 
-def _sync_from_s3():
-    log_header("CORE: SYNCING DATABASE FROM S3 (PULL)")
-    if not config.is_test_run:
-        download_db()
-        download_annotations_db()
-    else:
-        logging.info("Test run: skipping database pull from S3.")
+def _run_step0_test_run():
+    log_header("STEP 0: TEST RUN, THIS IS IT")
+    logging.info(f"bucket name: {config.s3_bucket}")
 
 
 def _run_step1_ingest():
@@ -210,6 +206,7 @@ def execute_step(step_func, *args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Spyfish pipeline. Runs all steps by default.")
+    parser.add_argument("--step0", action="store_true", help="Run Step 0: test run")
     parser.add_argument("--ingest",        action="store_true", help="Run Step 1: metadata ingestion")
     parser.add_argument("--check-arrivals", action="store_true", help="Check S3 for video arrivals (advances PENDING_ARRIVAL)")
     parser.add_argument("--ml",            action="store_true", help="Run Steps 2+3: ML inference + post-processing")
@@ -224,22 +221,23 @@ def main():
     parser.add_argument("--test-run",      action="store_true", help="Run in test mode with mock data")
     args = parser.parse_args()
 
-    db = DatabaseManager()
+
 
     # If no step flags are given, run everything
     run_all = not any([
-        args.ingest, args.check_arrivals, args.ml,
+        args.step0, args.ingest, args.check_arrivals, args.ml,
         args.zooniverse_clips, args.zooniverse_images,
         args.biigle_upload, args.biigle_sync,
         args.retrain, args.staged_test
     ])
 
     active_steps = ", ".join(
-        s for s, v in [("ingest", run_all or args.ingest), ("ml", run_all or args.ml),
+        s for s, v in [("step0", args.step0), ("ingest", run_all or args.ingest), ("ml", run_all or args.ml),
                        ("zooniverse-clips", run_all or args.zooniverse_clips), ("zooniverse-images", run_all or args.zooniverse_images),
                        ("biigle-upload", run_all or args.biigle_upload), ("biigle-sync", run_all or args.biigle_sync),
                        ("retrain", run_all or args.retrain), ("staged-test", args.staged_test)] if v
     )
+    logging.info(f"active steps: {active_steps}")
 
     logging.info("═" * 60)
     logging.info(" SPYFISH AOTEAROA PIPELINE ".center(60, "═"))
@@ -247,11 +245,13 @@ def main():
     logging.info(f" NO-UPLOAD: {args.no_upload} ".center(60, "═"))
     logging.info("═" * 60)
 
-    # --- PULL PHASE ---
-    # The local DB is the ultimate truth. We only sync down at the very start.
-    _sync_from_s3()
 
     results = []
+
+    if args.step0:
+        execute_step(_run_step0_test_run)
+        logging.info("Step 0 completed.")
+        return
 
     if run_all or args.ingest:
         execute_step(_run_step1_ingest)
@@ -259,7 +259,8 @@ def main():
     if args.check_arrivals:
         execute_step(_run_arrival_check)
 
-    if config.is_test_run:
+    db = DatabaseManager()
+    if args.staged_test:
         inject_test_drops(db=db, use_pipeline_status=args.staged_test)
         logging.info("Test drops seeded.")
 

@@ -170,6 +170,7 @@ def sync_annotations(upload_videos: bool = False) -> bool:
     if upload_videos:
         filters += ["--include", "*.mp4"]
 
+    # This sync is additive only (no --delete flag is passed to aws s3 sync inside sync_local_to_s3)
     return s3.sync_local_to_s3(str(local_dq_dir), s3_prefix, filters=filters)
 
 def sync_pipeline_results(upload_videos: bool = False) -> bool:

@@ -467,7 +467,9 @@ class S3Handler:
         logging.info(f"Syncing {local_dir} -> {s3_uri}...")
 
         try:
-            # We use subprocess to leverage the highly optimized 'aws s3 sync' command
+            # We use subprocess to leverage the highly optimized 'aws s3 sync' command.
+            # NOTE: We intentionally do NOT use the '--delete' flag. This ensures
+            # that files deleted locally persist in S3 for backup/recovery.
             cmd = ["aws", "s3", "sync", local_dir, s3_uri, "--no-progress"]
             if filters:
                 cmd.extend(filters)
