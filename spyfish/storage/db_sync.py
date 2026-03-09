@@ -158,10 +158,19 @@ def sync_annotations(upload_videos: bool = False) -> bool:
         filters += ["--include", f"{pattern}.jpeg"]
         filters += ["--include", f"{pattern}.png"]
 
+    # Include training results (models, metrics, curves)
+    training_prefix = "training"
+    filters += ["--include", f"{training_prefix}/**"]
+
+    # Include promoted models
+    models_prefix = "models"
+    filters += ["--include", f"{models_prefix}/**"]
+
     # Optionally include videos
     if upload_videos:
         filters += ["--include", "*.mp4"]
 
+    # This sync is additive only (no --delete flag is passed to aws s3 sync inside sync_local_to_s3)
     return s3.sync_local_to_s3(str(local_dq_dir), s3_prefix, filters=filters)
 
 def sync_pipeline_results(upload_videos: bool = False) -> bool:

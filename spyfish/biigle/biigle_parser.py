@@ -144,11 +144,33 @@ class BiigleParser:
         max_n_df = self.process_max_count(max_n_30s_df)
         sizes_df = self.process_sizes(annotations_df)
 
-        # Save maxn CSV to cache
+        # 1. Save maxn CSV to cache
         maxn_csv_path = self.cache_dir / f"{volume_id}_{resource}_maxn.csv"
         max_n_df.to_csv(maxn_csv_path, index=False)
         logging.info(f"Saved MaxN data → {maxn_csv_path}")
 
+        # 2. Side-car export to drop-specific annotations folder
+        # We find uniquely active drops in this report
+        unique_drops = annotations_df[config.drop_id_column].unique()
+        for d_id in unique_drops:
+            drop_ann_dir = config.get_drop_dir(d_id) / config.sub_dirs.get("annotations", "annotations")
+            drop_ann_dir.mkdir(parents=True, exist_ok=True)
+
+            # Filter for this drop
+            d_raw = raw_annotations_df[raw_annotations_df[config.drop_id_column] == d_id]
+            d_maxn = max_n_df[max_n_df[config.drop_id_column] == d_id]
+
+            if not d_raw.empty:
+                raw_path = drop_ann_dir / f"{d_id}_biigle_expert_raw.csv"
+                d_raw.to_csv(raw_path, index=False)
+                logging.info(f"Exported expert raw annotations → {raw_path}")
+
+            if not d_maxn.empty:
+                maxn_path = drop_ann_dir / f"{d_id}_biigle_expert_maxn.csv"
+                # Standardize to mirror DB export
+                d_maxn_formatted = self.format_count_annotations_output(d_maxn)
+                d_maxn_formatted.to_csv(maxn_path, index=False)
+                logging.info(f"Exported expert MaxN annotations → {maxn_path}")
 
         return {
             "raw_annotations_df": raw_annotations_df,

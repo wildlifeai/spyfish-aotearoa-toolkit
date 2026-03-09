@@ -11,6 +11,7 @@ from spyfish.config import config, PipelineStatus, get_required
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.database.manager import DatabaseManager
 from spyfish.ml.run_inference import main as run_inference_main
+from spyfish.utils import validate_model_path
 
 class MLRunner:
     def __init__(self):
@@ -29,7 +30,7 @@ class MLRunner:
         self.imgsz = int(config.imgsz)
         self.confidence = get_required(config.ml_inference, "confidence_threshold", "ml_inference")
         # Use the standardized pipeline model path
-        self.model = str(config.pipeline_model_path)
+        self.model = str(validate_model_path(config.pipeline_model_path))
 
 
     def get_inference_targets(self) -> List[dict]:
@@ -124,22 +125,11 @@ class MLRunner:
 
         logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
 
-        # Automatically download the YOLO weights from S3 if they don't exist locally
+        # Model must exist locally
         if not os.path.exists(self.model):
-            model_s3_key = config.model_s3_key
-            if model_s3_key:
-                s3_uri = f"s3://{self.bucket}/{model_s3_key}"
-                logging.debug(f"Model weights not found at {self.model}. Downloading from {s3_uri} via aws s3 cp...")
-                os.makedirs(os.path.dirname(self.model), exist_ok=True)
-                try:
-                    subprocess.run(
-                        ["aws", "s3", "cp", s3_uri, self.model, "--no-progress"],
-                        check=True
-                    )
-                except subprocess.CalledProcessError as e:
-                    logging.error(f"Failed to download model weights {s3_uri}: {e}")
-            else:
-                logging.warning(f"Model missing locally and 'model_s3_key' not configured in yaml. Inference will likely fail.")
+            logging.error(f"Model weights not found at {self.model}. Automatic download from S3 is disabled for security.")
+            logging.info("Please manually place the production model at the expected path.")
+            raise FileNotFoundError(f"Model missing: {self.model}")
 
 
         success_targets = []

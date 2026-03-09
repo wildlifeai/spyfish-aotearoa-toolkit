@@ -137,7 +137,7 @@ def upload_coco_annotations_to_biigle(
 
     Args:
         volume_id: Biigle volume ID.
-        coco_json_path: Path to the drop's `_coco_annotations.json` file.
+        coco_json_path: Path to the drop's `_coco_annotations_for_biigle.json` file.
         label_id: The Biigle label ID to apply to all annotations. Defaults to config value.
 
     Returns:
@@ -265,7 +265,7 @@ def upload_frames_to_biigle(
     # Step 4: Upload COCO bounding box annotations to the new volume
     # The JSON lives in the drop's annotation folder
     annotations_dir = config.get_drop_annotations_dir(drop_id)
-    coco_json_path = annotations_dir / f"{drop_id}_coco_annotations.json"
+    coco_json_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
 
     if volume_id and coco_json_path.exists():
         upload_coco_annotations_to_biigle(volume_id, str(coco_json_path))

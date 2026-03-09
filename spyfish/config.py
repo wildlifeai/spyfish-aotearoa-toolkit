@@ -2,6 +2,7 @@ import os
 import yaml
 import logging
 from pathlib import Path
+import re
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -38,7 +39,7 @@ def load_env_wrapper() -> None:
     # Check if the file exists before trying to load it
     if env_path:
         logging.info(f"Loading .env file from: {env_path}")
-        load_dotenv(dotenv_path=env_path, override=True)
+        load_dotenv(dotenv_path=env_path, override=False)
     else:
         logging.warning(
             f".env file not found at '{env_path}'. Environment variables might not be loaded."
@@ -59,6 +60,12 @@ class ConfigWrapper:
         self._yaml_config = load_config()
         # Absolute path to the project root (where config.yaml lives)
         self._project_root = Path(__file__).parent.parent.resolve()
+
+    def get_section(self, section_name: str, default: dict = None) -> dict:
+        """Access a configuration section by name."""
+        if default is None:
+            default = {}
+        return self._yaml_config.get(section_name, default)
 
     @property
     def project_root(self) -> Path:
@@ -513,6 +520,11 @@ class ConfigWrapper:
         return bool(self.orchestrator.get("is_test_run", False))
 
     @property
+    def log_output(self) -> str:
+        """Determines where logs should go: 'console' or 'file'."""
+        return self.orchestrator.get("log_output", "console").lower()
+
+    @property
     def data_quality_dir(self) -> Path:
         return self.project_root / self.base_dir / self.sub_dirs.get("data_quality", "data_quality")
 
@@ -566,7 +578,6 @@ class ConfigWrapper:
         Validates that a drop_id matches the expected pattern and contains no path traversal.
         Raises ValueError if invalid.
         """
-        import re
         pattern = self.validation_patterns.get(self.drop_id_column)
         if not pattern:
             # Fallback to a safe default if pattern is missing
@@ -580,6 +591,15 @@ class ConfigWrapper:
             raise ValueError(f"Security Alert: Malicious DropID detected (potential path traversal): '{drop_id}'")
 
         return drop_id
+
+    def get_drop_dir(self, drop_id: str) -> Path:
+        """Get the localized root directory for a drop."""
+        val_drop_id = self.validate_drop_id(drop_id)
+        return self.data_quality_dir / val_drop_id
+
+    def get_biigle_cache_dir(self, drop_id: str) -> Path:
+        """Get the localized Biigle cache directory for a drop."""
+        return self.get_drop_dir(drop_id) / self.sub_dirs.get("biigle_cache", "biigle_cache")
 
     def get_drop_annotations_dir(self, drop_id: str) -> Path:
         """Helper to consistently get the annotations directory for a drop."""
