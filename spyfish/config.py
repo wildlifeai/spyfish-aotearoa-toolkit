@@ -60,6 +60,12 @@ class ConfigWrapper:
         # Absolute path to the project root (where config.yaml lives)
         self._project_root = Path(__file__).parent.parent.resolve()
 
+    def get_section(self, section_name: str, default: dict = None) -> dict:
+        """Access a configuration section by name."""
+        if default is None:
+            default = {}
+        return self._yaml_config.get(section_name, default)
+
     @property
     def project_root(self) -> Path:
         """Absolute path to the project root directory."""

@@ -14,7 +14,7 @@ Reads metrics CSVs and confusion matrix images from S3 under
 import io
 import json
 import logging
-import subprocess
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +22,8 @@ import pandas as pd
 import streamlit as st
 
 from spyfish.config import config
-from utils import check_password
+from spyfish.storage.s3_handler import S3Handler
+from utils import check_password, render_sidebar_refresh
 
 
 # ---------------------------------------------------------------------------
@@ -33,15 +34,17 @@ from utils import check_password
 def list_result_dirs_from_s3(bucket: str, results_prefix: str) -> list[str]:
     """List available result directories in S3."""
     try:
-        result = subprocess.run(
-            ["aws", "s3", "ls", f"s3://{bucket}/{results_prefix.rstrip('/')}/"],
-            capture_output=True, text=True, timeout=15,
-        )
+        s3 = S3Handler(bucket=bucket)
+        # We look for common prefixes (directories) under results_prefix
+        paginator = s3.s3.get_paginator("list_objects_v2")
+        result = paginator.paginate(Bucket=bucket, Prefix=results_prefix.rstrip('/') + '/', Delimiter='/')
+
         dirs = []
-        for line in result.stdout.splitlines():
-            parts = line.strip().split()
-            if parts and parts[-1].endswith("/"):
-                dirs.append(parts[-1].rstrip("/"))
+        for page in result:
+            for prefix in page.get('CommonPrefixes', []):
+                # prefix['Prefix'] is e.g. 'process_files/training/results/20260301_100000/'
+                dir_name = Path(prefix['Prefix']).name
+                dirs.append(dir_name)
         return sorted(dirs, reverse=True)  # newest first
     except Exception as e:
         logging.warning(f"Could not list S3 result dirs: {e}")
@@ -52,13 +55,8 @@ def list_result_dirs_from_s3(bucket: str, results_prefix: str) -> list[str]:
 def load_metrics_csv_from_s3(bucket: str, s3_key: str) -> Optional[pd.DataFrame]:
     """Download and parse a metrics CSV from S3."""
     try:
-        result = subprocess.run(
-            ["aws", "s3", "cp", f"s3://{bucket}/{s3_key}", "-"],
-            capture_output=True, timeout=20,
-        )
-        if result.returncode != 0:
-            return None
-        return pd.read_csv(io.BytesIO(result.stdout))
+        s3 = S3Handler(bucket=bucket)
+        return s3.read_df_from_s3_csv(s3_key)
     except Exception as e:
         logging.warning(f"Could not load metrics CSV {s3_key}: {e}")
         return None
@@ -74,13 +72,9 @@ def load_yolo_results_csv_from_s3(bucket: str, s3_key: str) -> Optional[pd.DataF
 def load_image_from_s3(bucket: str, s3_key: str) -> Optional[bytes]:
     """Download an image from S3 and return raw bytes."""
     try:
-        result = subprocess.run(
-            ["aws", "s3", "cp", f"s3://{bucket}/{s3_key}", "-"],
-            capture_output=True, timeout=20,
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout
+        s3 = S3Handler(bucket=bucket)
+        response = s3.s3.get_object(Bucket=bucket, Key=s3_key)
+        return response["Body"].read()
     except Exception as e:
         logging.warning(f"Could not load image {s3_key}: {e}")
         return None
@@ -147,33 +141,33 @@ def render_training_curves(results_df: pd.DataFrame) -> None:
 
 def render_promote_button(
     model_path: str,
-    bucket: str,
-    s3_prefix: str,
     model_type: str,
 ) -> None:
-    """Render a promote button that copies the selected model to the production S3 path."""
+    """Render a promote button that copies the selected model to the local production path."""
     st.divider()
     st.subheader("🚀 Promote Model")
+
+    prod_model_path = config.pipeline_model_path
     st.caption(
-        f"Copy this model to `{s3_prefix.rstrip('/')}/{model_type}_current.pt` — "
-        f"the pipeline will use it on next run."
+        f"Promoting this model will replace the current production model at: `{prod_model_path}`. "
+        "The backup to S3 will occur during the next pipeline sync."
     )
 
     confirm = st.checkbox("I have reviewed the metrics and want to promote this model", key="confirm_promote")
     if st.button("✅ Promote to Production", disabled=not confirm, type="primary"):
-        target_key = s3_prefix.rstrip("/") + f"/{model_type}_current.pt"
-        src_uri = f"s3://{bucket}/{model_path.lstrip('/')}"
-        dst_uri = f"s3://{bucket}/{target_key}"
-        with st.spinner(f"Promoting {model_path} → {target_key} ..."):
-            result = subprocess.run(
-                ["aws", "s3", "cp", src_uri, dst_uri, "--only-show-errors"],
-                capture_output=True, text=True, timeout=60,
-            )
-        if result.returncode == 0:
-            st.success(f"✅ Model promoted to production: `{dst_uri}`")
-            st.cache_data.clear()
-        else:
-            st.error(f"Promotion failed: {result.stderr}")
+        with st.spinner(f"Promoting {model_path} ..."):
+            try:
+                # Ensure destination directory exists
+                prod_model_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Local copy
+                shutil.copy2(model_path, prod_model_path)
+
+                st.success(f"✅ Model promoted locally to: `{prod_model_path}`")
+                st.info("The new model will be backed up to S3 during the final sync stage of the next pipeline run.")
+                st.cache_data.clear()
+            except Exception as e:
+                st.error(f"Promotion failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +184,8 @@ def main():
     st.title("📊 Model Metrics")
     st.caption("Review and compare trained ML model performance before promoting to production.")
 
-    training_cfg = config._yaml_config.get("training", {})
-    storage_cfg = config._yaml_config.get("storage", {})
+    training_cfg = config.get_section("training")
+    storage_cfg = config.get_section("storage")
     bucket = storage_cfg.get("bucket_name", config.s3_bucket)
     results_prefix = "process_files/training/results"
     output_s3_prefix = training_cfg.get("output_model_s3_prefix", "process_files/models/pipeline_model/")
@@ -250,8 +244,11 @@ def main():
             render_metrics_table(metrics_df)
 
             # Delta callout: new vs production
-            new_row = metrics_df[metrics_df.get("role", pd.Series()) == "new"]
-            prod_row = metrics_df[metrics_df.get("role", pd.Series()) == "production"]
+            new_row, prod_row = pd.DataFrame(), pd.DataFrame()
+            if "role" in metrics_df.columns:
+                new_row = metrics_df[metrics_df["role"] == "new"]
+                prod_row = metrics_df[metrics_df["role"] == "production"]
+
             if not new_row.empty and not prod_row.empty:
                 delta = float(new_row["mAP50"].iloc[0]) - float(prod_row["mAP50"].iloc[0])
                 col1, col2, col3 = st.columns(3)
@@ -270,11 +267,11 @@ def main():
             st.info("No metrics CSV found for this run.")
 
         # Promote button (only if we have a new model path)
-        if metrics_df is not None and "model_path" in metrics_df.columns:
-            new_rows = metrics_df[metrics_df.get("role", pd.Series(dtype=str)) == "new"]
+        if metrics_df is not None and "model_path" in metrics_df.columns and "role" in metrics_df.columns:
+            new_rows = metrics_df[metrics_df["role"] == "new"]
             if not new_rows.empty:
                 new_model_path = str(new_rows["model_path"].iloc[0])
-                render_promote_button(new_model_path, bucket, output_s3_prefix, model_type)
+                render_promote_button(new_model_path, model_type)
 
     with tab_curves:
         st.header("Training Curves")

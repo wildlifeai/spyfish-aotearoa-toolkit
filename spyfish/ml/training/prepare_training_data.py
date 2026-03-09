@@ -33,8 +33,6 @@ import pandas as pd
 import yaml
 
 from spyfish.config import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
-
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -214,7 +212,7 @@ def prepare_from_annotations(
     Returns:
         (balanced_df, species_class_names)
     """
-    training_cfg = config._yaml_config.get("training", {})
+    training_cfg = config.get_section("training")
     ceiling_pct = ceiling_pct or training_cfg.get("class_ceiling_pct", 0.40)
     floor_pct = floor_pct or training_cfg.get("class_floor_pct", 0.02)
     ceiling_max_iterations = ceiling_max_iterations or training_cfg.get("ceiling_max_iterations", 3)

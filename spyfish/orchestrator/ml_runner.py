@@ -124,22 +124,11 @@ class MLRunner:
 
         logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
 
-        # Automatically download the YOLO weights from S3 if they don't exist locally
+        # Model must exist locally
         if not os.path.exists(self.model):
-            model_s3_key = config.model_s3_key
-            if model_s3_key:
-                s3_uri = f"s3://{self.bucket}/{model_s3_key}"
-                logging.debug(f"Model weights not found at {self.model}. Downloading from {s3_uri} via aws s3 cp...")
-                os.makedirs(os.path.dirname(self.model), exist_ok=True)
-                try:
-                    subprocess.run(
-                        ["aws", "s3", "cp", s3_uri, self.model, "--no-progress"],
-                        check=True
-                    )
-                except subprocess.CalledProcessError as e:
-                    logging.error(f"Failed to download model weights {s3_uri}: {e}")
-            else:
-                logging.warning(f"Model missing locally and 'model_s3_key' not configured in yaml. Inference will likely fail.")
+            logging.error(f"Model weights not found at {self.model}. Automatic download from S3 is disabled for security.")
+            logging.info("Please manually place the production model at the expected path.")
+            raise FileNotFoundError(f"Model missing: {self.model}")
 
 
         success_targets = []
