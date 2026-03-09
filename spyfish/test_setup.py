@@ -39,7 +39,6 @@ def inject_test_drops(
         video_path = str(row['video_path'])
         sampling_start = int(row['sampling_start'])
         sampling_end = int(row['sampling_end'])
-        sampling_end = int(row['sampling_end'])
         if use_pipeline_status:
             status = str(row['status']).strip()
         else:

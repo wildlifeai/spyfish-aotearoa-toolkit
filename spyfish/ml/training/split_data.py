@@ -161,7 +161,7 @@ def print_species_breakdown(
 
     logging.info("\n=== Per-species split breakdown ===")
     logging.info(pivot.to_string())
-    val_min_images = config._yaml_config.get("training", {}).get("val_min_images", 20)
+    val_min_images = config.get_section("training").get("val_min_images", 20)
     logging.info(
         f"\n  ⚠ Minimum val images recommended: {val_min_images}. "
         "If any species val count is too low, extract more frames from those deployments."
@@ -191,7 +191,7 @@ def split_data(
     Returns:
         (train_drops, val_drops, test_drops)
     """
-    training_cfg = config._yaml_config.get("training", {})
+    training_cfg = config.get_section("training")
     train_pct = training_cfg.get("train_pct", 0.80)
     val_pct = training_cfg.get("val_pct", 0.10)
 

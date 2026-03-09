@@ -66,42 +66,6 @@ def _clear_yolo_cache(training_dir: Path) -> None:
             pass
 
 
-def _download_base_model(model_path: str, bucket: str, s3_key: str) -> None:
-    """Download base model weights from S3 if not cached locally."""
-    if Path(model_path).exists():
-        logging.info(f"Base model already cached at {model_path}")
-        return
-
-    s3_uri = f"s3://{bucket}/{s3_key}"
-    logging.info(f"Downloading base model from {s3_uri} → {model_path}")
-    Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["aws", "s3", "cp", s3_uri, model_path, "--only-show-errors"],
-        check=True,
-    )
-    logging.info("Base model downloaded successfully.")
-
-
-def _upload_model_to_s3(
-    local_model_path: Path,
-    bucket: str,
-    s3_prefix: str,
-    timestamp: str,
-    model_type: str,
-) -> str:
-    """Upload a trained .pt file to S3 and return the S3 key."""
-    filename = f"{timestamp}_{model_type}.pt"
-    s3_key = s3_prefix.rstrip("/") + "/" + filename
-    s3_uri = f"s3://{bucket}/{s3_key}"
-    logging.info(f"Uploading trained model → {s3_uri}")
-    subprocess.run(
-        ["aws", "s3", "cp", str(local_model_path), s3_uri, "--only-show-errors"],
-        check=True,
-    )
-    logging.info(f"Model uploaded: {s3_uri}")
-    return s3_key
-
-
 def train_model(
     data_yaml: str,
     base_model_path: str,
@@ -170,31 +134,25 @@ def run_training_pipeline(
     species_data_yaml: Optional[str] = None,
     train_binary: bool = True,
     train_species: bool = True,
-    upload_to_s3: bool = False,
 ) -> dict:
     """
-    Full training pipeline: download base model → train → upload to S3.
-
-    Returns:
-        Dict with {"binary": s3_key, "species": s3_key} for models that were trained.
+    Full training pipeline: train on local base model.
     """
-    training_cfg = config._yaml_config.get("training", {})
-    storage_cfg = config._yaml_config.get("storage", {})
+    training_cfg = config.get_section("training")
 
-    base_model_s3_key = training_cfg.get("base_model_s3_key", "process_files/models/base_model/cfd-yolov12x-1.00.pt")
-    output_s3_prefix = training_cfg.get("output_model_s3_prefix", "process_files/models/pipeline_model/")
     local_training_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
     epochs = training_cfg.get("epochs", 100)
     patience = training_cfg.get("patience", 25)
     imgsz = training_cfg.get("imgsz", 640)
-    bucket = storage_cfg.get("bucket_name", config.s3_bucket)
 
     base_model_path = str(local_training_dir / "base_model" / "base_model.pt")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results = {}
 
-    # Download base model
-    _download_base_model(base_model_path, bucket, base_model_s3_key)
+    # Base model must exist locally
+    if not Path(base_model_path).exists():
+        logging.error(f"Base model weights not found at {base_model_path}. Automatic download is disabled.")
+        raise FileNotFoundError(f"Base model missing: {base_model_path}")
 
     # Binary model
     if train_binary and binary_data_yaml:
@@ -208,12 +166,7 @@ def run_training_pipeline(
             patience=patience,
             imgsz=imgsz,
         )
-
-        # TODO check whats up
         results["binary"] = {"local": str(best_pt)}
-        if upload_to_s3:
-            s3_key = _upload_model_to_s3(best_pt, bucket, output_s3_prefix, timestamp, "binary")
-            results["binary"]["s3"] = s3_key
 
     # Species model
     if train_species and species_data_yaml:
@@ -228,9 +181,6 @@ def run_training_pipeline(
             imgsz=imgsz,
         )
         results["species"] = {"local": str(best_pt)}
-        if upload_to_s3:
-            s3_key = _upload_model_to_s3(best_pt, bucket, output_s3_prefix, timestamp, "species")
-            results["species"]["s3"] = s3_key
 
     logging.info(f"\nTraining pipeline complete: {results}")
     return results
@@ -250,12 +200,12 @@ def main():
     train_species = not args.binary_only
 
     if not args.binary_data and train_binary:
-        training_cfg = config._yaml_config.get("training", {})
+        training_cfg = config.get_section("training")
         local_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
         args.binary_data = str(local_dir / "binary" / "data.yaml")
 
     if not args.species_data and train_species:
-        training_cfg = config._yaml_config.get("training", {})
+        training_cfg = config.get_section("training")
         local_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
         args.species_data = str(local_dir / "species" / "data.yaml")
 
@@ -264,7 +214,6 @@ def main():
         species_data_yaml=args.species_data,
         train_binary=train_binary,
         train_species=train_species,
-        upload_to_s3=not args.no_upload,
     )
 
 

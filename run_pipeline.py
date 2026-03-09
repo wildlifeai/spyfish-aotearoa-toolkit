@@ -116,7 +116,7 @@ def _run_step4_zooniverse_clips(db: DatabaseManager):
 
         selections_df = process_zooniverse_clips(paths["maxn_csv"], paths["selections_csv"], drop_id, config)
         if selections_df is None or selections_df.empty:
-            logging.info(f"No high-confidence clips found for {drop_id}. Advancing to ML_COMPLETE.")
+            logging.info(f"No high-confidence clips found for {drop_id}. Advancing to CITSCI_CLIPS_COMPLETE.")
             db.update_status(drop_id, PipelineStatus.CITSCI_CLIPS_COMPLETE)
             continue
 

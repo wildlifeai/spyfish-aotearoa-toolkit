@@ -106,7 +106,7 @@ def compare_with_production(
         (production_metrics, should_promote) where should_promote is True if
         new mAP50 > production mAP50 + min_improvement_pct.
     """
-    training_cfg = config._yaml_config.get("training", {})
+    training_cfg = config.get_section("training")
     min_improvement = training_cfg.get("retrain_min_improvement_pct", 2.0) / 100.0
 
     if not Path(production_model_path).exists():
@@ -171,13 +171,10 @@ def run_evaluation_pipeline(
     Returns:
         Dict with evaluation results and promotion decision.
     """
-    training_cfg = config._yaml_config.get("training", {})
-    storage_cfg = config._yaml_config.get("storage", {})
-    ml_cfg = config._yaml_config.get("ml_inference", {})
+    training_cfg = config.get_section("training")
+    ml_cfg = config.get_section("ml_inference")
 
     imgsz = training_cfg.get("imgsz", 640)
-    bucket = storage_cfg.get("bucket_name", config.s3_bucket)
-    results_s3_prefix = "process_files/training/results/"
     local_training_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
