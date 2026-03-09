@@ -23,6 +23,7 @@ import streamlit as st
 
 from spyfish.config import config
 from spyfish.storage.s3_handler import S3Handler
+from spyfish.utils import validate_model_path
 from utils import check_password, render_sidebar_refresh
 
 
@@ -117,7 +118,6 @@ def render_metrics_table(metrics_df: pd.DataFrame) -> None:
 
 def render_training_curves(results_df: pd.DataFrame) -> None:
     """Plot training loss and mAP over epochs using Streamlit's native chart."""
-    import re
 
     results_df.columns = [c.strip() for c in results_df.columns]
     epoch_col = next((c for c in results_df.columns if "epoch" in c.lower()), None)
@@ -160,6 +160,9 @@ def render_promote_button(
                 # Ensure destination directory exists
                 prod_model_path.parent.mkdir(parents=True, exist_ok=True)
 
+                # Validate source path
+                model_path = str(validate_model_path(model_path))
+
                 # Local copy
                 shutil.copy2(model_path, prod_model_path)
 
@@ -185,10 +188,10 @@ def main():
     st.caption("Review and compare trained ML model performance before promoting to production.")
 
     training_cfg = config.get_section("training")
-    storage_cfg = config.get_section("storage")
-    bucket = storage_cfg.get("bucket_name", config.s3_bucket)
+    paths_cfg = config.get_section("paths")
+    bucket = paths_cfg.get("bucket_name")
+    # TODO hardcoded paths
     results_prefix = "process_files/training/results"
-    output_s3_prefix = training_cfg.get("output_model_s3_prefix", "process_files/models/pipeline_model/")
     local_training_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
 
     # --- Sidebar: select result run ---

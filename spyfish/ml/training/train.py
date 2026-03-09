@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from spyfish.config import config
+from spyfish.utils import validate_model_path
 
 
 # Water/underwater augmentation params (validated in yolov12_comparison experiments)
@@ -118,6 +119,7 @@ def train_model(
     if extra_params:
         params.update(extra_params)
 
+    base_model_path = str(validate_model_path(base_model_path))
     model = YOLO(base_model_path)
     model.train(**params)
 

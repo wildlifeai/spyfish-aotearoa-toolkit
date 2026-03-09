@@ -23,6 +23,7 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from spyfish.config import config
+from spyfish.utils import validate_model_path
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ def evaluate_model(
         raise ImportError("ultralytics is not installed. Run: pip install ultralytics")
 
     logging.info(f"Evaluating model: {model_path}")
+    model_path = str(validate_model_path(model_path))
     logging.info(f"  data={data_yaml}  split={split}  imgsz={imgsz}")
 
     model = YOLO(model_path)
