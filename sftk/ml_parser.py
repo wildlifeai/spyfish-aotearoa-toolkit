@@ -25,8 +25,26 @@ class MLParser:
             frame_rate: The frame rate of the video to calculate seconds from frame number.
             window_seconds: Time in seconds of window over which max count has to be checked
         """
-        input_file_name = Path(extract_dir) / ml_annotations_filename
-        output_file_name = Path(extract_dir) / (ml_annotations_filename.split(".")[0] + "_parsed.csv")
+        base_dir = Path(extract_dir).resolve(strict=True)
+        if not base_dir.is_dir():
+            raise ValueError("extract_dir must be an existing directory")
+
+        name_path = Path(ml_annotations_filename)
+
+        # reject absolute paths and traversal/path injection
+        if name_path.is_absolute() or name_path.name != ml_annotations_filename:
+            raise ValueError("ml_annotations_filename must be a plain filename, not a path")
+
+        if name_path.suffix.lower() != ".csv":
+            raise ValueError("ml_annotations_filename must be a .csv file")
+
+        input_file_name = (base_dir / name_path.name).resolve()
+        if input_file_name.parent != base_dir:
+            raise ValueError("Invalid filename path")
+
+        output_file_name = (base_dir / f"{input_file_name.stem}_parsed.csv").resolve()
+        if output_file_name.parent != base_dir:
+            raise ValueError("Invalid output path")
         annotations_df = pd.read_csv(input_file_name)
         logging.info(f"Processing ML annotations from {annotations_df.shape[0]} rows.")
 
@@ -106,5 +124,5 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     try:
         MLParser.process_annotations(ml_annotations_filename="ML_Annotations_Examples.csv")
-    except FileNotFoundError:
-        logging.error("Please provide the correct path to your ML annotations file.")
+    except (FileNotFoundError, ValueError) as e:
+        logging.error(f"Invalid input or missing file: {e}")
