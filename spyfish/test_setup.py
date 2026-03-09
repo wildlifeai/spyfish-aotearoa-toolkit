@@ -4,7 +4,6 @@ from typing import Set
 
 
 # Hardcoded metadata for local test execution
-# the last number is the biigle_volume_id
 
 def inject_test_drops(
     deployments_df: pd.DataFrame = None,
@@ -40,7 +39,6 @@ def inject_test_drops(
         video_path = str(row['video_path'])
         sampling_start = int(row['sampling_start'])
         sampling_end = int(row['sampling_end'])
-        biigle_volume_id = int(row['biigle_volume_id'])
         if use_pipeline_status:
             status = str(row['status']).strip()
         else:
@@ -53,6 +51,5 @@ def inject_test_drops(
             is_bad_deployment=False,
             sampling_start=sampling_start,
             sampling_end=sampling_end,
-            biigle_volume_id=biigle_volume_id
         )
-        logging.info(f"  ✅ Seeded {drop_id} → {status} (volume_id={biigle_volume_id})")
+        logging.info(f"  ✅ Seeded {drop_id} → {status}")

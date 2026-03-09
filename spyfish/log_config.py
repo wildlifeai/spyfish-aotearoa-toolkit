@@ -24,17 +24,21 @@ def clear_logs_directory() -> None:
     """
     Clear the logs directory by deleting all log files (except the current log file).
     """
+    if not LOG_PATH:
+        return
     log_dir = Path(LOG_PATH).parent
     for log_file in log_dir.iterdir():
         if log_file != Path(LOG_PATH) and log_file.is_file():
             log_file.unlink()
 
-# Configure the logging module in global scope to ensure that all modules use the same configuration.
-LOG_PATH = _set_logging_path()
+from spyfish.config import config
 
-# Simple configuration: use file logging if LOG_OUTPUT=file, otherwise console (default)
+LOG_PATH = None
+
+# Simple configuration: use file logging if config.log_output is 'file', otherwise console
 format_string = "%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
-if os.getenv("LOG_OUTPUT", "console").lower() == "file":
+if config.log_output == "file":
+    LOG_PATH = _set_logging_path()
     logging.basicConfig(
         filename=LOG_PATH,
         level="INFO",
