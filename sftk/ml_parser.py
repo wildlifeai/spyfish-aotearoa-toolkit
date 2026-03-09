@@ -13,7 +13,8 @@ class MLParser:
             ml_annotations_filename: str,
             extract_dir: str = LOCAL_DATA_FOLDER_PATH,
             confidence_threshold: float = CONFIDENCE_THRESHOLD,
-            frame_rate: int = FRAME_RATE
+            frame_rate: int = FRAME_RATE,
+            window_seconds: int = 30
     ):
         """Processes the ML annotations and saves the parsed data.
 
@@ -22,6 +23,7 @@ class MLParser:
             ml_annotations_filename: Name of annotation file.
             confidence_threshold: Minimum confidence score to include an annotation.
             frame_rate: The frame rate of the video to calculate seconds from frame number.
+            window_seconds: Time in seconds of window over which max count has to be checked
         """
         input_file_name = Path(extract_dir) / ml_annotations_filename
         output_file_name = Path(extract_dir) / (ml_annotations_filename.split(".")[0] + "_parsed.csv")
@@ -42,7 +44,8 @@ class MLParser:
         confident_annotations_df["seconds"] = confident_annotations_df["frame_no"] / frame_rate
 
         # 3. Create 30-second window
-        confident_annotations_df["window_30s"] = (confident_annotations_df["frame_no"] // (frame_rate * 30)).astype(int)
+        confident_annotations_df["window_30s"] = (confident_annotations_df["frame_no"] //
+                                                  (frame_rate * window_seconds)).astype(int)
 
         # 4. Count detections per frame for each species
         frame_counts = (
@@ -79,7 +82,7 @@ class MLParser:
 
         # 7. Add metadata columns
         max_n_df["AnnotatedBy"] = "ml_model"
-        max_n_df["IntervalAnnotation"] = 30
+        max_n_df["IntervalAnnotation"] = window_seconds
         max_n_df["ConfidenceAgreement"] = "NA"
 
         # 8. Select and reorder final columns to match biigle_parser format
