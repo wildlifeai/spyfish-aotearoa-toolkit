@@ -179,12 +179,6 @@ class ConfigWrapper:
         """S3 prefix for Biigle JPEG frames."""
         return f"{self.base_dir}/{self.sub_dirs.get('biigle_images', 'media/biigle_images')}"
 
-    # TODO is this used somewhere
-    @property
-    def biigle_s3_clips_prefix(self) -> str:
-        """S3 prefix for Biigle video clips."""
-        return f"{self.base_dir}/{self.sub_dirs.get('biigle_clips', 'media/biigle_clips')}"
-
     @property
     def export_local(self):
         return str_to_bool(os.getenv("EXPORT_LOCAL"))

@@ -53,7 +53,6 @@ paths:
     pipeline_model: "pipeline_model"
     trained: "trained"
     biigle_images: "media/biigle_images"
-    biigle_clips: "media/biigle_clips"
     biigle_cache: "biigle_cache"
 
 
@@ -112,7 +111,6 @@ biigle:
   done_labels: ["Done Volume", "Done QA Review"]
   # S3 paths — appended with {survey_id}/{drop_id}/ at runtime
   s3_images_prefix: "biigle_images"  # Uses sub_dirs.biigle_images relative to base_dir
-  s3_clips_prefix: "biigle_clips"    # Uses sub_dirs.biigle_clips relative to base_dir
   # Default fish label for ML annotations uploaded to Biigle
   # This is the exact fallback if a species is not found in label_mapping below.
   default_fish_label_id: 531298   # "Fish - review required" label
