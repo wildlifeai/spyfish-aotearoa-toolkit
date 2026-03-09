@@ -166,3 +166,49 @@ def generate_clip_filename(drop_id: str, duration: float, start_seconds: float) 
 def generate_frame_filename(drop_id: str, time_seconds: float) -> str:
     """Standardizes Zooniverse/Biigle JPEG frame naming."""
     return f"{drop_id}__frame_{time_seconds:.3f}s.jpg"
+
+def validate_model_path(model_path: str | Path) -> Path:
+    """
+    Validates that a model path is a .pt file located within trusted local directories.
+    Prevents path traversal and loading of arbitrary files.
+    """
+    # TODO is this necessary
+    path = Path(model_path).resolve()
+
+    # 1. Check extension
+    if path.suffix != ".pt":
+        raise ValueError(f"Security Alert: Invalid model extension: '{path.suffix}'. Only .pt files are allowed.")
+
+    # 2. Check for path traversal characters in the input string (redundant but safe)
+    if ".." in str(model_path):
+         raise ValueError(f"Security Alert: Potential path traversal in model path: '{model_path}'")
+
+    # 3. Define trusted roots
+    training_cfg = config.get_section("training")
+    local_training_root = (config.project_root / training_cfg.get("local_training_dir", "process_files/training")).resolve()
+    models_root = config.models_root_dir.resolve()
+
+    # 4. Check if path is within trusted roots
+    is_safe = False
+    for root in [local_training_root, models_root]:
+        try:
+            path.relative_to(root)
+            is_safe = True
+            break
+        except ValueError:
+            continue
+
+    if not is_safe:
+        # Check for allowed default weights (names only)
+        allowed_defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
+                            "yolov11n.pt", "yolov11s.pt", "yolov11m.pt", "yolov11l.pt", "yolov11x.pt",
+                            "yolov12n.pt", "yolov12s.pt", "yolov12m.pt", "yolov12x.pt"]
+        if path.name in allowed_defaults:
+            return path
+
+        raise ValueError(
+            f"Security Alert: Model path '{path}' is not within a trusted directory.\n"
+            f"Trusted roots: {local_training_root}, {models_root}"
+        )
+
+    return path

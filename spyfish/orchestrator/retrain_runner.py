@@ -111,7 +111,6 @@ def run_retraining(
         species_data_yaml=str(species_yaml) if species_yaml else None,
         train_binary=not species_only,
         train_species=not binary_only,
-        upload_to_s3=False
     )
 
     # 7. Evaluate & Promote

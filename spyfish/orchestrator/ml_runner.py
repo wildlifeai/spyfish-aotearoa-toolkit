@@ -11,6 +11,7 @@ from spyfish.config import config, PipelineStatus, get_required
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.database.manager import DatabaseManager
 from spyfish.ml.run_inference import main as run_inference_main
+from spyfish.utils import validate_model_path
 
 class MLRunner:
     def __init__(self):
@@ -29,7 +30,7 @@ class MLRunner:
         self.imgsz = int(config.imgsz)
         self.confidence = get_required(config.ml_inference, "confidence_threshold", "ml_inference")
         # Use the standardized pipeline model path
-        self.model = str(config.pipeline_model_path)
+        self.model = str(validate_model_path(config.pipeline_model_path))
 
 
     def get_inference_targets(self) -> List[dict]:

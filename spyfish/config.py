@@ -2,6 +2,7 @@ import os
 import yaml
 import logging
 from pathlib import Path
+import re
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -583,7 +584,6 @@ class ConfigWrapper:
         Validates that a drop_id matches the expected pattern and contains no path traversal.
         Raises ValueError if invalid.
         """
-        import re
         pattern = self.validation_patterns.get(self.drop_id_column)
         if not pattern:
             # Fallback to a safe default if pattern is missing
