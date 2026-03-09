@@ -6,9 +6,17 @@ import pandas as pd
 
 from sftk.biigle_handler import BiigleHandler
 from sftk.common import (
+    ANNOTATED_BY_COLUMN,
+    ANNOTATION_EXPORT_COLUMNS,
     BIIGLE_ANNOTATION_REPORT_TYPE,
     BIIGLE_API_EMAIL,
     BIIGLE_API_TOKEN,
+    CONFIDENCE_AGREEMENT_COLUMN,
+    DROP_ID_COLUMN,
+    INTERVAL_ANNOTATION_COLUMN,
+    MAX_INTERVAL_COLUMN,
+    SCIENTIFIC_NAME_COLUMN,
+    TIME_OF_MAX_COLUMN,
 )
 
 SCALE_BAR_LENGTH_CM = 10
@@ -40,7 +48,7 @@ class BiigleParser:
             logging.info(f"No data found, seems like volume {volume_id} is empty. ")
             return {}
 
-        annotations_df["DropID"] = annotations_df["video_filename"].str.replace(
+        annotations_df[DROP_ID_COLUMN] = annotations_df["video_filename"].str.replace(
             r"\.mp4.*", "", regex=True
         )
 
@@ -48,7 +56,7 @@ class BiigleParser:
             return {"raw_annotations_df": annotations_df}
 
         required_columns = [
-            "DropID",
+            DROP_ID_COLUMN,
             "label_name",
             "video_id",
             "video_filename",
@@ -206,7 +214,7 @@ class BiigleParser:
     def format_count_annotations_output(
         self, annotations_df: pd.DataFrame, interval_annotation_s: int = 30
     ) -> pd.DataFrame:
-        annotations_df["ScientificName"] = (
+        annotations_df[SCIENTIFIC_NAME_COLUMN] = (
             annotations_df["label_name"]
             .str.split(" - ")
             .str[1]
@@ -215,25 +223,15 @@ class BiigleParser:
 
         # Rename columns to match target format
         renamed_df = annotations_df.rename(
-            columns={"max_count": "MaxInterval", "time_of_max": "TimeOfMax"}
+            columns={"max_count": MAX_INTERVAL_COLUMN, "time_of_max": TIME_OF_MAX_COLUMN}
         )
         # Add constant columns (may change according to video)
-        renamed_df["AnnotatedBy"] = "expert"
-        renamed_df["IntervalAnnotation"] = interval_annotation_s
-        renamed_df["ConfidenceAgreement"] = "NA"
+        renamed_df[ANNOTATED_BY_COLUMN] = "expert"
+        renamed_df[INTERVAL_ANNOTATION_COLUMN] = interval_annotation_s
+        renamed_df[CONFIDENCE_AGREEMENT_COLUMN] = "NA"
 
         # Select and reorder final columns
-        final_df = renamed_df[
-            [
-                "DropID",
-                "ScientificName",
-                "TimeOfMax",
-                "MaxInterval",
-                "AnnotatedBy",
-                "IntervalAnnotation",
-                "ConfidenceAgreement",
-            ]
-        ]
+        final_df = renamed_df[ANNOTATION_EXPORT_COLUMNS]
 
         return final_df
 

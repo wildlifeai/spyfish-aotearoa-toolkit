@@ -2,7 +2,19 @@ import logging
 import pandas as pd
 from pathlib import Path
 
-from sftk.common import LOCAL_DATA_FOLDER_PATH, CONFIDENCE_THRESHOLD, FRAME_RATE
+from sftk.common import (
+    ANNOTATED_BY_COLUMN,
+    ANNOTATION_EXPORT_COLUMNS,
+    CONFIDENCE_AGREEMENT_COLUMN,
+    CONFIDENCE_THRESHOLD,
+    DROP_ID_COLUMN,
+    FRAME_RATE,
+    INTERVAL_ANNOTATION_COLUMN,
+    LOCAL_DATA_FOLDER_PATH,
+    MAX_INTERVAL_COLUMN,
+    SCIENTIFIC_NAME_COLUMN,
+    TIME_OF_MAX_COLUMN,
+)
 
 
 class MLParser:
@@ -85,34 +97,24 @@ class MLParser:
         # 6. Rename columns to BIIGLE-compatible output schema
         max_n_df = max_n_df.rename(
             columns={
-                "video_id": "DropID",
-                "class_id": "ScientificName",
-                "count_in_frame": "MaxInterval",
+                "video_id": DROP_ID_COLUMN,
+                "class_id": SCIENTIFIC_NAME_COLUMN,
+                "count_in_frame": MAX_INTERVAL_COLUMN,
             }
         )
 
         # Convert frame to HH:MM:SS in BIIGLE-compatible time column
-        max_n_df["TimeOfMax"] = pd.to_datetime(
+        max_n_df[TIME_OF_MAX_COLUMN] = pd.to_datetime(
             max_n_df["frame_no"] / frame_rate, unit="s"
         ).dt.strftime("%H:%M:%S")
 
         # 7. Add metadata columns
-        max_n_df["AnnotatedBy"] = "ml_model"
-        max_n_df["IntervalAnnotation"] = window_seconds
-        max_n_df["ConfidenceAgreement"] = "NA"
+        max_n_df[ANNOTATED_BY_COLUMN] = "ml_model"
+        max_n_df[INTERVAL_ANNOTATION_COLUMN] = window_seconds
+        max_n_df[CONFIDENCE_AGREEMENT_COLUMN] = "NA"
 
         # 8. Select and reorder final columns to match biigle_parser format
-        final_df = max_n_df[
-            [
-                "DropID",
-                "ScientificName",
-                "TimeOfMax",
-                "MaxInterval",
-                "AnnotatedBy",
-                "IntervalAnnotation",
-                "ConfidenceAgreement",
-            ]
-        ]
+        final_df = max_n_df[ANNOTATION_EXPORT_COLUMNS]
 
         logging.info(f"Saving parsed annotations to {output_file_name}")
         final_df.to_csv(output_file_name, index=False)
