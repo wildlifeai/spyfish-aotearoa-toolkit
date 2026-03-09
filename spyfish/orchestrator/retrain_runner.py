@@ -59,8 +59,6 @@ def run_retraining(
     images_dir = config.data_quality_dir
 
     # 2. Export Rectangle annotations from Biigle (essential for YOLO points)
-    # We use either the provided IDs or the default project_id from config.
-    pid = project_id or config.biigle_project_id
     labels_dir = local_training_dir / "labels_raw"
     class_map_path = local_training_dir / "class_map.json"
 

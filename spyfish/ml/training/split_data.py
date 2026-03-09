@@ -19,20 +19,13 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import yaml
-import re
-
 from spyfish.config import config
+from spyfish.utils import get_survey_id_from_drop
 
 
 # ---------------------------------------------------------------------------
 # Core split algorithm
 # ---------------------------------------------------------------------------
-
-def get_survey_id_from_drop(drop_id: str) -> str:
-    """Derive SurveyID from DropID (e.g. 'KSF_20240124_BUV' from 'KSF_20240124_BUV_KSF_001_01')."""
-
-    match = re.match(r'^([A-Z]{3}_\d{8}_BUV)', drop_id)
-    return match.group(1) if match else drop_id[:16]
 
 
 def split_drops_by_survey(

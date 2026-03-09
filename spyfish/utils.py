@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from typing import Set, Iterable, List, Optional, Any
 import pandas as pd
@@ -212,3 +213,18 @@ def validate_model_path(model_path: str | Path) -> Path:
         )
 
     return path
+
+def get_survey_id_from_drop(drop_id: str) -> str:
+    """Derive SurveyID from DropID using the config format regex."""
+    pattern = getattr(config, 'validation_rules', {}).get('formats', {}).get('SurveyID', r'^([A-Z]{3}_\d{8}_BUV)')
+
+    # Ensure capture groups if not present (to match str.extract behavior in extract_survey_id)
+    if not pattern.startswith('('):
+        pattern = f"({pattern})"
+
+    match = re.search(pattern, drop_id)
+    if not match:
+        logging.warning(f"Could not extract SurveyID from DropID '{drop_id}'. Grouping under 'UNKNOWN_SURVEY'.")
+        return "UNKNOWN_SURVEY"
+
+    return match.group(1)
