@@ -11,17 +11,17 @@ Rules:
 Usage:
     python -m spyfish.ml.training.split_data --images-dir /path/to/images --output-dir /path/to/training --balanced-csv /path/to/balanced.csv
 """
+
 import argparse
 import logging
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
-import yaml
-from spyfish.config import config
-from spyfish.utils import get_survey_id_from_drop
 
+from spyfish.config.wrapper import config
+from spyfish.utils import get_survey_id_from_drop
 
 # ---------------------------------------------------------------------------
 # Core split algorithm
@@ -87,9 +87,9 @@ def split_drops_by_survey(
     logging.info(
         f"\n=== Split summary ===\n"
         f"  Total drops: {total}\n"
-        f"  Train:       {len(train_drops)} ({len(train_drops)/total:.0%}) — target {train_pct:.0%}\n"
-        f"  Val:         {len(val_drops)}  ({len(val_drops)/total:.0%}) — target {val_pct:.0%}\n"
-        f"  Test:        {len(test_drops)} ({len(test_drops)/total:.0%}) — target {1-train_pct-val_pct:.0%}\n"
+        f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}) — target {train_pct:.0%}\n"
+        f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}) — target {val_pct:.0%}\n"
+        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {1 - train_pct - val_pct:.0%}\n"
         f"====================\n"
     )
 
@@ -99,6 +99,7 @@ def split_drops_by_survey(
 # ---------------------------------------------------------------------------
 # File list writing
 # ---------------------------------------------------------------------------
+
 
 def write_split_txt(
     drop_ids: List[str],
@@ -144,7 +145,11 @@ def print_species_breakdown(
     df = df.copy()
     df["split"] = df["DropID"].map(split_map)
 
-    pivot = df.groupby(["ScientificName", "split"])["MaxInterval"].sum().unstack(fill_value=0)
+    pivot = (
+        df.groupby(["ScientificName", "split"])["MaxInterval"]
+        .sum()
+        .unstack(fill_value=0)
+    )
     for col in ("train", "val", "test"):
         if col not in pivot.columns:
             pivot[col] = 0
@@ -166,6 +171,7 @@ def print_species_breakdown(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def split_data(
     balanced_df: pd.DataFrame,
@@ -200,7 +206,11 @@ def split_data(
     print_species_breakdown(balanced_df, train_drops, val_drops, test_drops)
 
     # Write image list .txt files
-    for split_name, drops in [("train", train_drops), ("val", val_drops), ("test", test_drops)]:
+    for split_name, drops in [
+        ("train", train_drops),
+        ("val", val_drops),
+        ("test", test_drops),
+    ]:
         txt_path = output_dir / f"{split_name}.txt"
         n = write_split_txt(drops, images_dir, txt_path)
         logging.info(f"  {split_name}: {n} images from {len(drops)} drops → {txt_path}")
@@ -210,15 +220,24 @@ def split_data(
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Split balanced annotation dataset into train/val/test.")
-    parser.add_argument("--balanced-csv", required=True, type=Path, help="CSV from prepare_training_data.py")
+    parser = argparse.ArgumentParser(
+        description="Split balanced annotation dataset into train/val/test."
+    )
+    parser.add_argument(
+        "--balanced-csv",
+        required=True,
+        type=Path,
+        help="CSV from prepare_training_data.py",
+    )
     parser.add_argument("--images-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     df = pd.read_csv(args.balanced_csv)
-    train_drops, val_drops, test_drops = split_data(df, args.images_dir, args.output_dir, seed=args.seed)
+    train_drops, val_drops, test_drops = split_data(
+        df, args.images_dir, args.output_dir, seed=args.seed
+    )
     logging.info("Split complete. Review the summary above before starting training.")
 
 

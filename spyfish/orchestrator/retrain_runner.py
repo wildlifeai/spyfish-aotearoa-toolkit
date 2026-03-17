@@ -11,15 +11,18 @@ This module coordinates the full flow:
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
-from spyfish.config import config
-from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo
-from spyfish.ml.training.prepare_training_data import prepare_from_annotations, assemble_yolo_dataset
+from spyfish.biigle.sync_annotations import sync_biigle_annotations
+from spyfish.config.wrapper import config
+from spyfish.ml.training.evaluate import run_evaluation_pipeline
+from spyfish.ml.training.prepare_training_data import (
+    assemble_yolo_dataset,
+    prepare_from_annotations,
+)
 from spyfish.ml.training.split_data import split_data
 from spyfish.ml.training.train import run_training_pipeline
-from spyfish.ml.training.evaluate import run_evaluation_pipeline
 
 
 def _promote_model_locally(model_path: str, model_type: str):
@@ -54,7 +57,9 @@ def run_retraining(
 
     # Configuration for retraining
     training_cfg = config.get_section("training")
-    local_training_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
+    local_training_dir = Path(
+        training_cfg.get("local_training_dir", "process_files/training")
+    )
     # The training scripts look for images. Expert frames are usually in data_quality/{drop_id}/biigle_frames/
     images_dir = config.data_quality_dir
 
@@ -62,20 +67,18 @@ def run_retraining(
     labels_dir = local_training_dir / "labels_raw"
     class_map_path = local_training_dir / "class_map.json"
 
-    logging.info(f"Step 2: Exporting local annotations to YOLO format...")
+    logging.info("Step 2: Exporting local annotations to YOLO format...")
     spot_check_dir = local_training_dir / "spot_checks"
     class_map = biigle_to_yolo(
         data_quality_dir=images_dir,
         labels_dir=labels_dir,
         class_map_path=class_map_path,
-        spot_check_dir=spot_check_dir
+        spot_check_dir=spot_check_dir,
     )
 
     if not class_map:
         logging.warning("No labels exported from Biigle. Retraining cannot proceed.")
         return {}
-
-    class_names = sorted(class_map.keys(), key=lambda x: class_map[x])
 
     # 3. Balance and Prepare
     logging.info("Step 3: Balancing annotations and preparing YOLO layout...")
@@ -84,9 +87,7 @@ def run_retraining(
     # 4. Split
     logging.info("Step 4: Splitting data into train/val/test...")
     train_drops, val_drops, test_drops = split_data(
-        balanced_df=balanced_df,
-        images_dir=images_dir,
-        output_dir=local_training_dir
+        balanced_df=balanced_df, images_dir=images_dir, output_dir=local_training_dir
     )
 
     # 5. Assemble YOLO layout
@@ -99,7 +100,7 @@ def run_retraining(
         species_labels_dir=labels_dir,
         output_dir=local_training_dir,
         class_names=species_names,
-        build_binary=not species_only
+        build_binary=not species_only,
     )
 
     # 6. Train
@@ -118,7 +119,7 @@ def run_retraining(
         eval_results["binary"] = run_evaluation_pipeline(
             model_path=train_results["binary"]["local"],
             data_yaml=str(binary_yaml),
-            model_type="binary"
+            model_type="binary",
         )
         if auto_promote and eval_results["binary"].get("should_promote"):
             _promote_model_locally(train_results["binary"]["local"], "binary")
@@ -128,14 +129,11 @@ def run_retraining(
         eval_results["species"] = run_evaluation_pipeline(
             model_path=train_results["species"]["local"],
             data_yaml=str(species_yaml),
-            model_type="species"
+            model_type="species",
         )
         # TODO might not need auto_promote here
         if auto_promote and eval_results["species"].get("should_promote"):
             _promote_model_locally(train_results["species"]["local"], "species")
 
     logging.info("Retraining Pipeline COMPLETE.")
-    return {
-        "training": train_results,
-        "evaluation": eval_results
-    }
+    return {"training": train_results, "evaluation": eval_results}

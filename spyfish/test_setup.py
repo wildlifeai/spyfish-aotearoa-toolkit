@@ -1,55 +1,144 @@
+import argparse
 import logging
+import os
+import sys
+
 import pandas as pd
-from typing import Set
+
+from spyfish.config.base import PipelineStatus
+from spyfish.config.wrapper import config
+from spyfish.database.manager import DatabaseManager
+from spyfish.storage.db_sync import upload_db
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
-# Hardcoded metadata for local test execution
-
-def inject_test_drops(
-    deployments_df: pd.DataFrame = None,
-    db = None,
-    use_pipeline_status: bool = False
-) -> pd.DataFrame:
+def process_csv_targets(csv_path: str, default_stage: str = None, push_s3: bool = False):
     """
-    Single function to inject test configurations either for full ingestion or staged testing,
-    reading directly from the test CSV.
+    Reads a CSV file containing Drop IDs and their target pipeline stage,
+    and updates the local database accordingly.
 
-    If use_pipeline_status is True:
-        Acts like a staged test, seeding the SQLite DB directly with specific stages and volume IDs.
-    If use_pipeline_status is False:
-        Acts for Step 1 (ingestion), appending test drops to the deployments_df at READY_FOR_ML.
+    Expected CSV format (headers optional, but recommended if using stage column):
+    DropID,PipelineStatus
+    KSF_20240124_BUV_KSF_085_01,READY_FOR_ML
+    KSF_20240124_BUV_KSF_085_02,AWAITING_EXPERT_REVIEW
     """
-    from spyfish.config import PipelineStatus, config
-    from pathlib import Path
+    if not os.path.exists(csv_path):
+        logging.error(f"CSV file not found: {csv_path}")
+        sys.exit(1)
 
-    csv_path = config.project_root / config.test_deployment_metadata_csv
-    if not csv_path.exists():
-        logging.warning(f"Test metadata CSV not found at {csv_path}")
-        return deployments_df
+    db = DatabaseManager()
+    valid_stages = [s[0] for s in PipelineStatus.STAGE_ORDER]
 
-    test_drops_df = pd.read_csv(csv_path)
-
-    if db is None:
-        raise ValueError("db must be provided when use_pipeline_status=True")
-
-    logging.info(f"Injecting {len(test_drops_df)} staged test drop(s) into the database from CSV...")
-    for _, row in test_drops_df.iterrows():
-
-        drop_id = str(row['drop_id'])
-        video_path = str(row['video_path'])
-        sampling_start = int(row['sampling_start'])
-        sampling_end = int(row['sampling_end'])
-        if use_pipeline_status:
-            status = str(row['status']).strip()
-        else:
-            status = PipelineStatus.READY_FOR_ML
-
-        db.add_or_update_deployment(
-            drop_id=drop_id,
-            status=status,
-            video_path=video_path,
-            is_bad_deployment=False,
-            sampling_start=sampling_start,
-            sampling_end=sampling_end,
+    if default_stage and default_stage not in valid_stages:
+        logging.error(
+            f"Invalid default stage: {default_stage}. Must be one of: {', '.join(valid_stages)}"
         )
-        logging.info(f"  ✅ Seeded {drop_id} → {status}")
+        sys.exit(1)
+
+    drop_col = config.drop_id_column
+    status_col = config.pipeline_status_column
+
+    df = pd.read_csv(csv_path)
+
+    if drop_col not in df.columns:
+        logging.error(
+            f"Expected column '{drop_col}' not found in CSV. "
+            f"Available columns: {list(df.columns)}. "
+            f"Check csv_mapping.drop_id_column in config.yaml."
+        )
+        sys.exit(1)
+
+    if status_col not in df.columns and not default_stage:
+        logging.error(
+            f"Expected column '{status_col}' not found in CSV and no --stage default provided. "
+            f"Available columns: {list(df.columns)}. "
+            f"Check csv_mapping.pipeline_status_column in config.yaml."
+        )
+        sys.exit(1)
+
+    updates = []
+    for _, row in df.iterrows():
+        drop_id = str(row[drop_col]).strip()
+        if not drop_id or drop_id == "nan":
+            continue
+
+        stage = default_stage
+        if status_col in df.columns and pd.notna(row.get(status_col)) and str(row[status_col]).strip():
+            stage = str(row[status_col]).strip()
+
+        if not stage:
+            logging.warning(
+                f"DropID '{drop_id}' has no target stage and no default was provided. Skipping."
+            )
+            continue
+
+        if stage not in valid_stages:
+            logging.warning(
+                f"DropID '{drop_id}' has invalid stage '{stage}'. "
+                f"Must be one of: {', '.join(valid_stages)}. Skipping."
+            )
+            continue
+
+        updates.append((drop_id, stage))
+
+    if not updates:
+        logging.warning("No valid Drop IDs and stages found in the CSV.")
+        sys.exit(0)
+
+    drop_ids = [u[0] for u in updates]
+    existing_records = db.get_deployments_by_ids(drop_ids)
+
+    success_count = 0
+    missing_count = 0
+
+    for drop_id, stage in updates:
+        if drop_id not in existing_records:
+            logging.warning(f"DropID '{drop_id}' not found in the local database. Skipping.")
+            missing_count += 1
+            continue
+
+        try:
+            db.update_status(drop_id, stage)
+            success_count += 1
+            logging.info(f"Updated '{drop_id}' to '{stage}'")
+        except Exception as e:
+            logging.error(f"Failed to update '{drop_id}': {e}")
+
+    logging.info(
+        f"Summary: Successfully updated {success_count} deployments. ({missing_count} skipped/not found)."
+    )
+
+    if push_s3 and success_count > 0:
+        logging.info("Pushing updated database to S3...")
+        if upload_db():
+            logging.info("✅ Database uploaded to S3 successfully.")
+        else:
+            logging.error("❌ Failed to upload database to S3.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Bulk update pipeline stages from a CSV file."
+    )
+    parser.add_argument(
+        "csv_file",
+        help=f"Path to the CSV file (must have '{config.drop_id_column}' and '{config.pipeline_status_column}' columns).",
+    )
+    parser.add_argument(
+        "--stage",
+        "-s",
+        help="Default target Pipeline Stage to apply when the CSV has no status column.",
+    )
+    parser.add_argument(
+        "--push-s3",
+        action="store_true",
+        help="Push the modified database back to S3 after updating.",
+    )
+
+    args = parser.parse_args()
+    process_csv_targets(args.csv_file, args.stage, args.push_s3)
+
+
+if __name__ == "__main__":
+    main()

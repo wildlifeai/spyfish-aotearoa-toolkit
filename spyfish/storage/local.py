@@ -2,11 +2,14 @@ import logging
 import os
 from pathlib import Path
 
+
 class LocalStorageHandler:
     def __init__(self, video_folder: str):
         self.video_folder = Path(video_folder)
         if not self.video_folder.exists():
-            logging.warning(f"Local storage directory does not exist: {self.video_folder}")
+            logging.warning(
+                f"Local storage directory does not exist: {self.video_folder}"
+            )
 
     def get_all_videos(self) -> set:
         """Scan the local media directory once and return a set of all relative file paths."""

@@ -3,11 +3,13 @@ Biigle Annotation Fetcher — download and preview annotation reports from Biigl
 
 Retrieves MaxN, 30-second interval counts, and size annotations from a Biigle volume or project.
 """
+
 import pandas as pd
 import streamlit as st
-
-from spyfish.config import config
 from utils import render_sidebar_refresh
+
+from spyfish.biigle.biigle_parser import BiigleParser
+from spyfish.config.wrapper import config
 
 st.set_page_config(
     page_title="Biigle Annotation Fetcher", page_icon="📥", layout="wide"
@@ -48,7 +50,7 @@ else:
 with st.form("biigle_form"):
     email = st.text_input(
         "Biigle Email",
-        value=config.biigle_email or "",
+        value=config.email or "",
         placeholder="you@example.com",
         help="The email you use to sign in to Biigle.",
     ).strip()
@@ -85,10 +87,10 @@ if submitted:
             st.warning(f"No annotations found for {resource} {volume_id_str}.")
             st.stop()
 
-        max_n_df     = processed.get("max_n_df")
+        max_n_df = processed.get("max_n_df")
         max_n_30s_df = processed.get("max_n_30s_df")
-        sizes_df     = processed.get("sizes_df")
-        maxn_csv     = processed.get("maxn_csv_path", "")
+        sizes_df = processed.get("sizes_df")
+        maxn_csv = processed.get("maxn_csv_path", "")
 
         st.success(f"Annotations loaded from {resource} {volume_id_str}.")
         if maxn_csv:
@@ -98,13 +100,13 @@ if submitted:
             st.subheader(label)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 st.caption(f"{len(df)} rows")
-                st.dataframe(df, width='stretch')
+                st.dataframe(df, width="stretch")
                 st.download_button(
                     label=f"⬇️ Download {label} (CSV)",
                     data=df.to_csv(index=False).encode("utf-8"),
                     file_name=fname,
                     mime="text/csv",
-                    width='stretch',
+                    width="stretch",
                 )
             else:
                 st.info(f"No data for **{label}**.")

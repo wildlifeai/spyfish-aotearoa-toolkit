@@ -1,14 +1,14 @@
 import streamlit as st
-from botocore.exceptions import ClientError
-
-from spyfish.config import config
-from spyfish.storage.s3_handler import S3Handler
 from utils import check_password
+
+from spyfish.storage.s3_handler import S3Handler
+
 
 # --- Helper to generate a presigned URL ---
 @st.cache_resource
 def get_s3_handler():
     return S3Handler()
+
 
 def get_presigned_url(key: str, expires_in: int = 3600) -> str | None:
     handler = get_s3_handler()
@@ -48,9 +48,13 @@ else:
 
             if ps_url:
                 st.subheader("Video preview.")
-                st.write("Does the path look ok? (In the future this will check automatically.)")
+                st.write(
+                    "Does the path look ok? (In the future this will check automatically.)"
+                )
                 st.code(s3_key, language="text")
-                st.write("The video box will show even when there are issues, so check above/try again later, or raise an issue.")
+                st.write(
+                    "The video box will show even when there are issues, so check above/try again later, or raise an issue."
+                )
                 st.video(ps_url)
                 st.caption("Generated Presigned URL:")
                 st.code(ps_url, language="text")

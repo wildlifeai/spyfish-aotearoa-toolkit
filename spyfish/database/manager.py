@@ -1,18 +1,22 @@
-import sqlite3
 import logging
-from pathlib import Path
-from typing import Optional, List, Dict, Any
+import sqlite3
 from contextlib import closing
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from spyfish.config import PipelineStatus, config
+from spyfish.config.wrapper import config
+
 
 class DatabaseManager:
     """
     Core SQLite database manager for the Spyfish pipeline.
     Uses pure sqlite3 with dict-like row factories for simplicity.
     """
-    def __init__(self, db_path: str = None):
-        self.db_path = str(config.db_path) if db_path is None else str(Path(db_path).absolute())
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = (
+            str(config.db_path) if db_path is None else str(Path(db_path).absolute())
+        )
         self.init_db()
 
     def get_connection(self):
@@ -27,7 +31,8 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             # We track the bare minimum needed for orchestration. Metadata lives in BUV Deployments.csv
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS deployments (
                     drop_id TEXT PRIMARY KEY,
                     video_path TEXT,
@@ -43,9 +48,11 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
+            """
+            )
 
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ml_jobs (
                     job_id TEXT PRIMARY KEY,
                     slurm_id TEXT,
@@ -56,9 +63,11 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     finished_at TIMESTAMP
                 )
-            ''')
+            """
+            )
 
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS validation_errors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     SurveyID TEXT,
@@ -70,23 +79,40 @@ class DatabaseManager:
                     InvalidValue TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
+            """
+            )
 
             # Create a trigger to automatically update updated_at
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TRIGGER IF NOT EXISTS update_deployments_timestamp
                 AFTER UPDATE ON deployments
                 BEGIN
                     UPDATE deployments SET updated_at = CURRENT_TIMESTAMP WHERE drop_id = NEW.drop_id;
                 END;
-            ''')
+            """
+            )
             conn.commit()
 
-    def add_or_update_deployment(self, drop_id: str, status: str, video_path: str = "", is_bad_deployment: bool = False, error_message: str = "", sampling_start: int = None, sampling_end: int = None, ml_annotations: int = 0, citsci_annotations: int = 0, expert_annotations: int = 0, biigle_volume_id: str = None):
+    def add_or_update_deployment(
+        self,
+        drop_id: str,
+        status: str,
+        video_path: str = "",
+        is_bad_deployment: bool = False,
+        error_message: str = "",
+        sampling_start: Optional[int] = None,
+        sampling_end: Optional[int] = None,
+        ml_annotations: int = 0,
+        citsci_annotations: int = 0,
+        expert_annotations: int = 0,
+        biigle_volume_id: Optional[str] = None,
+    ):
         """Upserts a deployment record."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute(
+                """
                 INSERT INTO deployments (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
@@ -100,7 +126,21 @@ class DatabaseManager:
                     citsci_annotations=excluded.citsci_annotations,
                     expert_annotations=excluded.expert_annotations,
                     biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id)
-            ''', (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id))
+            """,
+                (
+                    drop_id,
+                    video_path,
+                    status,
+                    is_bad_deployment,
+                    error_message,
+                    sampling_start,
+                    sampling_end,
+                    ml_annotations,
+                    citsci_annotations,
+                    expert_annotations,
+                    biigle_volume_id,
+                ),
+            )
             conn.commit()
 
     def update_status(self, drop_id: str, new_status: str):
@@ -110,50 +150,62 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             # Check current status before updating
-            cursor.execute('SELECT status FROM deployments WHERE drop_id = ?', (drop_id,))
+            cursor.execute(
+                "SELECT status FROM deployments WHERE drop_id = ?", (drop_id,)
+            )
             row = cursor.fetchone()
-            current_status = row['status'] if row else None
-            cursor.execute('UPDATE deployments SET status = ? WHERE drop_id = ?', (new_status, drop_id))
+            current_status = row["status"] if row else None
+            cursor.execute(
+                "UPDATE deployments SET status = ? WHERE drop_id = ?",
+                (new_status, drop_id),
+            )
             # TODO sus check what's happening here
 
             # If we're moving away from ERROR, clear the PIPELINE_ERROR entries for this drop
-            if current_status == 'ERROR' and new_status != 'ERROR':
+            if current_status == "ERROR" and new_status != "ERROR":
                 cursor.execute(
                     "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
-                    (drop_id,)
+                    (drop_id,),
                 )
-                logging.info(f"Cleared PIPELINE_ERROR entries for {drop_id} (status reset to {new_status})")
+                logging.info(
+                    f"Cleared PIPELINE_ERROR entries for {drop_id} (status reset to {new_status})"
+                )
             conn.commit()
 
     def update_biigle_volume_id(self, drop_id: str, volume_id: str):
         """Sets the biigle_volume_id for a specific deployment."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('UPDATE deployments SET biigle_volume_id = ? WHERE drop_id = ?', (str(volume_id), drop_id))
+            cursor.execute(
+                "UPDATE deployments SET biigle_volume_id = ? WHERE drop_id = ?",
+                (str(volume_id), drop_id),
+            )
             conn.commit()
 
     def get_deployments_by_status(self, status: str) -> List[Dict[str, Any]]:
         """Returns all deployments currently in the given status."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM deployments WHERE status = ?', (status,))
+            cursor.execute("SELECT * FROM deployments WHERE status = ?", (status,))
             return [dict(row) for row in cursor.fetchall()]
 
     def get_deployments_by_statuses(self, statuses: List[str]) -> List[Dict[str, Any]]:
         """Returns all deployments currently in any of the given statuses."""
         if not statuses:
             return []
-        placeholders = ', '.join(['?'] * len(statuses))
+        placeholders = ", ".join(["?"] * len(statuses))
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f'SELECT * FROM deployments WHERE status IN ({placeholders})', statuses)
+            cursor.execute(
+                f"SELECT * FROM deployments WHERE status IN ({placeholders})", statuses
+            )
             return [dict(row) for row in cursor.fetchall()]
 
     def get_deployment(self, drop_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific deployment by drop_id."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM deployments WHERE drop_id = ?', (drop_id,))
+            cursor.execute("SELECT * FROM deployments WHERE drop_id = ?", (drop_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
 
@@ -161,18 +213,20 @@ class DatabaseManager:
         """Fetch multiple deployments in a single query. Returns {drop_id: record}."""
         if not drop_ids:
             return {}
-        placeholders = ', '.join(['?'] * len(drop_ids))
+        placeholders = ", ".join(["?"] * len(drop_ids))
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f'SELECT * FROM deployments WHERE drop_id IN ({placeholders})', drop_ids)
-            return {row['drop_id']: dict(row) for row in cursor.fetchall()}
+            cursor.execute(
+                f"SELECT * FROM deployments WHERE drop_id IN ({placeholders})", drop_ids
+            )
+            return {row["drop_id"]: dict(row) for row in cursor.fetchall()}
 
     def get_all_deployments_map(self) -> Dict[str, Dict[str, Any]]:
         """Fetch all deployment records and return them as a dictionary {drop_id: record}."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM deployments')
-            return {row['drop_id']: dict(row) for row in cursor.fetchall()}
+            cursor.execute("SELECT * FROM deployments")
+            return {row["drop_id"]: dict(row) for row in cursor.fetchall()}
 
     def clear_pipeline_errors(self, drop_id: str):
         """Remove all PIPELINE_ERROR rows from validation_errors for a specific drop.
@@ -183,7 +237,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(
                 "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
-                (drop_id,)
+                (drop_id,),
             )
             conn.commit()
             logging.info(f"Cleared PIPELINE_ERROR entries for {drop_id}")
@@ -192,29 +246,33 @@ class DatabaseManager:
         """Clears all validation errors from the database."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM validation_errors')
+            cursor.execute("DELETE FROM validation_errors")
             conn.commit()
 
     def add_validation_errors(self, errors: List[Dict[str, Any]]):
         """Bulk inserts validation errors."""
-        if not errors: return
+        if not errors:
+            return
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany('''
+            cursor.executemany(
+                """
                 INSERT INTO validation_errors (SurveyID, DropID, ErrorType, FileName, ColumnName, ErrorMessage, InvalidValue)
                 VALUES (:SurveyID, :DropID, :ErrorType, :FileName, :ColumnName, :ErrorMessage, :InvalidValue)
-            ''', errors)
+            """,
+                errors,
+            )
             conn.commit()
 
     def get_all_validation_errors(self) -> List[Dict[str, Any]]:
         """Returns all stored validation errors, including deployment status where possible."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            query = '''
+            query = """
                 SELECT v.SurveyID, v.DropID, v.ErrorType, v.FileName, v.ColumnName, v.ErrorMessage, v.InvalidValue, d.status
                 FROM validation_errors v
                 LEFT JOIN deployments d ON v.DropID = d.drop_id
-            '''
+            """
             cursor.execute(query)
             return [dict(row) for row in cursor.fetchall()]
 
@@ -223,19 +281,22 @@ class DatabaseManager:
         Aggregates counts from spyfish_annotations.db and updates the deployments table in spyfish_pipeline.db.
         If drop_ids is provided, only updates those specific deployments.
         """
-        logging.info(f"Syncing annotation counts to main pipeline database{' (incremental)' if drop_ids else ''}...")
+        logging.info(
+            f"Syncing annotation counts to main pipeline database{' (incremental)' if drop_ids else ''}..."
+        )
 
         # Import to avoid circular dependencies if any
         from spyfish.database.annotation_manager import AnnotationDatabaseManager
+
         ann_db = AnnotationDatabaseManager()
 
-        query = '''
+        query = """
             SELECT drop_id, annotated_by as source, SUM(max_interval) as total
             FROM annotations
-        '''
+        """
         params = []
         if drop_ids:
-            placeholders = ', '.join(['?'] * len(drop_ids))
+            placeholders = ", ".join(["?"] * len(drop_ids))
             query += f" WHERE drop_id IN ({placeholders})"
             params.extend(drop_ids)
 
@@ -247,11 +308,13 @@ class DatabaseManager:
             results = cursor.fetchall()
 
         # Group results by drop_id
-        counts_by_drop = {d: {"ml": 0, "expert": 0, "citsci": 0} for d in (drop_ids or [])}
+        counts_by_drop = {
+            d: {"ml": 0, "expert": 0, "citsci": 0} for d in (drop_ids or [])
+        }
         for row in results:
-            drop_id = row['drop_id']
-            source = row['source']
-            count = row['total']
+            drop_id = row["drop_id"]
+            source = row["source"]
+            count = row["total"]
 
             if drop_id not in counts_by_drop:
                 counts_by_drop[drop_id] = {"ml": 0, "expert": 0, "citsci": 0}
@@ -267,13 +330,18 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             for drop_id, counts in counts_by_drop.items():
-                cursor.execute('''
+                cursor.execute(
+                    """
                     UPDATE deployments
                     SET ml_annotations = ?,
                         expert_annotations = ?,
                         citsci_annotations = ?
                     WHERE drop_id = ?
-                ''', (counts["ml"], counts["expert"], counts["citsci"], drop_id))
+                """,
+                    (counts["ml"], counts["expert"], counts["citsci"], drop_id),
+                )
             conn.commit()
 
-        logging.info(f"Updated annotation counts for {len(counts_by_drop)} deployments.")
+        logging.info(
+            f"Updated annotation counts for {len(counts_by_drop)} deployments."
+        )

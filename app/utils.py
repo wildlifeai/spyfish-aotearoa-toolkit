@@ -1,9 +1,8 @@
 import hmac
-import streamlit as st
-from spyfish.config import config
-from spyfish.storage.db_sync import download_db, download_annotations_db
 
-import logging
+import streamlit as st
+
+from spyfish.storage.db_sync import download_annotations_db, download_db
 
 
 @st.cache_data(ttl=None)  # Only sync once per session unless 'Refresh Cache' is clicked
@@ -22,10 +21,13 @@ def sync_db_if_needed():
 def render_sidebar_refresh():
     """Renders a common sidebar button to clear cache and refresh data."""
     st.sidebar.header("Controls")
-    if st.sidebar.button("🔄 Refresh Cache", help="Clears local cache and re-syncs from S3 if needed"):
+    if st.sidebar.button(
+        "🔄 Refresh Cache", help="Clears local cache and re-syncs from S3 if needed"
+    ):
         st.cache_data.clear()
         st.sidebar.success("Cache cleared!")
         st.rerun()
+
 
 # --- Password protection ---
 def check_password():

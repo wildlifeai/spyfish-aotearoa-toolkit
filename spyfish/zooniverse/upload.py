@@ -1,17 +1,18 @@
 """
 Upload extracted Zooniverse clips to a Zooniverse project as a new subject set.
 """
+
 import logging
 from pathlib import Path
 
 import pandas as pd
-
-from spyfish.config import config
-from spyfish.utils import seconds_to_time
 from panoptes_client import Panoptes, Project, Subject, SubjectSet
 
+from spyfish.config.wrapper import config
+from spyfish.utils import seconds_to_time
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -32,7 +33,9 @@ def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
             f"Consider re-encoding with a higher CRF.{clips_df["SizeMB"]}"
         )
     else:
-        logging.info(f"All {clips_df['SizeMB'].notna().sum()} clips are under 12 MB. Ready to upload.")
+        logging.info(
+            f"All {clips_df['SizeMB'].notna().sum()} clips are under 12 MB. Ready to upload."
+        )
     return clips_df
 
 
@@ -56,7 +59,13 @@ def upload_clips_to_zooniverse(
         subject_set_name: Optional override for the Zooniverse subject set display name.
     """
 
-    if not all([config.zooniverse_user, config.zooniverse_password, config.zooniverse_project_id]):
+    if not all(
+        [
+            config.user,
+            config.password,
+            config.zooniverse_project_id,
+        ]
+    ):
         raise EnvironmentError(
             "Missing Zooniverse credentials. Set ZOONIVERSE_USER, ZOONIVERSE_PASSWORD, "
             "and ZOONIVERSE_PROJECT_ID in your .env file."
@@ -71,14 +80,16 @@ def upload_clips_to_zooniverse(
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
 
-    logging.info(f"Connecting to Zooniverse as {config.zooniverse_user}...")
-    Panoptes.connect(username=config.zooniverse_user, password=config.zooniverse_password)
+    logging.info(f"Connecting to Zooniverse as {config.user}...")
+    Panoptes.connect(username=config.user, password=config.password)
     zoo_project = Project.find(config.zooniverse_project_id)
 
     set_name = subject_set_name or f"spyfish_{drop_id}_{n}clips"
 
     # Check if subject set already exists to avoid "Display name has already been taken"
-    existing_sets = list(SubjectSet.where(project_id=zoo_project.id, display_name=set_name))
+    existing_sets = list(
+        SubjectSet.where(project_id=zoo_project.id, display_name=set_name)
+    )
     if existing_sets:
         logging.info(f"Using existing subject set: '{set_name}'")
         subject_set = existing_sets[0]
@@ -115,7 +126,7 @@ def upload_clips_to_zooniverse(
 
         subject = Subject()
         subject.links.project = zoo_project
-        subject.add_location({'video/mp4': str(clip_path)})
+        subject.add_location({"video/mp4": str(clip_path)})
         subject.metadata.update(meta)
         subject.save()
         new_subjects.append(subject)
@@ -123,6 +134,7 @@ def upload_clips_to_zooniverse(
 
     subject_set.add(new_subjects)
     logging.info(f"Uploaded {len(new_subjects)}/{n} clips to subject set '{set_name}'.")
+
 
 def upload_frames_to_zooniverse(
     frames_df: pd.DataFrame,
@@ -135,7 +147,13 @@ def upload_frames_to_zooniverse(
     DropID and FramePath are read from the DataFrame directly.
     """
 
-    if not all([config.zooniverse_user, config.zooniverse_password, config.zooniverse_project_id]):
+    if not all(
+        [
+            config.user,
+            config.password,
+            config.zooniverse_project_id,
+        ]
+    ):
         raise EnvironmentError(
             "Missing Zooniverse credentials. Set ZOONIVERSE_USER, ZOONIVERSE_PASSWORD, "
             "and ZOONIVERSE_PROJECT_ID in your .env file."
@@ -144,20 +162,24 @@ def upload_frames_to_zooniverse(
     # Filter to frames that were actually extracted
     uploadable = frames_df[frames_df["FramePath"].notna()].copy()
     if uploadable.empty:
-        logging.error("No frames available to upload (FramePath is empty for all rows).")
+        logging.error(
+            "No frames available to upload (FramePath is empty for all rows)."
+        )
         return
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
 
-    logging.info(f"Connecting to Zooniverse as {config.zooniverse_user}...")
-    Panoptes.connect(username=config.zooniverse_user, password=config.zooniverse_password)
+    logging.info(f"Connecting to Zooniverse as {config.user}...")
+    Panoptes.connect(username=config.user, password=config.password)
     zoo_project = Project.find(config.zooniverse_project_id)
 
     set_name = subject_set_name or f"spyfish_{drop_id}_{n}images"
 
     # Check if subject set already exists
-    existing_sets = list(SubjectSet.where(project_id=zoo_project.id, display_name=set_name))
+    existing_sets = list(
+        SubjectSet.where(project_id=zoo_project.id, display_name=set_name)
+    )
     if existing_sets:
         logging.info(f"Using existing subject set: '{set_name}'")
         subject_set = existing_sets[0]
@@ -189,11 +211,15 @@ def upload_frames_to_zooniverse(
 
         subject = Subject()
         subject.links.project = zoo_project
-        subject.add_location({'image/jpeg': str(frame_path)})
+        subject.add_location({"image/jpeg": str(frame_path)})
         subject.metadata.update(meta)
         subject.save()
         new_subjects.append(subject)
         logging.info(f"  Saved: {frame_path.name} ({row.get('SelectionReason', '')})")
-    logging.info(f"!!!!! !!!! !!!This is what the rows have {uploadable.columns} check if metadata is good {meta}")
+    logging.info(
+        f"!!!!! !!!! !!!This is what the rows have {uploadable.columns} check if metadata is good {meta}"
+    )
     subject_set.add(new_subjects)
-    logging.info(f"Uploaded {len(new_subjects)}/{n} frames to subject set '{set_name}'.")
+    logging.info(
+        f"Uploaded {len(new_subjects)}/{n} frames to subject set '{set_name}'."
+    )
