@@ -23,20 +23,22 @@ Typical usage order:
 Usage (standalone):
     python -m spyfish.ml.training.prepare_training_data --images-dir /path/images --labels-dir /path/labels --output-dir /path/training
 """
+
 import argparse
 import logging
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import yaml
 
-from spyfish.config import config
+from spyfish.config.wrapper import config
 
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
 
 def compute_species_fractions(df: pd.DataFrame) -> pd.Series:
     """
@@ -51,7 +53,9 @@ def compute_species_fractions(df: pd.DataFrame) -> pd.Series:
     total = df["MaxInterval"].sum()
     if total == 0:
         return pd.Series(dtype=float)
-    return (df.groupby("ScientificName")["MaxInterval"].sum() / total).sort_values(ascending=False)
+    return (df.groupby("ScientificName")["MaxInterval"].sum() / total).sort_values(
+        ascending=False
+    )
 
 
 def _print_species_summary(df: pd.DataFrame, label: str = "Dataset") -> None:
@@ -68,6 +72,7 @@ def _print_species_summary(df: pd.DataFrame, label: str = "Dataset") -> None:
 # ---------------------------------------------------------------------------
 # Ceiling / floor balancing
 # ---------------------------------------------------------------------------
+
 
 def apply_ceiling(
     df: pd.DataFrame,
@@ -98,23 +103,28 @@ def apply_ceiling(
             logging.info(f"Ceiling satisfied after {iteration - 1} iteration(s).")
             break
 
-        logging.info(f"Ceiling iteration {iteration}: over-represented: {over_ceiling.to_dict()}")
+        logging.info(
+            f"Ceiling iteration {iteration}: over-represented: {over_ceiling.to_dict()}"
+        )
 
         for species, fraction in over_ceiling.items():
-            species_frames = df[df["ScientificName"] == species][["DropID", "TimeOfMax"]].drop_duplicates()
+            species_frames = df[df["ScientificName"] == species][
+                ["DropID", "TimeOfMax"]
+            ].drop_duplicates()
 
             # Score each frame by the number of distinct species it contains (diversity)
             diversity_scores = []
             for _, frame_row in species_frames.iterrows():
-                frame_mask = (
-                    (df["DropID"] == frame_row["DropID"]) &
-                    (df["TimeOfMax"] == frame_row["TimeOfMax"])
+                frame_mask = (df["DropID"] == frame_row["DropID"]) & (
+                    df["TimeOfMax"] == frame_row["TimeOfMax"]
                 )
-                diversity_scores.append({
-                    "DropID": frame_row["DropID"],
-                    "TimeOfMax": frame_row["TimeOfMax"],
-                    "diversity": int(df[frame_mask]["ScientificName"].nunique()),
-                })
+                diversity_scores.append(
+                    {
+                        "DropID": frame_row["DropID"],
+                        "TimeOfMax": frame_row["TimeOfMax"],
+                        "diversity": int(df[frame_mask]["ScientificName"].nunique()),
+                    }
+                )
 
             diversity_df = pd.DataFrame(diversity_scores).sort_values("diversity")
 
@@ -128,9 +138,8 @@ def apply_ceiling(
             removed = 0
             indices_to_drop = []
             for _, frame_row in diversity_df.iterrows():
-                frame_mask = (
-                    (df["DropID"] == frame_row["DropID"]) &
-                    (df["TimeOfMax"] == frame_row["TimeOfMax"])
+                frame_mask = (df["DropID"] == frame_row["DropID"]) & (
+                    df["TimeOfMax"] == frame_row["TimeOfMax"]
                 )
                 frame_interval_sum = int(df[frame_mask]["MaxInterval"].sum())
                 indices_to_drop.extend(df[frame_mask].index.tolist())
@@ -175,21 +184,23 @@ def apply_floor(df: pd.DataFrame, floor_pct: float) -> pd.DataFrame:
         logging.info("No species below floor threshold — no remapping needed.")
         return df
 
-    logging.info(f"Floor: remapping {len(rare_species)} rare species → 'fish': {rare_species}")
+    logging.info(
+        f"Floor: remapping {len(rare_species)} rare species → 'fish': {rare_species}"
+    )
     df = df.copy()
     df.loc[df["ScientificName"].isin(rare_species), "ScientificName"] = "fish"
 
     # Re-collapse duplicates after merge
-    df = (
-        df.groupby(["DropID", "ScientificName", "TimeOfMax", "AnnotatedBy"], as_index=False)
-        ["MaxInterval"].sum()
-    )
+    df = df.groupby(
+        ["DropID", "ScientificName", "TimeOfMax", "AnnotatedBy"], as_index=False
+    )["MaxInterval"].sum()
     return df
 
 
 # ---------------------------------------------------------------------------
 # DB → balanced DataFrame
 # ---------------------------------------------------------------------------
+
 
 def prepare_from_annotations(
     data_quality_dir: Optional[Path] = None,
@@ -215,7 +226,9 @@ def prepare_from_annotations(
     training_cfg = config.get_section("training")
     ceiling_pct = ceiling_pct or training_cfg.get("class_ceiling_pct", 0.40)
     floor_pct = floor_pct or training_cfg.get("class_floor_pct", 0.02)
-    ceiling_max_iterations = ceiling_max_iterations or training_cfg.get("ceiling_max_iterations", 3)
+    ceiling_max_iterations = ceiling_max_iterations or training_cfg.get(
+        "ceiling_max_iterations", 3
+    )
     data_quality_dir = data_quality_dir or config.data_quality_dir
 
     logging.info(f"Loading expert MaxN annotations from {data_quality_dir}...")
@@ -234,7 +247,9 @@ def prepare_from_annotations(
 
     # Standardize column naming to match what balancing logic expects
     # (BiigleParser.format_count_annotations_output already does most of this)
-    logging.info(f"Loaded {len(df)} expert MaxN rows from {df['DropID'].nunique()} drops.")
+    logging.info(
+        f"Loaded {len(df)} expert MaxN rows from {df['DropID'].nunique()} drops."
+    )
 
     # Ceiling first
     df = apply_ceiling(df, ceiling_pct, max_iterations=ceiling_max_iterations)
@@ -251,6 +266,7 @@ def prepare_from_annotations(
 # ---------------------------------------------------------------------------
 # Binary label creation from existing YOLO labels
 # ---------------------------------------------------------------------------
+
 
 def make_binary_labels(
     species_labels_dir: Path,
@@ -301,13 +317,16 @@ def make_binary_labels(
         dst_path.write_text("\n".join(binary_lines))
         processed += 1
 
-    logging.info(f"make_binary_labels: wrote {processed} binary label files → {binary_labels_dir}")
+    logging.info(
+        f"make_binary_labels: wrote {processed} binary label files → {binary_labels_dir}"
+    )
     return processed
 
 
 # ---------------------------------------------------------------------------
 # Dataset layout helpers
 # ---------------------------------------------------------------------------
+
 
 def copy_split_files(
     drop_ids: List[str],
@@ -350,7 +369,9 @@ def copy_split_files(
         # Target only the biigle_frames folder for this drop
         drop_biigle_frames = images_dir / drop_id / "biigle_frames"
         if not drop_biigle_frames.exists():
-            logging.debug(f"biigle_frames folder not found for {drop_id} at {drop_biigle_frames}")
+            logging.debug(
+                f"biigle_frames folder not found for {drop_id} at {drop_biigle_frames}"
+            )
             continue
 
         for ext in ("*.jpg", "*.jpeg", "*.png"):
@@ -401,7 +422,7 @@ def generate_data_yaml(
         "nc": len(class_names),
         "names": class_names,
         "train": str(output_dir / "images" / "train"),
-        "val":   str(output_dir / "images" / "val"),
+        "val": str(output_dir / "images" / "val"),
     }
 
     test_dir = output_dir / "images" / "test"
@@ -420,6 +441,7 @@ def generate_data_yaml(
 # ---------------------------------------------------------------------------
 # Convenience: build a full YOLO dataset from splits + labels in one call
 # ---------------------------------------------------------------------------
+
 
 def assemble_yolo_dataset(
     train_drops: List[str],
@@ -457,11 +479,22 @@ def assemble_yolo_dataset(
         (species_data_yaml_path, binary_data_yaml_path) — binary path is None if not built.
     """
     species_dir = output_dir / "species"
-    binary_dir  = output_dir / "binary"
+    binary_dir = output_dir / "binary"
 
     # Species dataset
-    for split_name, drops in [("train", train_drops), ("val", val_drops), ("test", test_drops)]:
-        copy_split_files(drops, images_dir, species_labels_dir, species_dir, split_name, symlink=symlink)
+    for split_name, drops in [
+        ("train", train_drops),
+        ("val", val_drops),
+        ("test", test_drops),
+    ]:
+        copy_split_files(
+            drops,
+            images_dir,
+            species_labels_dir,
+            species_dir,
+            split_name,
+            symlink=symlink,
+        )
     species_yaml = generate_data_yaml(class_names, species_dir)
 
     # Binary dataset (derived from species labels)
@@ -469,8 +502,19 @@ def assemble_yolo_dataset(
     if build_binary:
         binary_labels_dir = output_dir / "binary_labels_staging"
         make_binary_labels(species_labels_dir, binary_labels_dir)
-        for split_name, drops in [("train", train_drops), ("val", val_drops), ("test", test_drops)]:
-            copy_split_files(drops, images_dir, binary_labels_dir, binary_dir, split_name, symlink=symlink)
+        for split_name, drops in [
+            ("train", train_drops),
+            ("val", val_drops),
+            ("test", test_drops),
+        ]:
+            copy_split_files(
+                drops,
+                images_dir,
+                binary_labels_dir,
+                binary_dir,
+                split_name,
+                symlink=symlink,
+            )
         binary_yaml = generate_data_yaml(["fish"], binary_dir)
 
     return species_yaml, binary_yaml
@@ -480,18 +524,42 @@ def assemble_yolo_dataset(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
         description="Balance expert annotations and prepare YOLO training data."
     )
-    parser.add_argument("--images-dir",  required=True, type=Path, help="Source JPEG frames directory")
-    parser.add_argument("--labels-dir",  required=True, type=Path, help="Multi-class YOLO .txt labels directory")
-    parser.add_argument("--output-dir",  required=True, type=Path, help="Root output directory")
-    parser.add_argument("--ceiling-pct", type=float, default=None, help="Max species fraction (overrides config)")
-    parser.add_argument("--floor-pct",   type=float, default=None, help="Min species fraction (overrides config)")
-    parser.add_argument("--no-binary",   action="store_true",      help="Skip binary dataset creation")
-    parser.add_argument("--symlink",     action="store_true",      help="Symlink files instead of copying")
+    parser.add_argument(
+        "--images-dir", required=True, type=Path, help="Source JPEG frames directory"
+    )
+    parser.add_argument(
+        "--labels-dir",
+        required=True,
+        type=Path,
+        help="Multi-class YOLO .txt labels directory",
+    )
+    parser.add_argument(
+        "--output-dir", required=True, type=Path, help="Root output directory"
+    )
+    parser.add_argument(
+        "--ceiling-pct",
+        type=float,
+        default=None,
+        help="Max species fraction (overrides config)",
+    )
+    parser.add_argument(
+        "--floor-pct",
+        type=float,
+        default=None,
+        help="Min species fraction (overrides config)",
+    )
+    parser.add_argument(
+        "--no-binary", action="store_true", help="Skip binary dataset creation"
+    )
+    parser.add_argument(
+        "--symlink", action="store_true", help="Symlink files instead of copying"
+    )
     args = parser.parse_args()
 
     df, species_class_names = prepare_from_annotations(
@@ -505,7 +573,9 @@ def main():
     df.to_csv(balanced_csv, index=False)
     logging.info(f"Saved balanced annotations → {balanced_csv}")
     logging.info(f"Species classes ({len(species_class_names)}): {species_class_names}")
-    logging.info("Run split_data.py next to generate train/val/test splits, then assemble_yolo_dataset().")
+    logging.info(
+        "Run split_data.py next to generate train/val/test splits, then assemble_yolo_dataset()."
+    )
 
 
 if __name__ == "__main__":

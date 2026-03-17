@@ -1,18 +1,21 @@
-import sqlite3
 import logging
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+import sqlite3
 from contextlib import closing
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
 
-from spyfish.config import config
+from spyfish.config.wrapper import config
+
 
 class AnnotationDatabaseManager:
     """
     Manages the spyfish_annotations.db which stores detailed individual annotation records
     from ML, Expert (Biigle), and Citizen Science sources.
     """
-    def __init__(self, db_path: str = None):
+
+    def __init__(self, db_path: Optional[str] = None):
         if db_path:
             self.db_path = str(Path(db_path).absolute())
         else:
@@ -33,7 +36,8 @@ class AnnotationDatabaseManager:
             cursor = conn.cursor()
             # Schema migration is complete — do not drop table again
             # cursor.execute('DROP TABLE IF EXISTS annotations')
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS annotations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     drop_id TEXT NOT NULL,
@@ -46,10 +50,13 @@ class AnnotationDatabaseManager:
                     external_id TEXT, -- e.g. Biigle annotation ID
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
+            """
+            )
 
             # Index for fast aggregation by drop_id and source (annotated_by)
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drop_source ON annotations(drop_id, annotated_by)')
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_drop_source ON annotations(drop_id, annotated_by)"
+            )
             conn.commit()
 
     def add_annotations(self, annotations: List[Dict[str, Any]]):
@@ -58,20 +65,28 @@ class AnnotationDatabaseManager:
             return
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany('''
+            cursor.executemany(
+                """
                 INSERT INTO annotations (drop_id, scientific_name, time_of_max, max_interval, annotated_by, interval_annotation, confidence_agreement, external_id)
                 VALUES (:drop_id, :scientific_name, :time_of_max, :max_interval, :annotated_by, :interval_annotation, :confidence_agreement, :external_id)
-            ''', annotations)
+            """,
+                annotations,
+            )
             conn.commit()
 
     def clear_annotations(self, drop_id: str, annotated_by: str):
         """Clears existing annotations for a given drop and source (annotated_by)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM annotations WHERE drop_id = ? AND annotated_by = ?", (drop_id, annotated_by))
+            cursor.execute(
+                "DELETE FROM annotations WHERE drop_id = ? AND annotated_by = ?",
+                (drop_id, annotated_by),
+            )
             conn.commit()
 
-    def get_annotations_for_drop(self, drop_id: str, annotated_by: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_annotations_for_drop(
+        self, drop_id: str, annotated_by: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Retrieve annotations for a drop, optionally filtered by source."""
         query = "SELECT * FROM annotations WHERE drop_id = ?"
         params = [drop_id]
@@ -88,13 +103,16 @@ class AnnotationDatabaseManager:
         """Get the total annotation count (sum of 'max_interval') per source ('annotated_by') for a drop."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT annotated_by as source, SUM(max_interval) as total
                 FROM annotations
                 WHERE drop_id = ?
                 GROUP BY annotated_by
-            ''', (drop_id,))
-            return {row['source']: row['total'] for row in cursor.fetchall()}
+            """,
+                (drop_id,),
+            )
+            return {row["source"]: row["total"] for row in cursor.fetchall()}
 
     def get_all_annotations_export_df(self) -> Optional[pd.DataFrame]:
         """
@@ -103,6 +121,7 @@ class AnnotationDatabaseManager:
         IntervalAnnotation, ConfidenceAgreement.
         """
         import pandas as pd
+
         with self.get_connection() as conn:
             df = pd.read_sql_query("SELECT * FROM annotations", conn)
 
@@ -110,21 +129,27 @@ class AnnotationDatabaseManager:
             return None
 
         # Map internal schema strictly to requested export columns using the exact casing
-        df = df.rename(columns={
-            "drop_id": config.drop_id_column,
-            "scientific_name": config.csv_scientific_name_column,
-            "time_of_max": config.csv_maxn_time_column,
-            "max_interval": config.csv_max_interval_column,
-            "annotated_by": config.csv_annotated_by_column,
-            "interval_annotation": config.csv_interval_annotation_column,
-            "confidence_agreement": config.csv_confidence_agreement_column
-        })
+        df = df.rename(
+            columns={
+                "drop_id": config.drop_id_column,
+                "scientific_name": config.csv_scientific_name_column,
+                "time_of_max": config.csv_maxn_time_column,
+                "max_interval": config.csv_max_interval_column,
+                "annotated_by": config.csv_annotated_by_column,
+                "interval_annotation": config.csv_interval_annotation_column,
+                "confidence_agreement": config.csv_confidence_agreement_column,
+            }
+        )
 
         # We drop any internal columns (like id, external_id, created_at) by strictly selecting
         export_cols = [
-            config.drop_id_column, config.csv_scientific_name_column, config.csv_maxn_time_column,
-            config.csv_max_interval_column, config.csv_annotated_by_column,
-            config.csv_interval_annotation_column, config.csv_confidence_agreement_column
+            config.drop_id_column,
+            config.csv_scientific_name_column,
+            config.csv_maxn_time_column,
+            config.csv_max_interval_column,
+            config.csv_annotated_by_column,
+            config.csv_interval_annotation_column,
+            config.csv_confidence_agreement_column,
         ]
 
         return df[export_cols]

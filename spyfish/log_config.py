@@ -1,7 +1,9 @@
 import logging
-import os
 from datetime import datetime as dt
 from pathlib import Path
+
+from spyfish.config.wrapper import config
+
 
 def _set_logging_path() -> str:
     """
@@ -13,12 +15,13 @@ def _set_logging_path() -> str:
     Returns:
         str: The path to the log file.
     """
-    from spyfish.config import config
+
     log_dir = config.logs_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     log_filename = dt.strftime(dt.now(), "%Y-%m-%d_%H-%M-%S") + ".log"
     log_file = log_dir / log_filename
     return str(log_file)
+
 
 def clear_logs_directory() -> None:
     """
@@ -31,7 +34,6 @@ def clear_logs_directory() -> None:
         if log_file != Path(LOG_PATH) and log_file.is_file():
             log_file.unlink()
 
-from spyfish.config import config
 
 LOG_PATH = None
 
@@ -52,6 +54,7 @@ else:
         format=format_string,
         force=True,
     )
+
 
 def log_header(title: str, character: str = "═"):
     """Logs a visually distinct header for a pipeline step."""

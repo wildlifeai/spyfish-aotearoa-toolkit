@@ -12,23 +12,28 @@ Separation of concerns:
   - extract_clips.py → cut video clips
   - extract_frames.py (THIS FILE) → grab the single decisive frame
 """
-import cv2
+
 import json
 import logging
 import os
-import subprocess
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import pandas as pd
 
-from spyfish.config import config
+from spyfish.config.wrapper import config
 from spyfish.utils import generate_frame_filename
-
 
 # ── ffmpeg frame extraction ──────────────────────────────────────────────────
 
-def extract_frame(video_path: str, seek_seconds: float, out_path: Path, frame_index: Optional[int] = None) -> bool:
+
+def extract_frame(
+    video_path: str,
+    seek_seconds: float,
+    out_path: Path,
+    frame_index: Optional[int] = None,
+) -> bool:
     """
     Extract a single JPEG frame from a video at the given seek position using OpenCV.
     Using cv2 (instead of ffmpeg) ensures 100% parity with the YOLO inference stream.
@@ -53,13 +58,16 @@ def extract_frame(video_path: str, seek_seconds: float, out_path: Path, frame_in
     if ret:
         cv2.imwrite(str(out_path), frame)
     else:
-        logging.error(f"cv2 failed to read frame at {'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}")
+        logging.error(
+            f"cv2 failed to read frame at {'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}"
+        )
 
     cap.release()
     return ret
 
 
 # ── YOLO → COCO conversion ───────────────────────────────────────────────────
+
 
 def yolo_to_coco_bbox(cx: float, cy: float, w: float, h: float) -> list[float]:
     """
@@ -70,7 +78,9 @@ def yolo_to_coco_bbox(cx: float, cy: float, w: float, h: float) -> list[float]:
 
 def build_coco_from_raw_csv(
     raw_csv_path: str,
-    frame_records: list[dict],   # [{image_id, file_name, time_of_max, img_w, img_h}, ...]
+    frame_records: list[
+        dict
+    ],  # [{image_id, file_name, time_of_max, img_w, img_h}, ...]
     img_w: int = 0,
     img_h: int = 0,
 ) -> dict:
@@ -87,7 +97,9 @@ def build_coco_from_raw_csv(
     Returns:
         COCO dict ready for json.dump().
     """
-    raw_df = pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+    raw_df = (
+        pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+    )
 
     categories: dict[str, int] = {}
     images = []
@@ -98,21 +110,25 @@ def build_coco_from_raw_csv(
         img_id = rec["image_id"]
         time_of_max = rec["time_of_max"]  # seconds relative to sampling_start
 
-        images.append({
-            "id": img_id,
-            "file_name": rec["file_name"],
-            "width": rec.get("img_w", img_w),
-            "height": rec.get("img_h", img_h),
-            "time_of_max": time_of_max,
-            "drop_id": rec.get("drop_id", ""),
-            "selection_reason": rec.get("selection_reason", ""),
-        })
+        images.append(
+            {
+                "id": img_id,
+                "file_name": rec["file_name"],
+                "width": rec.get("img_w", img_w),
+                "height": rec.get("img_h", img_h),
+                "time_of_max": time_of_max,
+                "drop_id": rec.get("drop_id", ""),
+                "selection_reason": rec.get("selection_reason", ""),
+            }
+        )
 
         if raw_df.empty:
             continue
 
         # Find the raw CSV frame closest to this time_of_max
-        nearest_frame_rows = raw_df.iloc[(raw_df["time_seconds"] - time_of_max).abs().argsort()[:1]]
+        nearest_frame_rows = raw_df.iloc[
+            (raw_df["time_seconds"] - time_of_max).abs().argsort()[:1]
+        ]
         if nearest_frame_rows.empty:
             continue
 
@@ -128,26 +144,32 @@ def build_coco_from_raw_csv(
             bbox = yolo_to_coco_bbox(row["x"], row["y"], row["w"], row["h"])
 
             ann_id += 1
-            annotations.append({
-                "id": ann_id,
-                "image_id": img_id,
-                "category_id": categories[cls_name],
-                "bbox": bbox,
-                "area": round(bbox[2] * bbox[3], 2),
-                "iscrowd": 0,
-                "score": round(float(row.get("confidence", 0.0)), 4),
-                # TODO check if it works with this
-            })
+            annotations.append(
+                {
+                    "id": ann_id,
+                    "image_id": img_id,
+                    "category_id": categories[cls_name],
+                    "bbox": bbox,
+                    "area": round(bbox[2] * bbox[3], 2),
+                    "iscrowd": 0,
+                    "score": round(float(row.get("confidence", 0.0)), 4),
+                    # TODO check if it works with this
+                }
+            )
 
     return {
         "info": {"description": "Spyfish Aotearoa — ML MaxN peaks", "version": "1.0"},
         "images": images,
         "annotations": annotations,
-        "categories": [{"id": cat_id, "name": name} for name, cat_id in sorted(categories.items(), key=lambda x: x[1])],
+        "categories": [
+            {"id": cat_id, "name": name}
+            for name, cat_id in sorted(categories.items(), key=lambda x: x[1])
+        ],
     }
 
 
 # ── main function ─────────────────────────────────────────────────────────────
+
 
 def extract_frames_from_selections(
     selections_csv_path: str,
@@ -190,9 +212,15 @@ def extract_frames_from_selections(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     drop_id = df[config.drop_id_column].iloc[0]
-    sampling_start = int(df[config.csv_sampling_start_column].iloc[0]) if config.csv_sampling_start_column in df.columns else 0
+    sampling_start = (
+        int(df[config.csv_sampling_start_column].iloc[0])
+        if config.csv_sampling_start_column in df.columns
+        else 0
+    )
 
-    raw_df = pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+    raw_df = (
+        pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+    )
 
     # Read video dimensions once from metadata
     cap = cv2.VideoCapture(str(video_path))
@@ -201,7 +229,9 @@ def extract_frames_from_selections(
     cap.release()
 
     if vid_w == 0 or vid_h == 0:
-        logging.warning(f"Could not read video dimensions for {video_path}. COCO image sizes will default to 0.")
+        logging.warning(
+            f"Could not read video dimensions for {video_path}. COCO image sizes will default to 0."
+        )
 
     frame_records = []
     frame_paths = []
@@ -216,28 +246,36 @@ def extract_frames_from_selections(
         if not raw_df.empty:
             # Find the nearest frame in the raw ML CSV to this peak time
             # Using the exact same matching logic as the COCO builder ensures alignment
-            nearest = raw_df.iloc[(raw_df["time_seconds"] - time_of_max_relative).abs().argsort()[:1]]
+            nearest = raw_df.iloc[
+                (raw_df["time_seconds"] - time_of_max_relative).abs().argsort()[:1]
+            ]
             if not nearest.empty:
                 frame_index = int(nearest["frame"].iloc[0])
 
         out_filename = generate_frame_filename(drop_id, seek_seconds)
         out_path = out_dir / out_filename
 
-        logging.info(f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}")
-        success = extract_frame(video_path, seek_seconds, out_path, frame_index=frame_index)
+        logging.info(
+            f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
+        )
+        success = extract_frame(
+            video_path, seek_seconds, out_path, frame_index=frame_index
+        )
         frame_paths.append(str(out_path) if success else None)
 
         img_w, img_h = vid_w, vid_h
 
-        frame_records.append({
-            "image_id": img_id,
-            "file_name": out_filename,
-            "time_of_max": time_of_max_relative,
-            "drop_id": drop_id,
-            "selection_reason": row.get("SelectionReason", ""),
-            "img_w": img_w,
-            "img_h": img_h,
-        })
+        frame_records.append(
+            {
+                "image_id": img_id,
+                "file_name": out_filename,
+                "time_of_max": time_of_max_relative,
+                "drop_id": drop_id,
+                "selection_reason": row.get("SelectionReason", ""),
+                "img_w": img_w,
+                "img_h": img_h,
+            }
+        )
 
     df["FramePath"] = frame_paths
 
@@ -251,8 +289,12 @@ def extract_frames_from_selections(
     coco_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
     with open(coco_path, "w") as f:
         json.dump(coco, f, indent=2)
-    logging.info(f"COCO annotations → {coco_path} ({len(coco['images'])} images, {len(coco['annotations'])} annotations)")
+    logging.info(
+        f"COCO annotations → {coco_path} ({len(coco['images'])} images, {len(coco['annotations'])} annotations)"
+    )
 
     successful = df["FramePath"].notna().sum()
-    logging.info(f"Extracted {successful}/{len(df)} frames for {drop_id} → {output_dir}")
+    logging.info(
+        f"Extracted {successful}/{len(df)} frames for {drop_id} → {output_dir}"
+    )
     return df

@@ -5,15 +5,25 @@ The raw CSV `time_seconds` column is ML-relative (starts at 0 from SamplingStart
 To seek the correct video frame, we add sampling_start back to get the absolute video time.
 The output filename uses the absolute video time for easy cross-referencing.
 """
+
+import logging
 import os
+
 import cv2
 import pandas as pd
-import logging
+
 from spyfish.utils import generate_frame_filename
 
 
-def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
-                         confidence_threshold, sampling_start, drop_id="UNKNOWN"):
+def draw_boxes_on_video_frames(
+    video_path,
+    raw_csv_path,
+    output_dir,
+    frame_list,
+    confidence_threshold,
+    sampling_start,
+    drop_id="UNKNOWN",
+):
     """
     Draws ML bounding boxes on specific frames and saves them as JPEGs.
 
@@ -43,11 +53,10 @@ def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
         logging.error(f"Failed to open video: {video_path}")
         return []
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
     saved_frames = []
 
     for csv_frame in frame_list:
-        frame_rows = df[df['frame'] == csv_frame]
+        frame_rows = df[df["frame"] == csv_frame]
         if frame_rows.empty:
             logging.warning(f"No CSV data for frame {csv_frame}")
             continue
@@ -56,7 +65,7 @@ def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
         video_frame_num = csv_frame
 
         # Calculate absolute video time for filename matching (sampling_start + ML relative time)
-        ml_time = frame_rows['time_seconds'].iloc[0]
+        ml_time = frame_rows["time_seconds"].iloc[0]
         video_time = ml_time + sampling_start
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, video_frame_num)
@@ -67,22 +76,29 @@ def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
 
         # Draw boxes — YOLO xywh format: x,y are CENTER, w,h are width/height
         for _, row in frame_rows.iterrows():
-            if row['confidence'] < confidence_threshold:
+            if row["confidence"] < confidence_threshold:
                 continue
 
-            cx, cy, w, h = row['x'], row['y'], row['w'], row['h']
+            cx, cy, w, h = row["x"], row["y"], row["w"], row["h"]
             x1 = int(cx - w / 2)
             y1 = int(cy - h / 2)
             x2 = int(cx + w / 2)
             y2 = int(cy + h / 2)
 
-            conf = row['confidence']
-            cls = row['class']
+            conf = row["confidence"]
+            cls = row["class"]
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             label = f"{cls} {conf:.2f}"
-            cv2.putText(frame, label, (x1, max(y1 - 10, 0)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(y1 - 10, 0)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 255, 0),
+                2,
+            )
 
         # Filename uses absolute video time
         out_filename = generate_frame_filename(drop_id, video_time)
@@ -90,7 +106,9 @@ def draw_boxes_on_video_frames(video_path, raw_csv_path, output_dir, frame_list,
         out_path = os.path.join(output_dir, out_filename)
         cv2.imwrite(out_path, frame)
         saved_frames.append(out_path)
-        logging.info(f"Saved {out_path} (csv_frame={csv_frame}, video_frame={video_frame_num})")
+        logging.info(
+            f"Saved {out_path} (csv_frame={csv_frame}, video_frame={video_frame_num})"
+        )
 
     cap.release()
     return saved_frames

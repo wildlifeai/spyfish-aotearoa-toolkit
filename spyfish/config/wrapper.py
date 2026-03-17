@@ -1,0 +1,11 @@
+from spyfish.config.base import PipelineStatus, get_required
+from spyfish.config.aws import AWSConfig
+from spyfish.config.zooniverse import ZooniverseConfig
+from spyfish.config.biigle import BiigleConfig
+from spyfish.config.ml import MLConfig
+from spyfish.config.paths import PathsConfig
+
+class ConfigWrapper(PathsConfig, MLConfig, BiigleConfig, ZooniverseConfig, AWSConfig):
+    pass
+
+config = ConfigWrapper()

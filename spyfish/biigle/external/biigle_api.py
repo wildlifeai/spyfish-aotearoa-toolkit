@@ -5,8 +5,8 @@
 import copy
 import os
 
-import requests
-from requests.auth import HTTPBasicAuth
+import requests  # type: ignore
+from requests.auth import HTTPBasicAuth  # type: ignore
 
 
 class Api(object):

@@ -9,12 +9,14 @@ numpy==2.2.4
 openpyxl>=3.1.5
 packaging==24.2
 pandas==2.2.3
+panoptes-client==1.7.1
 pluggy==1.5.0
 pre_commit==4.2.0
 pytest==8.3.5
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 pytz==2025.1
+pyyaml
 requests>=2.32.3
 s3transfer==0.11.4
 six==1.17.0
@@ -23,5 +25,3 @@ tomli==2.2.1
 tqdm==4.67.1
 tzdata==2025.1
 urllib3==2.3.0
-pyyaml
-panoptes-client==1.7.1

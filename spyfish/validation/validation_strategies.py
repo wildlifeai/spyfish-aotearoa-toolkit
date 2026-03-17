@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
 
-from spyfish.config import config
+from spyfish.config.wrapper import config
 from spyfish.utils import normalize_file_name
 
 DROP_ID_COLUMN = config.drop_id_column
@@ -143,7 +143,7 @@ def validate_unique(
     max_errors: int = 10000,
 ) -> List[ErrorChecking]:
     """Validate unique column constraints."""
-    errors = []
+    errors: List[ErrorChecking] = []
     file_name = normalize_file_name(rules.get("file_name", ""))
     unique_cols = rules.get("unique", [])
 
@@ -179,7 +179,7 @@ def validate_foreign_keys(
     max_errors: int = 10000,
 ) -> List[ErrorChecking]:
     """Validate foreign key relationships."""
-    errors = []
+    errors: List[ErrorChecking] = []
     source_file = normalize_file_name(rules.get("file_name", ""))
     foreign_keys = rules.get("foreign_keys", {})
 
@@ -261,7 +261,7 @@ def validate_required(
     dataset_name: Optional[str] = None,
 ) -> List[ErrorChecking]:
     """Check required columns have values (vectorized)."""
-    errors = []
+    errors: List[ErrorChecking] = []
     required_cols = rules.get("required", [])
     info_columns = rules.get("info_columns", [])
 
@@ -303,7 +303,7 @@ def validate_formats(
     dataset_name: Optional[str] = None,
 ) -> List[ErrorChecking]:
     """Check format patterns (vectorized)."""
-    errors = []
+    errors: List[ErrorChecking] = []
     format_columns = rules.get("formats", [])
 
     for col in format_columns:
@@ -349,7 +349,7 @@ def validate_values(
     dataset_name: Optional[str] = None,
 ) -> List[ErrorChecking]:
     """Check value ranges (vectorized)."""
-    errors = []
+    errors: List[ErrorChecking] = []
     value_rules = rules.get("values", [])
 
     for value_rule in value_rules:
@@ -414,7 +414,7 @@ def validate_relationships(
     dataset_name: Optional[str] = None,
 ) -> List[ErrorChecking]:
     """Check column relationships (vectorized where possible)."""
-    errors = []
+    errors: List[ErrorChecking] = []
     relationships = rules.get("relationships", [])
 
     for relationship in relationships:
@@ -510,7 +510,9 @@ class FilePresenceValidator:
             )
         return None, None
 
-    def validate(self, rules: Dict[str, Any], known_files: Optional[Set[str]] = None) -> List[ErrorChecking]:
+    def validate(
+        self, rules: Dict[str, Any], known_files: Optional[Set[str]] = None
+    ) -> List[ErrorChecking]:
         """Validate file presence between CSV references and S3 storage."""
         errors: List[ErrorChecking] = []
         file_presence_config = rules.get("file_presence", {})
@@ -519,7 +521,9 @@ class FilePresenceValidator:
 
         csv_filename = file_presence_config.get("csv_filename")
         try:
-            _, missing_files, extra_files = self.get_file_differences(rules, known_files=known_files)
+            _, missing_files, extra_files = self.get_file_differences(
+                rules, known_files=known_files
+            )
 
             for file_path in missing_files:
                 if len(errors) >= self.max_errors:
@@ -560,7 +564,9 @@ class FilePresenceValidator:
             )
         return errors
 
-    def get_file_differences(self, rules: Dict[str, Any], known_files: Optional[Set[str]] = None) -> tuple[set, set, set]:
+    def get_file_differences(
+        self, rules: Dict[str, Any], known_files: Optional[Set[str]] = None
+    ) -> tuple[set, set, set]:
         """Get file differences between CSV references and S3 storage."""
         file_presence_config = rules.get("file_presence", {})
         if not file_presence_config:
@@ -631,7 +637,7 @@ class DatasetValidator:
         if missing_col_errors:
             return missing_col_errors
 
-        errors = []
+        errors: List[ErrorChecking] = []
 
         # Dataset-level validations
         errors.extend(validate_unique(df, self.rules, self.tracker, dataset_name))
@@ -675,7 +681,7 @@ class DatasetValidator:
         values, and relationships validations. Foreign key column checks are
         handled separately in validate_foreign_keys due to cross-dataset logic.
         """
-        errors = []
+        errors: List[ErrorChecking] = []
         df_columns = set(df.columns)
 
         # Collect all columns that need to exist

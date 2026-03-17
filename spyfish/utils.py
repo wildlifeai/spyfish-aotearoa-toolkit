@@ -1,12 +1,14 @@
+import logging
 import os
 import re
-import logging
-from typing import Set, Iterable, List, Optional, Any
-import pandas as pd
-import numpy as np
 from pathlib import Path
-from spyfish.config import config
-from spyfish.config import PipelineStatus
+from typing import Any, Iterable, List, Optional
+
+import numpy as np
+import pandas as pd
+
+from spyfish.config.base import PipelineStatus
+from spyfish.config.wrapper import config
 
 
 def delete_file(filename: str):
@@ -62,26 +64,28 @@ def get_unique_entries_df_column(
 
     return csv_filepaths
 
+
 def extract_survey_id(drop_id_series: pd.Series) -> pd.Series:
     """
     Extracts the SurveyID from a pandas Series of DropIDs using the config format regex.
     """
-    pattern = getattr(config, 'validation_rules', {}).get('formats', {}).get('SurveyID', r'^([A-Z]{3}_\d{8}_BUV)')
-
-    if pattern.endswith('$'):
-        pattern = pattern[:-1]
-    if not pattern.startswith('('):
+    # The SurveyID pattern is a full-match pattern (e.g. ^ABC_12345678_BUV$).
+    # We strip the anchors and wrap in a capture group for str.extract.
+    raw = config.validation_patterns.get(config.survey_id_column, r"^[A-Z]{3}_\d{8}_BUV$")
+    pattern = raw.lstrip("^").rstrip("$")
+    if not pattern.startswith("("):
         pattern = f"({pattern})"
 
-    # Extract returns a dataframe of capture groups. We just want the first capture group.
     extracted = drop_id_series.str.extract(pattern, expand=True)
     return extracted[0].fillna("UNKNOWN")
+
 
 def normalize_file_name(file_name: Any) -> str:
     """Normalize file name by extracting just the filename from a path."""
     if isinstance(file_name, (str, Path)):
         return Path(file_name).name
     return str(file_name)
+
 
 def convert_int_num_columns_to_int(df: pd.DataFrame) -> pd.DataFrame:
     """Convert numeric columns with whole numbers to nullable integers in-place."""
@@ -90,6 +94,7 @@ def convert_int_num_columns_to_int(df: pd.DataFrame) -> pd.DataFrame:
         if not series_no_na.empty and np.all(series_no_na == series_no_na.astype(int)):
             df[col] = df[col].astype("Int64")
     return df
+
 
 def write_data_to_file(data_str: str, output_path: str) -> None:
     """Write data to a text file."""
@@ -101,11 +106,12 @@ def write_data_to_file(data_str: str, output_path: str) -> None:
         logging.error(f"Failed to write file paths to {output_path}: {e}")
         raise
 
+
 def time_to_seconds(time_str: str) -> float:
     """Converts a time string (HH:MM:SS or HH:MM:SS.mmm) to seconds."""
     if pd.isna(time_str):
         return 0.0
-    parts = str(time_str).split(':')
+    parts = str(time_str).split(":")
     if len(parts) == 3:
         h = int(parts[0])
         m = int(parts[1])
@@ -117,6 +123,7 @@ def time_to_seconds(time_str: str) -> float:
         return m * 60.0 + s
     else:
         return float(parts[0])
+
 
 def seconds_to_time(seconds: float) -> str:
     """Converts seconds to HH:MM:SS.mmm format."""
@@ -137,36 +144,51 @@ def seconds_to_time(seconds: float) -> str:
                 h += 1
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
+
 def get_survey_summary(deployment_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregates deployment data to summarize status and progress by Survey."""
     if deployment_df.empty:
         return pd.DataFrame()
 
-    survey_summary = deployment_df.groupby("SurveyID").agg(
-        TotalDeployments=("DropID", "nunique"),
-        CompleteDeployments=("Complete", "sum"),
-        BadDeployments=("IsBadDeployment", "sum"),
-        NeedsAction=("NeedsAction", "sum"),
-        VideosPresent=("Status", lambda x: x.isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()),
-        MLAnnotated=("MlAnnotations", lambda x: (x > 0).sum()),
-        CitSciAnnotated=("CitSciAnnotations", lambda x: (x > 0).sum()),
-        ExpertAnnotated=("ExpertAnnotations", lambda x: (x > 0).sum())
-    ).reset_index()
+    survey_summary = (
+        deployment_df.groupby("SurveyID")
+        .agg(
+            TotalDeployments=("DropID", "nunique"),
+            CompleteDeployments=("Complete", "sum"),
+            BadDeployments=("IsBadDeployment", "sum"),
+            NeedsAction=("NeedsAction", "sum"),
+            VideosPresent=(
+                "Status",
+                lambda x: x.isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum(),
+            ),
+            MLAnnotated=("MlAnnotations", lambda x: (x > 0).sum()),
+            CitSciAnnotated=("CitSciAnnotations", lambda x: (x > 0).sum()),
+            ExpertAnnotated=("ExpertAnnotations", lambda x: (x > 0).sum()),
+        )
+        .reset_index()
+    )
 
     # Calculate percentages cleanly: (Bad + Expert) / Total
     survey_summary["CompletionPct"] = (
-        ((survey_summary["BadDeployments"] + survey_summary["ExpertAnnotated"]) / survey_summary["TotalDeployments"]) * 100
+        (
+            (survey_summary["BadDeployments"] + survey_summary["ExpertAnnotated"])
+            / survey_summary["TotalDeployments"]
+        )
+        * 100
     ).round(1).astype(str) + "%"
 
     return survey_summary
+
 
 def generate_clip_filename(drop_id: str, duration: float, start_seconds: float) -> str:
     """Standardizes Zooniverse/Biigle MP4 clip naming."""
     return f"{drop_id}__clip_{int(duration):02d}s_{int(start_seconds):05d}s.mp4"
 
+
 def generate_frame_filename(drop_id: str, time_seconds: float) -> str:
     """Standardizes Zooniverse/Biigle JPEG frame naming."""
     return f"{drop_id}__frame_{time_seconds:.3f}s.jpg"
+
 
 def validate_model_path(model_path: str | Path) -> Path:
     """
@@ -178,15 +200,22 @@ def validate_model_path(model_path: str | Path) -> Path:
 
     # 1. Check extension
     if path.suffix != ".pt":
-        raise ValueError(f"Security Alert: Invalid model extension: '{path.suffix}'. Only .pt files are allowed.")
+        raise ValueError(
+            f"Security Alert: Invalid model extension: '{path.suffix}'. Only .pt files are allowed."
+        )
 
     # 2. Check for path traversal characters in the input string (redundant but safe)
     if ".." in str(model_path):
-         raise ValueError(f"Security Alert: Potential path traversal in model path: '{model_path}'")
+        raise ValueError(
+            f"Security Alert: Potential path traversal in model path: '{model_path}'"
+        )
 
     # 3. Define trusted roots
     training_cfg = config.get_section("training")
-    local_training_root = (config.project_root / training_cfg.get("local_training_dir", "process_files/training")).resolve()
+    local_training_root = (
+        config.project_root
+        / training_cfg.get("local_training_dir", "process_files/training")
+    ).resolve()
     models_root = config.models_root_dir.resolve()
 
     # 4. Check if path is within trusted roots
@@ -201,9 +230,22 @@ def validate_model_path(model_path: str | Path) -> Path:
 
     if not is_safe:
         # Check for allowed default weights (names only)
-        allowed_defaults = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
-                            "yolov11n.pt", "yolov11s.pt", "yolov11m.pt", "yolov11l.pt", "yolov11x.pt",
-                            "yolov12n.pt", "yolov12s.pt", "yolov12m.pt", "yolov12x.pt"]
+        allowed_defaults = [
+            "yolov8n.pt",
+            "yolov8s.pt",
+            "yolov8m.pt",
+            "yolov8l.pt",
+            "yolov8x.pt",
+            "yolov11n.pt",
+            "yolov11s.pt",
+            "yolov11m.pt",
+            "yolov11l.pt",
+            "yolov11x.pt",
+            "yolov12n.pt",
+            "yolov12s.pt",
+            "yolov12m.pt",
+            "yolov12x.pt",
+        ]
         if path.name in allowed_defaults:
             return path
 
@@ -214,17 +256,19 @@ def validate_model_path(model_path: str | Path) -> Path:
 
     return path
 
+
 def get_survey_id_from_drop(drop_id: str) -> str:
     """Derive SurveyID from DropID using the config format regex."""
-    pattern = getattr(config, 'validation_rules', {}).get('formats', {}).get('SurveyID', r'^([A-Z]{3}_\d{8}_BUV)')
-
-    # Ensure capture groups if not present (to match str.extract behavior in extract_survey_id)
-    if not pattern.startswith('('):
+    raw = config.validation_patterns.get(config.survey_id_column, r"^[A-Z]{3}_\d{8}_BUV$")
+    pattern = raw.lstrip("^").rstrip("$")
+    if not pattern.startswith("("):
         pattern = f"({pattern})"
 
     match = re.search(pattern, drop_id)
     if not match:
-        logging.warning(f"Could not extract SurveyID from DropID '{drop_id}'. Grouping under 'UNKNOWN_SURVEY'.")
+        logging.warning(
+            f"Could not extract SurveyID from DropID '{drop_id}'. Grouping under 'UNKNOWN_SURVEY'."
+        )
         return "UNKNOWN_SURVEY"
 
     return match.group(1)

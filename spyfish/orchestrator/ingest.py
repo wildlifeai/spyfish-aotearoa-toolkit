@@ -1,16 +1,16 @@
-import os
-import argparse
 import logging
-from typing import Set, Optional
-from pathlib import Path
+from typing import Optional, Set
+
 import pandas as pd
 
-from spyfish.config import config, PipelineStatus
+from spyfish.config.base import PipelineStatus
+from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
-from spyfish.validation.data_validator import DataValidator
 from spyfish.storage.s3_handler import S3Handler
+from spyfish.validation.data_validator import DataValidator
 
-def check_pending_arrivals(known_files: Set[str] = None):
+
+def check_pending_arrivals(known_files: Optional[Set[str]] = None):
     """
     Checks S3 for videos of deployments in PENDING_ARRIVAL status.
     Advances them to READY_FOR_ML if found.
@@ -39,58 +39,82 @@ def check_pending_arrivals(known_files: Set[str] = None):
         video_path = drop["video_path"]
 
         if video_path and video_path in known_files:
-            logging.info(f"✅ Video confirmed for {drop_id}. Updating status to {PipelineStatus.READY_FOR_ML}.")
+            logging.info(
+                f"✅ Video confirmed for {drop_id}. Updating status to {PipelineStatus.READY_FOR_ML}."
+            )
             db.update_status(drop_id, PipelineStatus.READY_FOR_ML)
             updated_count += 1
 
-    logging.info(f"Arrival check complete. Advanced {updated_count} drops to {PipelineStatus.READY_FOR_ML}.")
+    logging.info(
+        f"Arrival check complete. Advanced {updated_count} drops to {PipelineStatus.READY_FOR_ML}."
+    )
+
 
 def run_ingestion():
     logging.info("Starting Spyfish Pipeline Ingestion...")
 
     mapping = config.csv_mapping
     if not mapping:
-        raise ValueError("Missing 'csv_mapping' in config.yaml. Cannot ingest CSV without column mappings.")
+        raise ValueError(
+            "Missing 'csv_mapping' in config.yaml. Cannot ingest CSV without column mappings."
+        )
 
     drop_col = mapping.get("drop_id_column")
     bad_col = mapping.get("is_bad_deployment_column")
     video_col = mapping.get("video_file_link_column")
 
     if not all([drop_col, bad_col, video_col]):
-        raise KeyError(f"Missing required CSV column mappings in config.yaml. Found: DropID={drop_col}, Bad={bad_col}, Video={video_col}")
+        raise KeyError(
+            f"Missing required CSV column mappings in config.yaml. Found: DropID={drop_col}, Bad={bad_col}, Video={video_col}"
+        )
 
     db = DatabaseManager()
     storage = S3Handler(bucket=config.s3_bucket)
 
     # 1. Fetch File List & Deployment CSV (One Journey, One S3 Scan)
-    logging.info("Step 1/3: Fetching known media files and master deployments list from S3...")
+    logging.info(
+        "Step 1/3: Fetching known media files and master deployments list from S3..."
+    )
     known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
 
     csv_path = config.s3_sharepoint_deployment_csv
     deployments_df = storage.read_df_from_s3_csv(csv_path)
 
-    logging.debug(f"Running full cross-dataset DataValidation on {len(deployments_df)} loaded deployment records....")
+    logging.debug(
+        f"Running full cross-dataset DataValidation on {len(deployments_df)} loaded deployment records...."
+    )
     validator = DataValidator()
-    validator.run_validation(file_presence=False, remove_duplicates=True, extract_clean_dataframes=False, known_files=known_files)
+    validator.run_validation(
+        file_presence=False,
+        remove_duplicates=True,
+        extract_clean_dataframes=False,
+        known_files=known_files,
+    )
 
     structural_error_drops = set()
     structured_errors = []
 
     if validator.errors_df is not None and not validator.errors_df.empty:
         for idx, e in validator.errors_df.iterrows():
-            structured_errors.append({
-                "SurveyID": str(e.SurveyID) if pd.notna(e.SurveyID) else "",
-                "DropID": str(e.DropID) if pd.notna(e.DropID) else "",
-                "ErrorType": str(e.ErrorType),
-                "FileName": str(e.FileName),
-                "ColumnName": str(e.ColumnName) if pd.notna(e.ColumnName) else "",
-                "ErrorMessage": str(e.ErrorMessage),
-                "InvalidValue": str(e.InvalidValue) if pd.notna(e.InvalidValue) else ""
-            })
+            structured_errors.append(
+                {
+                    "SurveyID": str(e.SurveyID) if pd.notna(e.SurveyID) else "",
+                    "DropID": str(e.DropID) if pd.notna(e.DropID) else "",
+                    "ErrorType": str(e.ErrorType),
+                    "FileName": str(e.FileName),
+                    "ColumnName": str(e.ColumnName) if pd.notna(e.ColumnName) else "",
+                    "ErrorMessage": str(e.ErrorMessage),
+                    "InvalidValue": (
+                        str(e.InvalidValue) if pd.notna(e.InvalidValue) else ""
+                    ),
+                }
+            )
             if pd.notna(e.DropID):
                 structural_error_drops.add(str(e.DropID).strip())
 
-    logging.debug(f"Found {len(structural_error_drops)} DropIDs with structural CSV errors, logging them into DB.")
+    logging.debug(
+        f"Found {len(structural_error_drops)} DropIDs with structural CSV errors, logging them into DB."
+    )
     db.clear_validation_errors()
     db.add_validation_errors(structured_errors)
 
@@ -98,20 +122,35 @@ def run_ingestion():
     logging.debug("Fetching expert annotations from S3...")
     expert_counts = {}
     try:
-        annotations_df = storage.read_df_from_s3_csv(config.s3_sharepoint_annotations_legacy_experts_csv)
+        annotations_df = storage.read_df_from_s3_csv(
+            config.s3_sharepoint_annotations_legacy_experts_csv
+        )
         if not annotations_df.empty:
-            expert_counts = annotations_df[config.drop_id_column].value_counts().to_dict()
-            logging.info(f"Loaded {len(annotations_df)} annotation rows covering {len(expert_counts)} deployments.")
+            expert_counts = (
+                annotations_df[config.drop_id_column].value_counts().to_dict()
+            )
+            logging.info(
+                f"Loaded {len(annotations_df)} annotation rows covering {len(expert_counts)} deployments."
+            )
     except Exception as e:
-        logging.warning(f"Failed to load KSO annotations from S3: {e}. Expert counts will default to 0.")
+        logging.warning(
+            f"Failed to load KSO annotations from S3: {e}. Expert counts will default to 0."
+        )
 
-    _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_files, expert_counts, mapping)
-    logging.info(f"Ingestion complete. Synchronized {len(deployments_df)} records into the pipeline database.")
+    _sync_deployments_to_db(
+        deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
+    )
+    logging.info(
+        f"Ingestion complete. Synchronized {len(deployments_df)} records into the pipeline database."
+    )
 
     # After full ingestion, check for arrivals of drops that WERE already PENDING in the DB
     check_pending_arrivals(known_files=known_files)
 
-def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_files, expert_counts, mapping):
+
+def _sync_deployments_to_db(
+    deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
+):
     drop_col = mapping.get("drop_id_column")
     bad_col = mapping.get("is_bad_deployment_column")
     video_col = mapping.get("video_file_link_column")
@@ -127,7 +166,9 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             raw_drop_id = str(row.get(drop_col, "")).strip()
             drop_id = config.validate_drop_id(raw_drop_id)
         except ValueError as e:
-            logging.error(f"Skipping malicious or invalid DropID in CSV: {row.get(drop_col)}. Error: {e}")
+            logging.error(
+                f"Skipping malicious or invalid DropID in CSV: {row.get(drop_col)}. Error: {e}"
+            )
             continue
 
         video_path = str(row.get(video_col, "")).strip()
@@ -140,7 +181,7 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             # We strictly require these to be numeric
             sampling_start = float(row[config.csv_sampling_start_column])
             sampling_end = float(row[config.csv_sampling_end_column])
-        except (ValueError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError):
             if drop_id not in structural_error_drops:
                 structural_error_drops.add(drop_id)
             sampling_start = None
@@ -163,7 +204,7 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             if existing_record and existing_record["status"] not in [
                 PipelineStatus.PENDING_ARRIVAL,
                 PipelineStatus.ERROR,
-                PipelineStatus.MISSING_METADATA
+                PipelineStatus.MISSING_METADATA,
             ]:
                 # It's already moving through the pipeline, leave it alone.
                 status = existing_record["status"]
@@ -179,17 +220,22 @@ def _sync_deployments_to_db(deployments_df, db, structural_error_drops, known_fi
             status=status,
             video_path=video_path,
             is_bad_deployment=is_bad_deployment,
-            error_message="Found in structural errors" if status == PipelineStatus.ERROR else "",
+            error_message=(
+                "Found in structural errors" if status == PipelineStatus.ERROR else ""
+            ),
             sampling_start=sampling_start,
             sampling_end=sampling_end,
             expert_annotations=expert_anns,
             ml_annotations=ml_anns,
-            citsci_annotations=citsci_anns
+            citsci_annotations=citsci_anns,
         )
         new_count += 1
         expt_count += expert_anns
 
-    logging.info(f"Ingestion complete. Synchronized {new_count} records into the pipeline database, with {expt_count} of {sum(expert_counts.values())} expert annotations.")
+    logging.info(
+        f"Ingestion complete. Synchronized {new_count} records into the pipeline database, with {expt_count} of {sum(expert_counts.values())} expert annotations."
+    )
+
 
 if __name__ == "__main__":
     run_ingestion()
