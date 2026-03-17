@@ -9,7 +9,7 @@ class MLConfig(BaseConfig):
 
     @property
     def limit_processing(self):
-        return self.ml_inference.get("limit_processing")
+        return get_required(self.ml_inference, "limit_processing", "ml_inference")
 
     @property
     def frame_skip(self):

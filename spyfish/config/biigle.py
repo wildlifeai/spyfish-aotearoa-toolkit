@@ -52,7 +52,7 @@ class BiigleConfig(BaseConfig):
 
     @property
     def label_mapping(self) -> dict:
-        mapping = self.biigle_section.get("label_mapping")
+        mapping = get_required(self.biigle_section, "label_mapping", "biigle")
         return mapping if mapping is not None else {}
 
     @property

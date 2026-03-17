@@ -224,11 +224,9 @@ def prepare_from_annotations(
         (balanced_df, species_class_names)
     """
     training_cfg = config.get_section("training")
-    ceiling_pct = ceiling_pct or training_cfg.get("class_ceiling_pct", 0.40)
-    floor_pct = floor_pct or training_cfg.get("class_floor_pct", 0.02)
-    ceiling_max_iterations = ceiling_max_iterations or training_cfg.get(
-        "ceiling_max_iterations", 3
-    )
+    ceiling_pct = ceiling_pct or config.training_ceiling_pct
+    floor_pct = floor_pct or config.training_floor_pct
+    ceiling_max_iterations = ceiling_max_iterations or config.training_ceiling_max_iterations
     data_quality_dir = data_quality_dir or config.data_quality_dir
 
     logging.info(f"Loading expert MaxN annotations from {data_quality_dir}...")

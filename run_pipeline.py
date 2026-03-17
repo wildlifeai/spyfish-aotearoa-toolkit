@@ -243,11 +243,8 @@ def main():
     )
     parser.add_argument(
         "--set-targets",
-        nargs="?",
-        const="",
-        default=None,
-        metavar="CSV_PATH",
-        help="Bulk set Pipeline Stages from a CSV file. Optionally provide a path; if omitted, uses orchestrator.targets_csv from config.yaml.",
+        action="store_true",
+        help="Bulk set Pipeline Stages from the CSV at paths.pipeline_targets_csv in config.yaml.",
     )
     parser.add_argument(
         "--ml",
@@ -338,12 +335,12 @@ def main():
         logging.info("Step 0 completed.")
         return
 
-    if run_all or args.set_targets:
+    if args.set_targets:
         log_header("ORCHESTRATION: SETTING PIPELINE TARGETS FROM CSV")
         from spyfish.test_setup import process_csv_targets
-        csv_path = args.set_targets or config.pipeline_targets_csv
+        csv_path = config.pipeline_targets_csv
         if not csv_path:
-            logging.error("--set-targets requires a CSV path (or set paths.pipeline_targets_csv in config.yaml).")
+            logging.error("--set-targets requires paths.pipeline_targets_csv to be set in config.yaml.")
             sys.exit(1)
         execute_step(process_csv_targets, csv_path, push_s3=not args.no_upload)
 

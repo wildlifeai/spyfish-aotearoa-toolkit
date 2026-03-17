@@ -38,13 +38,10 @@ class BiigleParser:
         if cache_dir:
             self.cache_dir = Path(cache_dir)
         elif drop_id:
-            # Use per-drop cache folder
             self.cache_dir = config.get_biigle_cache_dir(drop_id)
         else:
-            # Fallback to general cache in data_quality folder (root)
-            self.cache_dir = config.data_quality_dir / config.sub_dirs.get(
-                "biigle_cache", "biigle_cache"
-            )
+            # No drop context — use a shared root-level biigle cache
+            self.cache_dir = config.data_quality_dir / config._sub("biigle_cache")
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Biigle cache directory: {self.cache_dir}")
@@ -173,9 +170,7 @@ class BiigleParser:
         # We find uniquely active drops in this report
         unique_drops = annotations_df[config.drop_id_column].unique()
         for d_id in unique_drops:
-            drop_ann_dir = config.get_drop_dir(d_id) / config.sub_dirs.get(
-                "annotations", "annotations"
-            )
+            drop_ann_dir = config.get_drop_annotations_dir(d_id)
             drop_ann_dir.mkdir(parents=True, exist_ok=True)
 
             # Filter for this drop

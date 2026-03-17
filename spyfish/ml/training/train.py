@@ -143,14 +143,10 @@ def run_training_pipeline(
     """
     Full training pipeline: train on local base model.
     """
-    training_cfg = config.get_section("training")
-
-    local_training_dir = Path(
-        training_cfg.get("local_training_dir", "process_files/training")
-    )
-    epochs = training_cfg.get("epochs", 100)
-    patience = training_cfg.get("patience", 25)
-    imgsz = training_cfg.get("imgsz", 640)
+    local_training_dir = config.local_training_dir
+    epochs = config.training_epochs
+    patience = config.training_patience
+    imgsz = config.training_imgsz
 
     base_model_path = str(local_training_dir / "base_model" / "base_model.pt")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -217,17 +213,11 @@ def main():
     train_species = not args.binary_only
 
     if not args.binary_data and train_binary:
-        training_cfg = config.get_section("training")
-        local_dir = Path(
-            training_cfg.get("local_training_dir", "process_files/training")
-        )
+        local_dir = config.local_training_dir
         args.binary_data = str(local_dir / "binary" / "data.yaml")
 
     if not args.species_data and train_species:
-        training_cfg = config.get_section("training")
-        local_dir = Path(
-            training_cfg.get("local_training_dir", "process_files/training")
-        )
+        local_dir = config.local_training_dir
         args.species_data = str(local_dir / "species" / "data.yaml")
 
     run_training_pipeline(

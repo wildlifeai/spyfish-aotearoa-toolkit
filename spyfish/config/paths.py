@@ -52,9 +52,21 @@ class PathsConfig(BaseConfig):
         return _require(self.paths, "bucket_name", "paths")
 
     @property
+    def orchestration_paths(self) -> dict:
+        return _require(self.paths, "orchestration", "paths")
+
+    @property
+    def validation_patterns(self) -> dict:
+        return _require(self._yaml_config, "validation_patterns", "")
+
+    def get_validation_pattern(self, name: str) -> str:
+        """Strictly require a regex pattern from validation_patterns section."""
+        return str(_require(self.validation_patterns, name, "validation_patterns"))
+
+    @property
     def pipeline_targets_csv(self) -> str | None:
-        """Default CSV path for --set-targets. None if not configured."""
-        return self.paths.get("pipeline_targets_csv")
+        """Default CSV path for --set-targets"""
+        return self.orchestration_paths.get("pipeline_targets_csv")
 
     # ── Metadata / S3 keys ─────────────────────────────────────────────────
 
@@ -104,7 +116,7 @@ class PathsConfig(BaseConfig):
 
     @property
     def test_deployment_metadata_csv(self) -> Path:
-        return self.project_root / _require(self.metadata_files, "test_deployment_csv", "paths.metadata.files")
+        return self.project_root / _require(self.orchestration_paths, "test_deployment_csv", "paths.orchestration")
 
     @property
     def s3_missing_files(self) -> str:
@@ -401,8 +413,32 @@ class PathsConfig(BaseConfig):
     # ── Training ────────────────────────────────────────────────────────────
 
     @property
-    def training_config(self) -> dict:
-        return _require(self._yaml_config, "training", "")
+    def training_epochs(self) -> int:
+        return int(_require(self.training_config, "epochs", "training"))
+
+    @property
+    def training_patience(self) -> int:
+        return int(_require(self.training_config, "patience", "training"))
+
+    @property
+    def training_imgsz(self) -> int:
+        return int(_require(self.training_config, "imgsz", "training"))
+
+    @property
+    def training_ceiling_pct(self) -> float:
+        return float(_require(self.training_config, "class_ceiling_pct", "training"))
+
+    @property
+    def training_floor_pct(self) -> float:
+        return float(_require(self.training_config, "class_floor_pct", "training"))
+
+    @property
+    def training_ceiling_max_iterations(self) -> int:
+        return int(_require(self.training_config, "ceiling_max_iterations", "training"))
+
+    @property
+    def local_training_dir(self) -> Path:
+        return self.project_root / _require(self.training_config, "local_training_dir", "training")
 
     # ── FFmpeg ──────────────────────────────────────────────────────────────
 

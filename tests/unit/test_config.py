@@ -3,7 +3,7 @@ from spyfish.config.paths import config
 from unittest.mock import patch
 
 def test_validate_drop_id_valid():
-    valid_id = "ABC_20240101_BUV_ABC_123_01"
+    valid_id = "KSF_20240124_BUV_KSF_085_01"
     assert config.validate_drop_id(valid_id) == valid_id
 
 def test_validate_drop_id_invalid_traversal():
