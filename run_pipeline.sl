@@ -1,12 +1,15 @@
 #!/bin/bash -e
+
+PROJECT_DIR="/nesi/project/wildlife03546/spyfish-play"
+
 #SBATCH --job-name=run-spyfish-pipeline
 #SBATCH --account=wildlife03546
 #SBATCH --time=12:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --output=/nesi/project/wildlife03546/spyfish-play/slurm_logs/run_pipeline_%j.out
-#SBATCH --error=/nesi/project/wildlife03546/spyfish-play/slurm_logs/run_pipeline_%j.err
+#SBATCH --output=${PROJECT_DIR}/slurm_logs/run_pipeline_%j.out
+#SBATCH --error=${PROJECT_DIR}/slurm_logs/run_pipeline_%j.err
 
 
 
