@@ -62,7 +62,7 @@ class BaseConfig:
     @property
     def is_test_run(self):
         orchestrator = self.get_section("orchestrator")
-        return bool(orchestrator.get("is_test_run", False))
+        return bool(get_required(orchestrator, "is_test_run", "orchestrator"))
 
 class PipelineStatus:
     """Constant string stages of the Spyfish pipeline."""

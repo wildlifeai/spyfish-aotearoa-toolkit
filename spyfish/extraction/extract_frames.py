@@ -282,8 +282,8 @@ def extract_frames_from_selections(
     # Build and save COCO JSON
     coco = build_coco_from_raw_csv(raw_csv_path, frame_records)
 
-    # Save the COCO annotations to a dedicated annotations directory, separate from the frames
-    annotations_dir = out_dir.parent / "annotations"
+    # Save the COCO annotations to the drop's annotations directory
+    annotations_dir = config.get_drop_annotations_dir(drop_id)
     annotations_dir.mkdir(parents=True, exist_ok=True)
 
     coco_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"

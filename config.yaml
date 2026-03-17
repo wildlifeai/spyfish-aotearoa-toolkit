@@ -31,8 +31,10 @@ paths:
   base_dir: "process_files"
   # S3 Storage configuration
   bucket_name: "marine-buv-kalindi"
-  # Path to a CSV file for bulk-setting pipeline stages via --set-targets.
-  pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
+  # Path to orchestration files (local only, not synced to S3)
+  orchestration:
+    pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
+    test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
@@ -43,7 +45,6 @@ paths:
     status_dir: "status"
     files:
       deployment_csv: "BUV Deployment.csv"
-      test_deployment_csv: "process_files/orchestration/test_deployment_metadata.csv"
       survey_csv: "BUV Survey Metadata.csv"
       site_csv: "BUV Survey Sites.csv"
       species_csv: "BUV Species.csv"
@@ -149,6 +150,7 @@ training:
   class_ceiling_pct: 0.40       # cap any species above 40% — subsample (iterative, max 3 rounds)
   class_floor_pct: 0.02         # merge species below 2% into "fish"
   ceiling_max_iterations: 3     # safety: never run more than 3 ceiling rounds
+  local_training_dir: "process_files/training"
   retrain_min_improvement_pct: 2.0
 
 

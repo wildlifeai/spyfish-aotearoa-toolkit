@@ -69,9 +69,9 @@ def extract_survey_id(drop_id_series: pd.Series) -> pd.Series:
     """
     Extracts the SurveyID from a pandas Series of DropIDs using the config format regex.
     """
-    # The SurveyID pattern is a full-match pattern (e.g. ^ABC_12345678_BUV$).
+    # The SurveyID pattern is a full-match pattern (e.g. ^KSF_20240124_BUV$).
     # We strip the anchors and wrap in a capture group for str.extract.
-    raw = config.validation_patterns.get(config.survey_id_column, r"^[A-Z]{3}_\d{8}_BUV$")
+    raw = config.get_validation_pattern("survey_id")
     pattern = raw.lstrip("^").rstrip("$")
     if not pattern.startswith("("):
         pattern = f"({pattern})"
@@ -211,11 +211,7 @@ def validate_model_path(model_path: str | Path) -> Path:
         )
 
     # 3. Define trusted roots
-    training_cfg = config.get_section("training")
-    local_training_root = (
-        config.project_root
-        / training_cfg.get("local_training_dir", "process_files/training")
-    ).resolve()
+    local_training_root = config.local_training_dir.resolve()
     models_root = config.models_root_dir.resolve()
 
     # 4. Check if path is within trusted roots
@@ -259,7 +255,7 @@ def validate_model_path(model_path: str | Path) -> Path:
 
 def get_survey_id_from_drop(drop_id: str) -> str:
     """Derive SurveyID from DropID using the config format regex."""
-    raw = config.validation_patterns.get(config.survey_id_column, r"^[A-Z]{3}_\d{8}_BUV$")
+    raw = config.get_validation_pattern("survey_id")
     pattern = raw.lstrip("^").rstrip("$")
     if not pattern.startswith("("):
         pattern = f"({pattern})"

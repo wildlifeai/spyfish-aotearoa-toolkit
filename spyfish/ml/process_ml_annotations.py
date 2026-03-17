@@ -253,7 +253,7 @@ def run_post_ml(
     for drop_id in drop_ids:
         logging.debug(f"Post-ML processing: {drop_id}")
 
-        drop_annotations_dir = Path(output_root) / drop_id / "annotations"
+        drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
         drop_annotations_dir.mkdir(parents=True, exist_ok=True)
         raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
         maxn_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
