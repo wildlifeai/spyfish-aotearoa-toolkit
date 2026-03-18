@@ -152,10 +152,10 @@ def upload_coco_annotations_to_biigle(
         The API response dict from the bulk upload endpoint.
     """
     if not Path(coco_json_path).exists():
-        logging.warning(
-            f"COCO JSON not found at {coco_json_path}. Skipping annotation upload."
+        raise FileNotFoundError(
+            f"COCO annotations JSON not found: {coco_json_path}. "
+            "extract_frames_from_selections() must run before annotation upload."
         )
-        return {}
 
     with open(coco_json_path, "r") as f:
         coco_data = json.load(f)
@@ -259,6 +259,16 @@ def upload_frames_to_biigle(
     survey_id = _get_survey_id(drop_id)
     s3_prefix = f"{config.biigle_s3_images_prefix}/{survey_id}/{drop_id}/"
 
+    # Verify COCO JSON exists before committing any uploads — a missing file means
+    # frame extraction failed and the upload should not proceed at all.
+    annotations_dir = config.get_drop_annotations_dir(drop_id)
+    coco_json_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
+    if not coco_json_path.exists():
+        raise FileNotFoundError(
+            f"COCO annotations JSON not found: {coco_json_path}. "
+            "Run frame extraction before Biigle upload."
+        )
+
     # Step 1: Upload frames to S3
     file_names = upload_frames_to_s3(frames_df, s3_prefix)
 
@@ -283,11 +293,8 @@ def upload_frames_to_biigle(
         logging.info(f"Saved Biigle volume_id {volume_id} to database for {drop_id}")
 
     # Step 4: Upload COCO bounding box annotations to the new volume
-    # The JSON lives in the drop's annotation folder
-    annotations_dir = config.get_drop_annotations_dir(drop_id)
-    coco_json_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
-
-    if volume_id and coco_json_path.exists():
+    # coco_json_path existence was verified above before any uploads.
+    if volume_id:
         upload_coco_annotations_to_biigle(volume_id, str(coco_json_path))
 
     return volume_info

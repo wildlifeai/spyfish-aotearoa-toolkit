@@ -134,6 +134,9 @@ biigle:
   label_mapping:
     # "Pagrus auratus": 12345
     # "Notolabrus fucicola": 67890
+  # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
+  # on slow or unreachable endpoints.
+  request_timeout_secs: 30
   # Polling config for async Biigle operations
   volume_finalize_max_retries: 10
   volume_finalize_retry_interval_secs: 3.0

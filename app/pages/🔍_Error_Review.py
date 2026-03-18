@@ -4,6 +4,7 @@ from utils import check_password, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.database.manager import DatabaseManager
 
+from typing import Optional
 
 @st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
 def load_error_data():
@@ -67,7 +68,7 @@ def display_file_breakdown(errors_df: pd.DataFrame):
     st.dataframe(file_counts, width="stretch", hide_index=True, height=300)
 
 
-def display_error_table(errors_df: pd.DataFrame, title: str, filters: dict = None):  # type: ignore
+def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None): 
     if errors_df.empty:
         st.info("No errors match the current filters")
         return
