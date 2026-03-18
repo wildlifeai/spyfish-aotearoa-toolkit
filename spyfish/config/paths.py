@@ -56,13 +56,17 @@ class PathsConfig(BaseConfig):
     def orchestration_paths(self) -> dict:
         return _require(self.paths, "orchestration", "paths")
 
-    @property
-    def validation_patterns(self) -> dict:
-        return _require(self._yaml_config, "validation_patterns", "")
-
     def get_validation_pattern(self, name: str) -> str:
-        """Strictly require a regex pattern from validation_patterns section."""
-        return str(_require(self.validation_patterns, name, "validation_patterns"))
+        """Return the raw regex for a named entity type (e.g. 'drop_id', 'survey_id').
+
+        Reads directly from the validation_patterns YAML section using the YAML key
+        names ('drop_id', 'survey_id', 'site_id'), not the CSV column names.
+
+        Use config.validation_patterns (the property below) when you need patterns
+        keyed by CSV column name for DataFrame-level validation.
+        """
+        raw_patterns = _require(self._yaml_config, "validation_patterns", "")
+        return str(_require(raw_patterns, name, "validation_patterns"))
 
     @property
     def pipeline_targets_csv(self) -> str | None:
@@ -219,11 +223,21 @@ class PathsConfig(BaseConfig):
 
     @property
     def pipeline_model_path(self) -> Path:
+        """Find the local pipeline model weights (.pt) from pipeline_model_dir."""
         if self.pipeline_model_dir.exists():
             pt_files = list(self.pipeline_model_dir.glob("*.pt"))
             if pt_files:
                 return pt_files[0]
         raise FileNotFoundError(f"No model file found in {self.pipeline_model_dir}")
+
+    @property
+    def base_model_path(self) -> Path:
+        """Find the local base model weights (.pt) from base_model_dir."""
+        if self.base_model_dir.exists():
+            pt_files = list(self.base_model_dir.glob("*.pt"))
+            if pt_files:
+                return pt_files[0]
+        raise FileNotFoundError(f"No model file found in {self.base_model_dir}")
 
     @property
     def s3_model_key(self) -> str:
@@ -465,6 +479,17 @@ class PathsConfig(BaseConfig):
         return self.project_root / _require(
             self.training_config, "local_training_dir", "training"
         )
+
+    @property
+    def training_results_dir(self) -> Path:
+        """Local directory for training/evaluation results."""
+        return self.local_training_dir / "results"
+
+    @property
+    def training_results_s3_prefix(self) -> str:
+        """S3 prefix for training/evaluation results (relative to bucket root)."""
+        # Always uses forward slashes for S3
+        return self.training_results_dir.relative_to(self.project_root).as_posix()
 
     # ── FFmpeg ──────────────────────────────────────────────────────────────
 

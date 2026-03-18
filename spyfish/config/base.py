@@ -74,6 +74,10 @@ class BaseConfig:
         return bool(get_required(orchestrator, "is_test_run", "orchestrator"))
 
 
+class InvalidTransitionError(Exception):
+    """Raised when a pipeline status transition is not permitted."""
+
+
 class PipelineStatus:
     """Constant string stages of the Spyfish pipeline."""
 
@@ -83,7 +87,7 @@ class PipelineStatus:
     ERROR = "ERROR"
     MISSING_METADATA = "MISSING_METADATA"
 
-    # Healthy cylce
+    # Healthy cycle
     PENDING_ARRIVAL = "PENDING_ARRIVAL"
     READY_FOR_ML = "READY_FOR_ML"
     PROCESSING_ML = "PROCESSING_ML"
@@ -94,6 +98,45 @@ class PipelineStatus:
     CITSCI_COMPLETE = "CITSCI_COMPLETE"
     AWAITING_EXPERT_REVIEW = "AWAITING_EXPERT_REVIEW"
     PIPELINE_COMPLETE = "PIPELINE_COMPLETE"
+
+    # ---------------------------------------------------------------------------
+    # Valid transitions — the single authoritative state machine definition.
+    #
+    # Three paths from ML_COMPLETE:
+    #   Full Zooniverse:  ML_COMPLETE → AWAITING_CITSCI_CLIPS → CITSCI_CLIPS_COMPLETE
+    #                     → AWAITING_CITSCI_FRAMES → CITSCI_COMPLETE → AWAITING_EXPERT_REVIEW
+    #   Frames-only:      ML_COMPLETE → AWAITING_CITSCI_CLIPS → CITSCI_CLIPS_COMPLETE
+    #                     → CITSCI_COMPLETE → AWAITING_EXPERT_REVIEW
+    #   Biigle-direct:    ML_COMPLETE → AWAITING_EXPERT_REVIEW  (skip_zooniverse=True)
+    #
+    # ON_HOLD can resume from any status, so its outbound set is unrestricted
+    # (handled in DatabaseManager.advance_status as a special case).
+    # ---------------------------------------------------------------------------
+    VALID_TRANSITIONS: dict = {
+        PENDING_ARRIVAL: {READY_FOR_ML, ON_HOLD, EXCLUDED, MISSING_METADATA},
+        READY_FOR_ML: {PROCESSING_ML, ON_HOLD, EXCLUDED},
+        PROCESSING_ML: {ML_COMPLETE, ERROR, ON_HOLD},
+        ML_COMPLETE: {
+            AWAITING_CITSCI_CLIPS,   # full Zooniverse path
+            AWAITING_EXPERT_REVIEW,  # Biigle-direct (skip_zooniverse=True)
+            ON_HOLD,
+            EXCLUDED,
+        },
+        AWAITING_CITSCI_CLIPS: {CITSCI_CLIPS_COMPLETE, ON_HOLD},
+        CITSCI_CLIPS_COMPLETE: {
+            AWAITING_CITSCI_FRAMES,  # frames uploaded to Zooniverse, awaiting volunteers
+            CITSCI_COMPLETE,         # skip path (missing CSV)
+            ON_HOLD,
+        },
+        AWAITING_CITSCI_FRAMES: {CITSCI_COMPLETE, ON_HOLD},  # advanced by Zooniverse sync (future)
+        CITSCI_COMPLETE: {AWAITING_EXPERT_REVIEW, ON_HOLD},
+        AWAITING_EXPERT_REVIEW: {PIPELINE_COMPLETE, ON_HOLD},
+        PIPELINE_COMPLETE: {ON_HOLD},
+        ERROR: {READY_FOR_ML, ON_HOLD, EXCLUDED},
+        EXCLUDED: {PENDING_ARRIVAL, ON_HOLD},
+        MISSING_METADATA: {READY_FOR_ML, EXCLUDED},
+        # ON_HOLD is handled as unrestricted in advance_status()
+    }
 
     VIDEO_PRESENT_STATUSES = [
         READY_FOR_ML,

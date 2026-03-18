@@ -144,10 +144,13 @@ def _ingest_ml_annotations(
                 "external_id": model_name,
             }
         )
-
+    # TODO check if this is wanted behaviour. 
+    # Always clear previous ML annotations before writing new ones.
+    # If annotations_to_add is empty (zero detections above threshold), we still
+    # need to wipe stale rows from any prior run — skipping the clear would leave
+    # the old count in the DB while the MaxN CSV on disk shows zero detections.
+    ann_db.clear_annotations(drop_id, "ml")
     if annotations_to_add:
-        # Clear previous ML syncs for this drop
-        ann_db.clear_annotations(drop_id, "ml")
         ann_db.add_annotations(annotations_to_add)
         logging.debug(
             f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}"
@@ -163,7 +166,6 @@ def _run_qa_visualizations(
     base_conf: float,
     maxn_conf: float,
     interval: float,
-    sampling_start: int,
     raw_csv_path: Optional[str] = None,
 ):
     """Draw MaxN timeline plot and lowest-confidence annotated frames for human QA review."""
@@ -179,12 +181,18 @@ def _run_qa_visualizations(
     )
 
     # Draw lowest-confidence frames for QA review
+    if raw_df.empty or maxn_df.empty:
+        logging.debug(f"Skipping QA frame drawing for {drop_id}: no raw detections.")
+        return
+
     review_df = maxn_df.sort_values(config.csv_confidence_agreement_column).head(10)
 
     # Map time_of_maxn_ms back to raw CSV frame numbers
     frame_indices = []
     for t_sec in review_df[config.csv_maxn_time_ms_column]:
         closest = raw_df.iloc[(raw_df["time_seconds"] - t_sec).abs().argsort()[:1]]
+        if closest.empty:
+            continue
         frame_indices.append(int(closest["frame"].iloc[0]))
 
     # Find video file
@@ -200,7 +208,6 @@ def _run_qa_visualizations(
         output_dir=frames_dir,
         frame_list=frame_indices,
         confidence_threshold=base_conf,
-        sampling_start=sampling_start,
         drop_id=drop_id,
     )
 
@@ -235,21 +242,6 @@ def run_post_ml(
     base_conf = config.confidence_threshold
     maxn_conf = config.maxn_confidence_threshold
 
-    # Batch fetch sampling_start for all relevant drop_ids
-    sampling_starts = {}
-    if drop_ids:
-        with db.get_connection() as conn:
-            # SQL IN clause with placeholders
-            placeholders = ", ".join(["?"] * len(drop_ids))
-            query = f"SELECT drop_id, sampling_start FROM deployments WHERE drop_id IN ({placeholders})"
-            cursor = conn.cursor()
-            cursor.execute(query, drop_ids)
-            for row in cursor.fetchall():
-                d = dict(row)
-                sampling_starts[d["drop_id"]] = (
-                    d["sampling_start"] if d["sampling_start"] else 0
-                )
-
     for drop_id in drop_ids:
         logging.debug(f"Post-ML processing: {drop_id}")
 
@@ -264,8 +256,6 @@ def run_post_ml(
             continue
 
         raw_df = pd.read_csv(raw_csv)
-        sampling_start = sampling_starts.get(drop_id, 0)
-
         # 1. Extract MaxN (uses higher threshold than base inference)
         maxn_df = process_maxn(
             raw_df,
@@ -299,25 +289,30 @@ def run_post_ml(
         _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
 
         if draw_images:
-
-            # 3. Draw QA visualisations (MaxN timeline + lowest-confidence frames)
-            _run_qa_visualizations(
-                raw_df=raw_df,
-                maxn_df=maxn_df,
-                drop_id=drop_id,
-                video_dir=Path(video_dir),
-                output_root=Path(output_root),
-                base_conf=base_conf,
-                maxn_conf=maxn_conf,
-                interval=interval,
-                sampling_start=sampling_start,
-                raw_csv_path=raw_csv,
-            )
+            # 3. Draw QA visualisations (MaxN timeline + lowest-confidence frames).
+            # Failures here must not block status advancement — QA viz is diagnostic only.
+            try:
+                _run_qa_visualizations(
+                    raw_df=raw_df,
+                    maxn_df=maxn_df,
+                    drop_id=drop_id,
+                    video_dir=Path(video_dir),
+                    output_root=Path(output_root),
+                    base_conf=base_conf,
+                    maxn_conf=maxn_conf,
+                    interval=interval,
+                    raw_csv_path=raw_csv,
+                )
+            except Exception as e:
+                logging.error(
+                    f"QA visualisation failed for {drop_id} (non-fatal): {e}",
+                    exc_info=True,
+                )
 
         logging.info(f"  → Post-ML processing complete for: {drop_id}")
 
         # Update status to AWAITING_CITSCI_CLIPS
-        db.update_status(drop_id, PipelineStatus.AWAITING_CITSCI_CLIPS)
+        db.advance_status(drop_id, PipelineStatus.AWAITING_CITSCI_CLIPS)
 
     # 4. Finally sync all updated drops to the main pipeline DB
     if drop_ids:

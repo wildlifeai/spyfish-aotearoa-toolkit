@@ -81,6 +81,7 @@ ml_inference:
     annotated_by_prefix: "ml"
 
 zooniverse_extraction:
+  clip_length: 10.0
   project_id: 32041
   # TODO: what are these 2 things about
   health_check_count: 6 # Number of health checks to perform

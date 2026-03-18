@@ -172,7 +172,7 @@ def sync_biigle_annotations():
                 logging.debug(
                     f"  No annotations found for {drop_id} (volume may be done but have no annotations)."
                 )
-                db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
+                db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 continue
 
             # 4. Process and aggregate annotations
@@ -197,7 +197,7 @@ def sync_biigle_annotations():
                 )
 
                 # Advance status to PIPELINE_COMPLETE
-                db.update_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
+                db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 logging.info(
                     f"  Advanced {drop_id} to {PipelineStatus.PIPELINE_COMPLETE}"
                 )

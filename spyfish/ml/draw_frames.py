@@ -1,9 +1,8 @@
 """
 Draw bounding boxes from a raw ML CSV onto video frames and save as JPEGs.
 
-The raw CSV `time_seconds` column is ML-relative (starts at 0 from SamplingStart).
-To seek the correct video frame, we add sampling_start back to get the absolute video time.
-The output filename uses the absolute video time for easy cross-referencing.
+The raw CSV `time_seconds` column stores absolute video timestamps (seconds from video start).
+The output filename uses this absolute video time for easy cross-referencing.
 """
 
 import logging
@@ -21,7 +20,6 @@ def draw_boxes_on_video_frames(
     output_dir,
     frame_list,
     confidence_threshold,
-    sampling_start,
     drop_id="UNKNOWN",
 ):
     """
@@ -33,7 +31,6 @@ def draw_boxes_on_video_frames(
         output_dir: Directory to save the annotated JPEG frames.
         frame_list: List of CSV 'frame' indices to draw (from the raw CSV 'frame' column).
         confidence_threshold: Only draw boxes above this confidence.
-        sampling_start: Seconds offset where ML analysis began in the video.
     """
     logging.info(f"Drawing {len(frame_list)} frames from {video_path}")
 
@@ -64,9 +61,8 @@ def draw_boxes_on_video_frames(
         # The 'frame' column in the raw CSV is already an absolute frame index from the source video
         video_frame_num = csv_frame
 
-        # Calculate absolute video time for filename matching (sampling_start + ML relative time)
-        ml_time = frame_rows["time_seconds"].iloc[0]
-        video_time = ml_time + sampling_start
+        # time_seconds is already an absolute video timestamp
+        video_time = frame_rows["time_seconds"].iloc[0]
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, video_frame_num)
         ret, frame = cap.read()

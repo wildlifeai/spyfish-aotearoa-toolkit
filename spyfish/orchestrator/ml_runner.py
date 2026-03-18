@@ -130,16 +130,9 @@ class MLRunner:
         drop_id_col = config.drop_id_column
         drop_ids = [t[drop_id_col] for t in targets]
 
-        logging.info(
-            f"Setting {len(drop_ids)} targets to {PipelineStatus.PROCESSING_ML}..."
-        )
-        # Batch update status to PROCESSING_ML
-        for drop_id in drop_ids:
-            self.db.update_status(drop_id, PipelineStatus.PROCESSING_ML)
-
-        logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
-
-        # Model must exist locally
+        # Model must exist before any drop status is changed.
+        # Checking here keeps all drops in READY_FOR_ML so the batch can be
+        # retried once the model file is placed — no manual DB repair needed.
         if not os.path.exists(self.model):
             logging.error(
                 f"Model weights not found at {self.model}. Automatic download from S3 is disabled for security."
@@ -148,6 +141,15 @@ class MLRunner:
                 "Please manually place the production model at the expected path."
             )
             raise FileNotFoundError(f"Model missing: {self.model}")
+
+        logging.info(
+            f"Setting {len(drop_ids)} targets to {PipelineStatus.PROCESSING_ML}..."
+        )
+        # Batch update status to PROCESSING_ML
+        for drop_id in drop_ids:
+            self.db.advance_status(drop_id, PipelineStatus.PROCESSING_ML)
+
+        logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
 
         success_targets = []
         for row in targets:
@@ -176,7 +178,7 @@ class MLRunner:
 
             except Exception as e:
                 logging.error(f"Inference failed for {drop_id}: {e}", exc_info=True)
-                self.db.update_status(drop_id, PipelineStatus.ERROR)
+                self.db.advance_status(drop_id, PipelineStatus.ERROR)
                 self.db.add_validation_errors(
                     [
                         {
@@ -194,28 +196,51 @@ class MLRunner:
 
         return success_targets
 
-    def finalize_batch_results(self, successful_drops: List[str]):
-        """Uploads generated ML CSVs to S3 and marks deployments as ML_COMPLETE locally."""
+    def finalize_batch_results(
+        self, successful_drops: List[str], all_drop_ids: List[str] | None = None
+    ):
+        """Marks successful drops ML_COMPLETE and recovers any stuck PROCESSING_ML drops.
+
+        Args:
+            successful_drops: Drop IDs that completed inference without error.
+            all_drop_ids: Every drop ID that was set to PROCESSING_ML at batch start.
+                          Used as a safety net: any drop still in PROCESSING_ML after
+                          the loop (e.g. process killed mid-batch) is advanced to ERROR
+                          so it can be retried rather than stuck permanently.
+        """
+        # Safety net: advance any drop that is still PROCESSING_ML to ERROR.
+        # Under normal operation run_inference_loop already does this per-drop,
+        # but if the process was interrupted the per-drop handler may not have run.
+        if all_drop_ids:
+            for drop_id in set(all_drop_ids) - set(successful_drops):
+                dep = self.db.get_deployment(drop_id)
+                if dep and dep["status"] == PipelineStatus.PROCESSING_ML:
+                    logging.error(
+                        f"Drop {drop_id} is still {PipelineStatus.PROCESSING_ML} after batch "
+                        "— advancing to ERROR to allow retry."
+                    )
+                    self.db.update_status(drop_id, PipelineStatus.ERROR)
+
         if not successful_drops:
-            logging.info("No successful drops to sync. Exiting.")
+            logging.info("No successful drops to finalize.")
             return
 
         logging.info(
             f"Syncing state for {len(successful_drops)} successfully processed drops..."
         )
-
         for drop_id in successful_drops:
-            self.db.update_status(drop_id, PipelineStatus.ML_COMPLETE)
+            self.db.advance_status(drop_id, PipelineStatus.ML_COMPLETE)
         logging.info(
-            f"Successfully updated {successful_drops} rows in local DB to {PipelineStatus.ML_COMPLETE}."
+            f"Updated {len(successful_drops)} drops to {PipelineStatus.ML_COMPLETE}."
         )
 
 
 def main():
     runner = MLRunner()
     targets = runner.get_inference_targets()
+    all_drop_ids = [t[config.drop_id_column] for t in targets]
     successes = runner.run_inference_loop(targets)
-    runner.finalize_batch_results(successes)
+    runner.finalize_batch_results(successes, all_drop_ids=all_drop_ids)
 
 
 if __name__ == "__main__":

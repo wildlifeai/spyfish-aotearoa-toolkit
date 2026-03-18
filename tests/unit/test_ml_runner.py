@@ -17,7 +17,7 @@ def test_get_inference_targets(mock_s3_class, mock_db_class):
         {
             "drop_id": "KSF_20240124_BUV_KSF_085_01",
             "video_path": "path/1.mp4",
-            "sampling_start": 0,
+            "sampling_start": 120,
             "sampling_end": 100,
         }
     ]

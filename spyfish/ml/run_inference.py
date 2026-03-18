@@ -1,6 +1,5 @@
 import csv
 import logging
-import sys
 from pathlib import Path
 
 import cv2
@@ -52,8 +51,7 @@ def run_yolo_inference(
         if not cap.isOpened():
             raise ValueError(f"Could not open video {video_url} during inference.")
 
-        if sampling_start > 0:
-            cap.set(cv2.CAP_PROP_POS_MSEC, sampling_start * 1000.0)
+        cap.set(cv2.CAP_PROP_POS_MSEC, sampling_start * 1000.0)
 
         # align current frame after precise seek
         current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -80,12 +78,8 @@ def run_yolo_inference(
                 if sampling_end is not None and real_video_seconds > sampling_end:
                     break
 
-                # Use absolute video time for all filenames and metadata
-                ml_timeline_seconds = (
-                    real_video_seconds - sampling_start
-                    if sampling_start > 0
-                    else real_video_seconds
-                )
+                # Absolute video timestamp — seconds from the start of the video file.
+                ml_timeline_seconds = real_video_seconds
 
                 # Run prediction on single frame
                 # TODO checkif we need this, project=None prevents the creation of the 'runs' directory
@@ -148,12 +142,9 @@ def run_yolo_inference(
 
         logging.info(f"Inference complete. Output saved to {output_csv}")
 
-    except FileNotFoundError as e:
-        logging.error(f"FileNotFoundError: {e}")
-        sys.exit(1)
     except Exception as e:
-        logging.error(f"Exception during inference: {e}")
-        sys.exit(1)
+        logging.error(f"Inference failed for {drop_id}: {e}")
+        raise
 
 
 def main(args=None):

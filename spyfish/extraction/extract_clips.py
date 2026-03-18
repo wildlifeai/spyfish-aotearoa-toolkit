@@ -2,8 +2,7 @@
 Extract clips from source video files using ffmpeg.
 
 Reads the selections CSV produced by selection strategies and cuts one mp4 per row.
-Clip timestamps are stored relative to SamplingStart in the selections CSV.
-sampling_start is added back to get the correct seek position in the full source video.
+Clip timestamps are absolute video positions (seconds from start of video file).
 """
 
 import logging
@@ -26,7 +25,7 @@ def extract_clips_from_selections(
     """
     Cuts one mp4 clip per row in the selections CSV using ffmpeg.
 
-    DropID and SamplingStart are read from the selections CSV itself.
+    DropID is read from the selections CSV itself.
     A 'ClipPath' column is added to the returned DataFrame so the caller
     has a single self-contained record of each clip and its metadata.
 
@@ -52,14 +51,7 @@ def extract_clips_from_selections(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    if config.csv_sampling_start_column not in df.columns:
-        raise ValueError(
-            f"Missing mandatory column '{config.csv_sampling_start_column}' in selections CSV. "
-            "This is required to calculate absolute seek times."
-        )
-
     drop_id = df[config.drop_id_column].iloc[0]
-    sampling_start = int(df[config.csv_sampling_start_column].iloc[0])
 
     clip_paths: List[Optional[str]] = []
     for idx, row in df.iterrows():
@@ -68,19 +60,19 @@ def extract_clips_from_selections(
             clip_paths.append(None)
             continue
 
-        clip_start_relative = float(row[config.csv_clip_start_column])
+        clip_start = float(row[config.csv_clip_start_column])
         # Use config-defined clip length as fallback
-        clip_end_relative = (
+        clip_end = (
             float(row[config.csv_clip_end_column])
             if config.csv_clip_end_column in row
-            else clip_start_relative
+            else clip_start
             + float(
-                config.get_section("zooniverse_extraction", {}).get("clip_length", 15.0)
+                config.get_section("zooniverse_extraction", {}).get("clip_length")
             )
         )
 
-        clip_duration = clip_end_relative - clip_start_relative
-        seek_seconds = sampling_start + clip_start_relative
+        clip_duration = clip_end - clip_start
+        seek_seconds = clip_start
 
         out_filename = generate_clip_filename(drop_id, clip_duration, seek_seconds)
         out_path = Path(output_dir) / out_filename
