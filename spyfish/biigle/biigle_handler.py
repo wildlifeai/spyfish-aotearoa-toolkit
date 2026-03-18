@@ -23,6 +23,23 @@ ResourceType = Literal["volumes", "projects"]
 MAX_DEPTH = 2
 
 
+class _ApiWithTimeout(Api):
+    """Thin subclass that injects a timeout into every request.
+
+    The vendored biigle_api.py must not be modified (upstream file). This
+    subclass overrides call() to set a default timeout so no request can hang
+    indefinitely. Callers can still override per-request by passing timeout=N.
+    """
+
+    def __init__(self, *args: Any, timeout: int = 30, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._timeout = timeout
+
+    def call(self, method: Any, url: str, raise_for_status: bool = True, *args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", self._timeout)
+        return super().call(method, url, raise_for_status, *args, **kwargs)
+
+
 class BiigleHandler:
     """Handler for BIIGLE API operations."""
 
@@ -34,7 +51,9 @@ class BiigleHandler:
         self.email = email or config.email
         self.token = token or config.token
         try:
-            self.api = Api(self.email, self.token)
+            self.api = _ApiWithTimeout(
+                self.email, self.token, timeout=config.request_timeout_secs
+            )
         except Exception as e:
             raise Exception(f"Failed to initialize BIIGLE API: {e}") from e
         logging.info("BiigleHandler initialized successfully")
@@ -192,16 +211,18 @@ class BiigleHandler:
             # The pending volume ID is temporary — resolve the real (finalized) volume ID
             # by looking it up in the project's volume list.
             real_id = self.resolve_real_volume_id(volume_name, project_id)
-            if real_id and real_id != pending_id:
+            if not real_id:
+                raise RuntimeError(
+                    f"Biigle volume '{volume_name}' was submitted but did not appear in the "
+                    f"project volume list after {config.volume_finalize_max_retries} attempts. "
+                    "The pending volume ID is transient and cannot be used for future sync. "
+                    "Check the Biigle project manually and retry."
+                )
+            if real_id != pending_id:
                 logging.info(
                     f"Resolved real volume ID: {pending_id} (pending) → {real_id} (finalized)"
                 )
-                volume_info["id"] = real_id
-            elif not real_id:
-                logging.warning(
-                    f"Could not resolve real volume ID for '{volume_name}'. "
-                    f"Storing pending ID {pending_id} — sync checks may fail until Biigle processes the volume."
-                )
+            volume_info["id"] = real_id
 
             return volume_info
         except Exception as e:

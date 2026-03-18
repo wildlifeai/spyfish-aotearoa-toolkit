@@ -67,6 +67,10 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_section, "default_label_tree_id", "biigle"))
 
     @property
+    def request_timeout_secs(self) -> int:
+        return int(get_required(self.biigle_section, "request_timeout_secs", "biigle"))
+
+    @property
     def volume_finalize_max_retries(self) -> int:
         return int(
             get_required(self.biigle_section, "volume_finalize_max_retries", "biigle")
