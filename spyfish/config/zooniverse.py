@@ -1,4 +1,5 @@
 import os
+
 from spyfish.config.base import BaseConfig, get_required
 
 
@@ -22,11 +23,19 @@ class ZooniverseConfig(BaseConfig):
 
     @property
     def health_check_count(self) -> int:
-        return int(get_required(self.extraction, "health_check_count", "zooniverse_extraction"))
+        return int(
+            get_required(self.extraction, "health_check_count", "zooniverse_extraction")
+        )
 
     @property
     def video_start_threshold(self) -> int:
-        return int(get_required(self.extraction, "video_start_threshold_seconds", "zooniverse_extraction"))
+        return int(
+            get_required(
+                self.extraction,
+                "video_start_threshold_seconds",
+                "zooniverse_extraction",
+            )
+        )
 
     @property
     def clip_cap(self) -> int:
@@ -34,11 +43,19 @@ class ZooniverseConfig(BaseConfig):
 
     @property
     def force_binary_strategy(self) -> bool:
-        return bool(get_required(self.extraction, "force_binary_strategy", "zooniverse_extraction"))
+        return bool(
+            get_required(
+                self.extraction, "force_binary_strategy", "zooniverse_extraction"
+            )
+        )
 
     @property
     def temporal_spacing(self) -> int:
-        return int(get_required(self.extraction, "temporal_spacing_seconds", "zooniverse_extraction"))
+        return int(
+            get_required(
+                self.extraction, "temporal_spacing_seconds", "zooniverse_extraction"
+            )
+        )
 
     @property
     def binary_strategy(self) -> dict:
@@ -46,7 +63,9 @@ class ZooniverseConfig(BaseConfig):
 
     @property
     def multiclass_strategy(self) -> dict:
-        return get_required(self.extraction, "multiclass_strategy", "zooniverse_extraction")
+        return get_required(
+            self.extraction, "multiclass_strategy", "zooniverse_extraction"
+        )
 
 
 zooniverse_config = ZooniverseConfig()

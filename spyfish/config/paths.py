@@ -1,14 +1,15 @@
-import os
-from pathlib import Path
 import re
-import logging
+from pathlib import Path
+
 from spyfish.config.base import BaseConfig
 
 
 def _require(d: dict, key: str, section: str = "") -> object:
     """Raise a clear error if a required config key is missing."""
     if key not in d or d[key] is None:
-        location = f"config.yaml [{section}.{key}]" if section else f"config.yaml [{key}]"
+        location = (
+            f"config.yaml [{section}.{key}]" if section else f"config.yaml [{key}]"
+        )
         raise KeyError(f"Required config key missing: {location}")
     return d[key]
 
@@ -116,7 +117,9 @@ class PathsConfig(BaseConfig):
 
     @property
     def test_deployment_metadata_csv(self) -> Path:
-        return self.project_root / _require(self.orchestration_paths, "test_deployment_csv", "paths.orchestration")
+        return self.project_root / _require(
+            self.orchestration_paths, "test_deployment_csv", "paths.orchestration"
+        )
 
     @property
     def s3_missing_files(self) -> str:
@@ -337,9 +340,11 @@ class PathsConfig(BaseConfig):
     def validation_patterns(self) -> dict:
         patterns = _require(self._yaml_config, "validation_patterns", "")
         return {
-            self.drop_id_column:   _require(patterns, "drop_id",   "validation_patterns"),
-            self.survey_id_column: _require(patterns, "survey_id", "validation_patterns"),
-            self.site_id_column:   _require(patterns, "site_id",   "validation_patterns"),
+            self.drop_id_column: _require(patterns, "drop_id", "validation_patterns"),
+            self.survey_id_column: _require(
+                patterns, "survey_id", "validation_patterns"
+            ),
+            self.site_id_column: _require(patterns, "site_id", "validation_patterns"),
         }
 
     @property
@@ -356,7 +361,9 @@ class PathsConfig(BaseConfig):
             "file_presence": {
                 "bucket": self.s3_bucket,
                 "s3_sharepoint_path": self.s3_sharepoint_path,
-                "csv_filename": _require(self.metadata_files, "deployment_csv", "paths.metadata.files"),
+                "csv_filename": _require(
+                    self.metadata_files, "deployment_csv", "paths.metadata.files"
+                ),
                 "csv_column_to_extract": self.csv_video_file_link_column,
                 "column_filter": None,
                 "column_value": None,
@@ -368,9 +375,13 @@ class PathsConfig(BaseConfig):
     def validate_drop_id(self, drop_id: str) -> str:
         pattern = self.validation_patterns[self.drop_id_column]
         if not re.match(pattern, drop_id):
-            raise ValueError(f"Invalid DropID format: '{drop_id}'. Must match {pattern}")
+            raise ValueError(
+                f"Invalid DropID format: '{drop_id}'. Must match {pattern}"
+            )
         if ".." in drop_id or "/" in drop_id or "\\" in drop_id:
-            raise ValueError(f"Security Alert: Malicious DropID detected (potential path traversal): '{drop_id}'")
+            raise ValueError(
+                f"Security Alert: Malicious DropID detected (potential path traversal): '{drop_id}'"
+            )
         return drop_id
 
     # ── Orchestrator ────────────────────────────────────────────────────────
@@ -394,13 +405,22 @@ class PathsConfig(BaseConfig):
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
 
     def get_maxn_csv_path(self, drop_id: str, model_name: str) -> Path:
-        return self.get_drop_annotations_dir(drop_id) / f"{self.validate_drop_id(drop_id)}_{model_name}_maxn.csv"
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_{model_name}_maxn.csv"
+        )
 
     def get_selections_csv_path(self, drop_id: str) -> Path:
-        return self.get_drop_annotations_dir(drop_id) / f"{self.validate_drop_id(drop_id)}_frames_selection.csv"
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_frames_selection.csv"
+        )
 
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:
-        return self.get_drop_annotations_dir(drop_id) / f"{self.validate_drop_id(drop_id)}_{model_name}_raw.csv"
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_{model_name}_raw.csv"
+        )
 
     def get_clips_dir(self, drop_id: str, target: str = "") -> Path:
         sub_path = f"{target}_clips" if target else "clips"
@@ -411,6 +431,10 @@ class PathsConfig(BaseConfig):
         return self.data_quality_dir / self.validate_drop_id(drop_id) / sub_path
 
     # ── Training ────────────────────────────────────────────────────────────
+
+    @property
+    def training_config(self) -> dict:
+        return _require(self._yaml_config, "training", "")
 
     @property
     def training_epochs(self) -> int:
@@ -438,7 +462,9 @@ class PathsConfig(BaseConfig):
 
     @property
     def local_training_dir(self) -> Path:
-        return self.project_root / _require(self.training_config, "local_training_dir", "training")
+        return self.project_root / _require(
+            self.training_config, "local_training_dir", "training"
+        )
 
     # ── FFmpeg ──────────────────────────────────────────────────────────────
 

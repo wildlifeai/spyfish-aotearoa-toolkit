@@ -247,7 +247,7 @@ def select_clips_with_strategy(
         if len(priority_df) >= clip_cap:
             return priority_df.iloc[:clip_cap]
         else:
-            n_needed = clip_cap - len(priority_df)
+            n_needed = min(clip_cap - len(priority_df), len(other_df))
             sampled_others = other_df.sample(n_needed)
             return pd.concat([priority_df, sampled_others]).sort_values(
                 config.csv_clip_start_column

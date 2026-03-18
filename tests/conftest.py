@@ -1,8 +1,11 @@
-import pytest
-import sqlite3
 import os
-from unittest.mock import patch, MagicMock
+import sqlite3
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from spyfish.database.manager import DatabaseManager
+
 
 @pytest.fixture
 def mock_db():
@@ -22,6 +25,7 @@ def mock_db():
 
     yield db
 
+
 @pytest.fixture
 def temp_db(tmp_path):
     """Provides a DatabaseManager connected to a temporary file database."""
@@ -33,7 +37,7 @@ def temp_db(tmp_path):
 @pytest.fixture
 def mock_s3_handler():
     """Mocks the S3Handler to prevent real AWS calls during testing."""
-    with patch('spyfish.storage.s3_handler.S3Handler') as MockS3:
+    with patch("spyfish.storage.s3_handler.S3Handler") as MockS3:
         mock_instance = MockS3.return_value
         mock_instance.download_object_from_s3.return_value = True
         yield mock_instance

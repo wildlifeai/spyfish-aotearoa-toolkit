@@ -13,7 +13,9 @@ from spyfish.storage.db_sync import upload_db
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
-def process_csv_targets(csv_path: str, default_stage: str = None, push_s3: bool = False):
+def process_csv_targets(
+    csv_path: str, default_stage: str = None, push_s3: bool = False
+):
     """
     Reads a CSV file containing Drop IDs and their target pipeline stage,
     and updates the local database accordingly.
@@ -64,7 +66,11 @@ def process_csv_targets(csv_path: str, default_stage: str = None, push_s3: bool 
             continue
 
         stage = default_stage
-        if status_col in df.columns and pd.notna(row.get(status_col)) and str(row[status_col]).strip():
+        if (
+            status_col in df.columns
+            and pd.notna(row.get(status_col))
+            and str(row[status_col]).strip()
+        ):
             stage = str(row[status_col]).strip()
 
         if not stage:
@@ -94,7 +100,9 @@ def process_csv_targets(csv_path: str, default_stage: str = None, push_s3: bool 
 
     for drop_id, stage in updates:
         if drop_id not in existing_records:
-            logging.warning(f"DropID '{drop_id}' not found in the local database. Skipping.")
+            logging.warning(
+                f"DropID '{drop_id}' not found in the local database. Skipping."
+            )
             missing_count += 1
             continue
 
