@@ -1,4 +1,5 @@
 import os
+
 from spyfish.config.base import BaseConfig, get_required
 
 
@@ -32,15 +33,21 @@ class BiigleConfig(BaseConfig):
 
     @property
     def annotation_report_type_video(self) -> int:
-        return int(get_required(self.biigle_section, "annotation_report_type_video", "biigle"))
+        return int(
+            get_required(self.biigle_section, "annotation_report_type_video", "biigle")
+        )
 
     @property
     def annotation_report_type_images(self) -> int:
-        return int(get_required(self.biigle_section, "annotation_report_type_images", "biigle"))
+        return int(
+            get_required(self.biigle_section, "annotation_report_type_images", "biigle")
+        )
 
     @property
     def volume_report_type(self) -> int:
-        return int(get_required(self.biigle_section, "volume_report_type_image", "biigle"))
+        return int(
+            get_required(self.biigle_section, "volume_report_type_image", "biigle")
+        )
 
     @property
     def done_labels(self) -> list:
@@ -61,19 +68,31 @@ class BiigleConfig(BaseConfig):
 
     @property
     def volume_finalize_max_retries(self) -> int:
-        return int(get_required(self.biigle_section, "volume_finalize_max_retries", "biigle"))
+        return int(
+            get_required(self.biigle_section, "volume_finalize_max_retries", "biigle")
+        )
 
     @property
     def volume_finalize_retry_interval_secs(self) -> float:
-        return float(get_required(self.biigle_section, "volume_finalize_retry_interval_secs", "biigle"))
+        return float(
+            get_required(
+                self.biigle_section, "volume_finalize_retry_interval_secs", "biigle"
+            )
+        )
 
     @property
     def report_download_max_retries(self) -> int:
-        return int(get_required(self.biigle_section, "report_download_max_retries", "biigle"))
+        return int(
+            get_required(self.biigle_section, "report_download_max_retries", "biigle")
+        )
 
     @property
     def report_download_retry_interval_secs(self) -> float:
-        return float(get_required(self.biigle_section, "report_download_retry_interval_secs", "biigle"))
+        return float(
+            get_required(
+                self.biigle_section, "report_download_retry_interval_secs", "biigle"
+            )
+        )
 
 
 biigle_config = BiigleConfig()

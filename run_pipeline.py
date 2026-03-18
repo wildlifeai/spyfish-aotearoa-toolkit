@@ -338,9 +338,12 @@ def main():
     if args.set_targets:
         log_header("ORCHESTRATION: SETTING PIPELINE TARGETS FROM CSV")
         from spyfish.test_setup import process_csv_targets
+
         csv_path = config.pipeline_targets_csv
         if not csv_path:
-            logging.error("--set-targets requires paths.pipeline_targets_csv to be set in config.yaml.")
+            logging.error(
+                "--set-targets requires paths.pipeline_targets_csv to be set in config.yaml."
+            )
             sys.exit(1)
         execute_step(process_csv_targets, csv_path, push_s3=not args.no_upload)
 

@@ -1,10 +1,13 @@
-import pytest
-from unittest.mock import patch, MagicMock
-from spyfish.orchestrator.ml_runner import MLRunner
-from spyfish.config.base import PipelineStatus
+from unittest.mock import MagicMock, patch
 
-@patch('spyfish.orchestrator.ml_runner.DatabaseManager')
-@patch('spyfish.orchestrator.ml_runner.S3Handler')
+import pytest
+
+from spyfish.config.base import PipelineStatus
+from spyfish.orchestrator.ml_runner import MLRunner
+
+
+@patch("spyfish.orchestrator.ml_runner.DatabaseManager")
+@patch("spyfish.orchestrator.ml_runner.S3Handler")
 def test_get_inference_targets(mock_s3_class, mock_db_class):
     mock_db = mock_db_class.return_value
     mock_s3 = mock_s3_class.return_value
@@ -15,7 +18,7 @@ def test_get_inference_targets(mock_s3_class, mock_db_class):
             "drop_id": "KSF_20240124_BUV_KSF_085_01",
             "video_path": "path/1.mp4",
             "sampling_start": 0,
-            "sampling_end": 100
+            "sampling_end": 100,
         }
     ]
 

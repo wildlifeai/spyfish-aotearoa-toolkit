@@ -17,7 +17,9 @@ class MLConfig(BaseConfig):
 
     @property
     def log_interval_frames(self) -> int:
-        return int(get_required(self.ml_inference, "log_interval_frames", "ml_inference"))
+        return int(
+            get_required(self.ml_inference, "log_interval_frames", "ml_inference")
+        )
 
     @property
     def imgsz(self):
@@ -29,11 +31,17 @@ class MLConfig(BaseConfig):
 
     @property
     def maxn_confidence_threshold(self):
-        return get_required(self.ml_inference, "maxn_confidence_threshold", "ml_inference")
+        return get_required(
+            self.ml_inference, "maxn_confidence_threshold", "ml_inference"
+        )
 
     @property
     def interval_seconds(self):
-        return get_required(get_required(self.ml_inference, "extraction", "ml_inference"), "interval_seconds", "ml_inference.extraction")
+        return get_required(
+            get_required(self.ml_inference, "extraction", "ml_inference"),
+            "interval_seconds",
+            "ml_inference.extraction",
+        )
 
 
 ml_config = MLConfig()
