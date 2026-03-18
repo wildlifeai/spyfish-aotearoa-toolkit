@@ -119,7 +119,7 @@ def create_biigle_volume(
         volume_name=volume_name,
         s3_url=s3_url,
         files=file_names,
-        project_id=project_id,  # type: ignore
+        project_id=project_id,
         media_type="image",
     )
     volume_id = volume_info.get("id", "?")

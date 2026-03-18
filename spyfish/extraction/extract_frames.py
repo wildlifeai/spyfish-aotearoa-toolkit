@@ -181,7 +181,7 @@ def extract_frames_from_selections(
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
     and produce a COCO JSON with the corresponding YOLO bounding boxes.
 
-    The frame is grabbed at: sampling_start + TimeOfMaxSeconds
+    The frame is grabbed at the absolute video timestamp stored in csv_clip_max_time_column.
     This is the exact frame that was the deciding factor in the MaxN calculation.
 
     Unlike draw_frames.py (which draws boxes ON the frame using cv2 for QA),
@@ -212,11 +212,6 @@ def extract_frames_from_selections(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     drop_id = df[config.drop_id_column].iloc[0]
-    sampling_start = (
-        int(df[config.csv_sampling_start_column].iloc[0])
-        if config.csv_sampling_start_column in df.columns
-        else 0
-    )
 
     raw_df = (
         pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
@@ -237,17 +232,15 @@ def extract_frames_from_selections(
     frame_paths = []
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # TimeOfMaxnMs: exact ML peak in seconds (sub-second precision from raw CSV).
-        time_of_max_relative = float(row[config.csv_clip_max_time_column])
-
-        seek_seconds = sampling_start + time_of_max_relative
+        # Absolute video timestamp in seconds (from start of video file).
+        seek_seconds = float(row[config.csv_clip_max_time_column])
         frame_index = None
 
         if not raw_df.empty:
             # Find the nearest frame in the raw ML CSV to this peak time
             # Using the exact same matching logic as the COCO builder ensures alignment
             nearest = raw_df.iloc[
-                (raw_df["time_seconds"] - time_of_max_relative).abs().argsort()[:1]
+                (raw_df["time_seconds"] - seek_seconds).abs().argsort()[:1]
             ]
             if not nearest.empty:
                 frame_index = int(nearest["frame"].iloc[0])
@@ -269,7 +262,7 @@ def extract_frames_from_selections(
             {
                 "image_id": img_id,
                 "file_name": out_filename,
-                "time_of_max": time_of_max_relative,
+                "time_of_max": seek_seconds,
                 "drop_id": drop_id,
                 "selection_reason": row.get("SelectionReason", ""),
                 "img_w": img_w,

@@ -121,7 +121,7 @@ def upload_clips_to_zooniverse(
             "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
-            "#SamplingStart": row.get(config.csv_sampling_start_column, 0),
+            "#SamplingStart": row[config.csv_sampling_start_column],
         }
 
         subject = Subject()
@@ -206,7 +206,7 @@ def upload_frames_to_zooniverse(
             "#MaxInterval": row.get("MaxInterval", ""),
             "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
-            "#SamplingStart": row.get(config.csv_sampling_start_column, 0),
+            "#SamplingStart": row[config.csv_sampling_start_column],
         }
 
         subject = Subject()

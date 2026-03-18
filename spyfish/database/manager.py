@@ -4,6 +4,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from spyfish.config.base import InvalidTransitionError, PipelineStatus
 from spyfish.config.wrapper import config
 
 
@@ -171,6 +172,34 @@ class DatabaseManager:
                     f"Cleared PIPELINE_ERROR entries for {drop_id} (status reset to {new_status})"
                 )
             conn.commit()
+
+    def advance_status(self, drop_id: str, to_status: str) -> None:
+        """Transition drop_id to to_status, validating against VALID_TRANSITIONS.
+
+        Raises InvalidTransitionError if the transition is not permitted.
+        Use update_status() directly only for admin/test tooling that needs to
+        set arbitrary statuses (set_status.py, test_setup.py, conftest.py).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM deployments WHERE drop_id = ?", (drop_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise KeyError(f"No deployment found with drop_id={drop_id!r}")
+            current = row["status"]
+
+        # ON_HOLD can transition to any status (it's a pause state, not a terminal)
+        if current != PipelineStatus.ON_HOLD:
+            allowed = PipelineStatus.VALID_TRANSITIONS.get(current, set())
+            if to_status not in allowed:
+                raise InvalidTransitionError(
+                    f"{drop_id}: invalid transition {current!r} → {to_status!r}. "
+                    f"Allowed from {current!r}: {sorted(allowed) if allowed else '(none)'}"
+                )
+
+        self.update_status(drop_id, to_status)
 
     def update_biigle_volume_id(self, drop_id: str, volume_id: str):
         """Sets the biigle_volume_id for a specific deployment."""

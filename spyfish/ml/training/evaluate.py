@@ -180,13 +180,11 @@ def run_evaluation_pipeline(
     training_cfg = config.get_section("training")
 
     imgsz = training_cfg.get("imgsz", 640)
-    local_training_dir = Path(
-        training_cfg.get("local_training_dir", "process_files/training")
-    )
+    local_training_dir = config.local_training_dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Evaluate new model
-    local_results_dir = local_training_dir / "results" / f"{timestamp}_{model_type}"
+    local_results_dir = config.training_results_dir / f"{timestamp}_{model_type}"
     new_metrics = evaluate_model(
         model_path, data_yaml, split=split, imgsz=imgsz, output_dir=local_results_dir
     )

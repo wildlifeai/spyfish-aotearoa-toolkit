@@ -208,11 +208,8 @@ def main():
     training_cfg = config.get_section("training")
     paths_cfg = config.get_section("paths")
     bucket = paths_cfg.get("bucket_name")
-    # TODO hardcoded paths
-    results_prefix = "process_files/training/results"
-    local_training_dir = Path(
-        training_cfg.get("local_training_dir", "process_files/training")
-    )
+    results_prefix = config.training_results_s3_prefix
+    local_results_root = config.training_results_dir
 
     # --- Sidebar: select result run ---
     st.sidebar.header("Select Run")
@@ -221,7 +218,6 @@ def main():
 
     # Also check local results as a fallback
     local_result_dirs = []
-    local_results_root = local_training_dir / "results"
     if local_results_root.exists():
         local_result_dirs = [
             d.name

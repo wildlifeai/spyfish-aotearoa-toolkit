@@ -42,7 +42,7 @@ def check_pending_arrivals(known_files: Optional[Set[str]] = None):
             logging.info(
                 f"✅ Video confirmed for {drop_id}. Updating status to {PipelineStatus.READY_FOR_ML}."
             )
-            db.update_status(drop_id, PipelineStatus.READY_FOR_ML)
+            db.advance_status(drop_id, PipelineStatus.READY_FOR_ML)
             updated_count += 1
 
     logging.info(

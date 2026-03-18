@@ -63,9 +63,6 @@ def manual_extract():
         output_dir=qa_dir,
         frame_list=frame_indices,
         confidence_threshold=config.confidence_threshold,
-        sampling_start=(
-            int(df["SamplingStart"].iloc[0]) if "SamplingStart" in df.columns else 0
-        ),
         drop_id=drop_id,
     )
 

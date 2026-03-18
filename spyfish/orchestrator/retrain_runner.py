@@ -56,10 +56,7 @@ def run_retraining(
         sync_biigle_annotations()
 
     # Configuration for retraining
-    training_cfg = config.get_section("training")
-    local_training_dir = Path(
-        training_cfg.get("local_training_dir", "process_files/training")
-    )
+    local_training_dir = config.local_training_dir
     # The training scripts look for images. Expert frames are usually in data_quality/{drop_id}/biigle_frames/
     images_dir = config.data_quality_dir
 
