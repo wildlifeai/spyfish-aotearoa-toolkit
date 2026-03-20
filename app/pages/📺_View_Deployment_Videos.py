@@ -109,9 +109,21 @@ else:
         st.subheader("✂️ Extract Clip")
         col1, col2 = st.columns(2)
         with col1:
-            clip_start = st.number_input("Start (seconds)", min_value=0.0, step=1.0, value=0.0)
+            st.caption("Start")
+            s_col1, s_col2 = st.columns(2)
+            with s_col1:
+                start_min = st.number_input("Minutes", min_value=0, step=1, value=0, key="start_min")
+            with s_col2:
+                start_sec = st.number_input("Seconds", min_value=0, max_value=59, step=1, value=0, key="start_sec")
+            clip_start = start_min * 60 + start_sec
         with col2:
-            clip_end = st.number_input("End (seconds)", min_value=0.0, step=1.0, value=30.0)
+            st.caption("End")
+            e_col1, e_col2 = st.columns(2)
+            with e_col1:
+                end_min = st.number_input("Minutes", min_value=0, step=1, value=0, key="end_min")
+            with e_col2:
+                end_sec = st.number_input("Seconds", min_value=0, max_value=59, step=1, value=30, key="end_sec")
+            clip_end = end_min * 60 + end_sec
 
         if st.button("Extract Clip", disabled=(clip_end <= clip_start)):
             if clip_end <= clip_start:
@@ -122,8 +134,10 @@ else:
                         clip_bytes = extract_clip_bytes(presigned_url, clip_start, clip_end)
                         st.session_state["clip_bytes"] = clip_bytes
                         current_drop_id = st.session_state.get("presigned_drop_id") or "clip"
+                        start_label = f"{start_min}m{start_sec:02d}s"
+                        end_label = f"{end_min}m{end_sec:02d}s"
                         st.session_state["clip_filename"] = (
-                            f"{current_drop_id}_clip_{int(clip_start)}s_{int(clip_end)}s.mp4"
+                            f"{current_drop_id}_clip_{start_label}_{end_label}.mp4"
                         )
                     except Exception as e:
                         st.error(f"Extraction failed: {e}")
