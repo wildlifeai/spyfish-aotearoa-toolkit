@@ -51,6 +51,11 @@ paths:
       reserves_csv: "Marine Reserves.csv"
       legacy_experts_csv: "BUV Annotations Legacy Experts.csv"
 
+  # Optional: absolute path to an alternate base dir for media downloads (e.g. /tmp/spyfish).
+  # Use this for a temp/no-backup location when videos are large or ephemeral.
+  # If unset, media resolves to <project_root>/media as before.
+  media_base_dir:
+
   # Sub-directories (local and S3 suffixes)
   sub_dirs:
     media: "media"

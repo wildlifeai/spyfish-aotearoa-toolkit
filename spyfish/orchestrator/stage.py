@@ -48,6 +48,11 @@ class DropStage:
     input_statuses may be a static list[str] or a callable
     (args: Namespace, run_all: bool) -> list[str] for dynamic cases
     (e.g. Biigle-direct path that also picks up ML_COMPLETE).
+
+    queue_status: if set, drops not already at this status are pre-advanced
+    to it before fn runs. Use when a stage accepts an "earlier" trigger status
+    but the state machine requires an intermediate queue state en route to the
+    final status (e.g. ML_COMPLETE → AWAITING_CITSCI_CLIPS → CITSCI_CLIPS_COMPLETE).
     """
 
     flag: str
@@ -55,6 +60,7 @@ class DropStage:
     fn: Callable[[str], str]
     input_statuses: list[str] | Callable[[argparse.Namespace, bool], list[str]]
     run_in_all: bool = True
+    queue_status: str | None = None
 
 
 StageSpec = GlobalStage | DropStage
@@ -142,8 +148,13 @@ class StageRunner:
 
         logging.info(f"Processing {len(drop_ids)} drops for {stage.flag}...")
 
+        status_by_drop = {r["drop_id"]: r["status"] for r in records}
+
         for drop_id in drop_ids:
             try:
+                if stage.queue_status and status_by_drop.get(drop_id) != stage.queue_status:
+                    self.db.advance_status(drop_id, stage.queue_status)
+                    logging.info(f"  → {drop_id}: queued as {stage.queue_status}")
                 next_status = stage.fn(drop_id)
                 self.db.advance_status(drop_id, next_status)
                 logging.info(f"  → {drop_id}: advanced to {next_status}")

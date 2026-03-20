@@ -298,6 +298,7 @@ STAGES: list = [
         "Step 4: Zooniverse clip extraction",
         _step4_process_drop,
         [PipelineStatus.ML_COMPLETE, PipelineStatus.AWAITING_CITSCI_CLIPS],
+        queue_status=PipelineStatus.AWAITING_CITSCI_CLIPS,
     ),
     DropStage(
         "zooniverse-images",

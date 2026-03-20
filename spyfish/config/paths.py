@@ -148,6 +148,9 @@ class PathsConfig(BaseConfig):
 
     @property
     def media_dir(self) -> Path:
+        media_base = self.paths.get("media_base_dir")
+        if media_base:
+            return Path(media_base) / self._sub("media")
         return self.project_root / self._sub("media")
 
     @property
