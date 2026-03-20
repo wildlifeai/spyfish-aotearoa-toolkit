@@ -6,6 +6,7 @@ Provides functionality to interact with the Biigle API:
 - Setting up label trees from a CSV of scientific names
 - Exporting annotation reports and reading them as DataFrames
 """
+
 import io
 import logging
 import time
@@ -13,13 +14,37 @@ import zipfile
 from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError  # type: ignore
 
 from spyfish.biigle.external.biigle_api import Api
-from spyfish.config import config
+from spyfish.config.wrapper import config
 
 ResourceType = Literal["volumes", "projects"]
 MAX_DEPTH = 2
+
+
+class _ApiWithTimeout(Api):
+    """Thin subclass that injects a timeout into every request.
+
+    The vendored biigle_api.py must not be modified (upstream file). This
+    subclass overrides call() to set a default timeout so no request can hang
+    indefinitely. Callers can still override per-request by passing timeout=N.
+    """
+
+    def __init__(self, *args: Any, timeout: int = 30, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._timeout = timeout
+
+    def call(
+        self,
+        method: Any,
+        url: str,
+        raise_for_status: bool = True,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.setdefault("timeout", self._timeout)
+        return super().call(method, url, raise_for_status, *args, **kwargs)
 
 
 class BiigleHandler:
@@ -30,10 +55,12 @@ class BiigleHandler:
         Initialize BiigleHandler with API credentials.
         Credentials fall back to config (BIIGLE_API_EMAIL / BIIGLE_API_TOKEN env vars).
         """
-        self.email = email or config.biigle_email
-        self.token = token or config.biigle_token
+        self.email = email or config.email
+        self.token = token or config.token
         try:
-            self.api = Api(self.email, self.token)
+            self.api = _ApiWithTimeout(
+                self.email, self.token, timeout=config.request_timeout_secs
+            )
         except Exception as e:
             raise Exception(f"Failed to initialize BIIGLE API: {e}") from e
         logging.info("BiigleHandler initialized successfully")
@@ -63,7 +90,9 @@ class BiigleHandler:
             logging.error(f"Failed to get volumes for project {project_id}: {e}")
             raise
 
-    def get_pending_volumes(self, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_pending_volumes(
+        self, project_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         """Get all pending volumes for a project."""
         project_id = project_id or config.biigle_project_id
         try:
@@ -72,24 +101,29 @@ class BiigleHandler:
             return response.json()
         except HTTPError as e:
             if e.response.status_code == 405:
-                logging.info(f"GET projects/{project_id}/pending-volumes returned 405, trying GET pending-volumes...")
+                logging.info(
+                    f"GET projects/{project_id}/pending-volumes returned 405, trying GET pending-volumes..."
+                )
                 try:
                     # Fallback to global endpoint
                     response = self.api.get("pending-volumes")
                     pending = response.json()
-                    logging.info(f"Global fallback returned {len(pending)} pending volumes.")
+                    logging.info(
+                        f"Global fallback returned {len(pending)} pending volumes."
+                    )
                     return pending
                 except Exception as e2:
                     logging.error(f"Failed to get pending volumes from fallback: {e2}")
             else:
-                logging.error(f"Failed to get pending volumes (project {project_id}): {e}")
+                logging.error(
+                    f"Failed to get pending volumes (project {project_id}): {e}"
+                )
             raise
         except Exception as e:
             logging.error(f"Failed to get pending volumes: {e}")
             raise
 
-    def create_pending_volume(
-        self, project_id: int, media_type: str) -> Dict[str, Any]:
+    def create_pending_volume(self, project_id: int, media_type: str) -> Dict[str, Any]:
         """
         Create a pending volume in a project.
         If a pending volume already exists, returns the existing one.
@@ -105,23 +139,35 @@ class BiigleHandler:
         except Exception as e:
             # Handle "Only a single pending volume can be created at a time"
             if "Only a single pending volume" in str(e):
-                logging.info("Pending volume already exists. Attempting to fetch existing one...")
+                logging.info(
+                    "Pending volume already exists. Attempting to fetch existing one..."
+                )
                 try:
                     existing_pending = self.get_pending_volumes(project_id)
-                    logging.info(f"Found {len(existing_pending)} existing pending volumes.")
+                    logging.info(
+                        f"Found {len(existing_pending)} existing pending volumes."
+                    )
                     for pv in existing_pending:
-                        logging.info(f"Checking pending volume: id={pv.get('id')}, media_type={pv.get('media_type')}")
+                        logging.info(
+                            f"Checking pending volume: id={pv.get('id')}, media_type={pv.get('media_type')}"
+                        )
                         if pv.get("media_type") == media_type:
-                            logging.info(f"Re-using existing pending volume ID: {pv['id']} (media_type={media_type})")
+                            logging.info(
+                                f"Re-using existing pending volume ID: {pv['id']} (media_type={media_type})"
+                            )
                             return pv
                     if existing_pending:
-                        logging.warning(f"Found pending volume {existing_pending[0]['id']} but media_type differs ({existing_pending[0].get('media_type')} != {media_type}).")
+                        logging.warning(
+                            f"Found pending volume {existing_pending[0]['id']} but media_type differs ({existing_pending[0].get('media_type')} != {media_type})."
+                        )
                         return existing_pending[0]
                 except Exception as list_err:
                     logging.warning(f"Could not list pending volumes: {list_err}")
 
                 logging.error("Could not find existing pending volume to reuse.")
-                raise RuntimeError("A pending volume already exists in Biigle for this user/project, and I could not retrieve its ID. Please delete it in the Biigle UI (under Projects > Pending Volumes) and try again.") from e
+                raise RuntimeError(
+                    "A pending volume already exists in Biigle for this user/project, and I could not retrieve its ID. Please delete it in the Biigle UI (under Projects > Pending Volumes) and try again."
+                ) from e
 
             logging.error(f"Failed to create pending volume: {e}")
             raise
@@ -132,7 +178,9 @@ class BiigleHandler:
         """Configure a pending volume with name, S3 URL, and file list."""
         try:
             payload = {"name": volume_name, "url": s3_url, "files": files}
-            response = self.api.put(f"pending-volumes/{pending_volume_id}", json=payload)
+            response = self.api.put(
+                f"pending-volumes/{pending_volume_id}", json=payload
+            )
             volume_info = response.json()
             logging.info(f"Configured volume '{volume_name}' with {len(files)} files")
             return volume_info
@@ -170,14 +218,18 @@ class BiigleHandler:
             # The pending volume ID is temporary — resolve the real (finalized) volume ID
             # by looking it up in the project's volume list.
             real_id = self.resolve_real_volume_id(volume_name, project_id)
-            if real_id and real_id != pending_id:
-                logging.info(f"Resolved real volume ID: {pending_id} (pending) → {real_id} (finalized)")
-                volume_info["id"] = real_id
-            elif not real_id:
-                logging.warning(
-                    f"Could not resolve real volume ID for '{volume_name}'. "
-                    f"Storing pending ID {pending_id} — sync checks may fail until Biigle processes the volume."
+            if not real_id:
+                raise RuntimeError(
+                    f"Biigle volume '{volume_name}' was submitted but did not appear in the "
+                    f"project volume list after {config.volume_finalize_max_retries} attempts. "
+                    "The pending volume ID is transient and cannot be used for future sync. "
+                    "Check the Biigle project manually and retry."
                 )
+            if real_id != pending_id:
+                logging.info(
+                    f"Resolved real volume ID: {pending_id} (pending) → {real_id} (finalized)"
+                )
+            volume_info["id"] = real_id
 
             return volume_info
         except Exception as e:
@@ -215,11 +267,15 @@ class BiigleHandler:
                     best_match = matches[0]
 
                     if len(matches) > 1:
-                        logging.info(f"Multiple volumes found with name '{volume_name}'. Selecting most recent: ID {best_match['id']} (created {best_match.get('created_at')})")
+                        logging.info(
+                            f"Multiple volumes found with name '{volume_name}'. Selecting most recent: ID {best_match['id']} (created {best_match.get('created_at')})"
+                        )
 
                     return best_match["id"]
             except Exception as e:
-                logging.warning(f"Attempt {attempt}/{max_tries}: failed to list volumes — {e}")
+                logging.warning(
+                    f"Attempt {attempt}/{max_tries}: failed to list volumes — {e}"
+                )
 
             if attempt < max_tries:
                 logging.info(
@@ -228,7 +284,9 @@ class BiigleHandler:
                 )
                 time.sleep(poll_interval)
 
-        logging.warning(f"Could not find finalized volume '{volume_name}' after {max_tries} attempts.")
+        logging.warning(
+            f"Could not find finalized volume '{volume_name}' after {max_tries} attempts."
+        )
         return None
 
     def build_s3_url(self, s3_path: str, disk_id: Optional[int] = None) -> str:
@@ -236,7 +294,7 @@ class BiigleHandler:
         Build a Biigle-compatible S3 URL from an S3 path.
 
         """
-        disk_id = disk_id or config.biigle_disk_id
+        disk_id = disk_id or config.disk_id
         s3_path = s3_path.rstrip("/") + "/"
         return f"disk-{disk_id}://{s3_path}"
 
@@ -285,7 +343,11 @@ class BiigleHandler:
                 created_labels[row["name"]] = label_response.json()
 
             logging.info(f"Added {len(created_labels)} labels to tree '{tree_name}'")
-            return {"tree_id": tree_id, "tree_info": tree_info, "labels": created_labels}
+            return {
+                "tree_id": tree_id,
+                "tree_info": tree_info,
+                "labels": created_labels,
+            }
         except Exception as e:
             logging.error(f"Failed to create label tree: {e}")
             raise
@@ -308,12 +370,12 @@ class BiigleHandler:
         self,
         resource: ResourceType,
         resource_id: int,
-        type_id: int = config.biigle_annotation_report_type_video,
+        type_id: int = config.annotation_report_type_video,
     ) -> int:
         """
         Request a BIIGLE annotation report. Returns the report ID.
         Reports are generated asynchronously — use download_report_zip_bytes() to fetch.
-        Defaults to the video annotation CSV report type (config.biigle_annotation_report_type_video).
+        Defaults to the video annotation CSV report type (config.annotation_report_type_video).
         """
         resp = self.api.post(
             f"{resource}/{resource_id}/reports", json={"type_id": type_id}
@@ -379,7 +441,11 @@ class BiigleHandler:
                 if name.lower().endswith(".csv"):
                     with zf.open(info) as f:
                         csv_dfs[name] = pd.read_csv(f)
-                elif allow_nested and name.lower().endswith(".zip") and _depth < MAX_DEPTH:
+                elif (
+                    allow_nested
+                    and name.lower().endswith(".zip")
+                    and _depth < MAX_DEPTH
+                ):
                     nested_csvs = self.read_csvs_from_zip_bytes(
                         zf.read(name), allow_nested=allow_nested, _depth=_depth + 1
                     )
@@ -399,7 +465,7 @@ class BiigleHandler:
         self,
         resource: ResourceType,
         resource_id: int,
-        type_id: int = config.biigle_annotation_report_type_video,
+        type_id: int = config.annotation_report_type_video,
         source_col: str = "source_file",
     ) -> pd.DataFrame:
         """
@@ -473,7 +539,9 @@ class BiigleHandler:
                     if img:
                         images.append(img)
 
-            logging.info(f"Retrieved {len(images)} images concurrently for volume {volume_id}.")
+            logging.info(
+                f"Retrieved {len(images)} images concurrently for volume {volume_id}."
+            )
             return images
         except Exception as e:
             logging.error(f"Failed to get images for volume {volume_id}: {e}")
@@ -512,13 +580,13 @@ class BiigleHandler:
         """
         Check whether the first file in a volume has a whole-file label
         indicating it is done. The done labels are configured via
-        config.biigle_done_labels (defaults: 'Done Volume' and 'Done QA Review').
+        config.done_labels (defaults: 'Done Volume' and 'Done QA Review').
         Uses the volume's media_type (from its metadata) to call the correct label endpoint.
 
         Returns:
             Tuple of (is_done: bool, media_type: str) where media_type is 'image' or 'video'.
         """
-        done_labels = config.biigle_done_labels
+        done_labels = config.done_labels
 
         try:
             # Get media_type directly from volume metadata — no guessing needed
@@ -532,18 +600,42 @@ class BiigleHandler:
 
             # Only the first file has the status labels
             first_id = file_ids[0]
-            get_labels = self.get_image_labels if media_type == "image" else self.get_video_labels
+            get_labels = (
+                self.get_image_labels
+                if media_type == "image"
+                else self.get_video_labels
+            )
 
             try:
                 labels = get_labels(first_id)
             except Exception as e:
-                logging.warning(f"Could not get {media_type} labels for file {first_id}: {e}")
+                logging.warning(
+                    f"Could not get {media_type} labels for file {first_id}: {e}"
+                )
                 return False, media_type
 
-            # Both labels must be present (exact match, as they appear in Biigle)
-            found_labels = {label_entry.get("label", {}).get("name", "") for label_entry in labels}
+            # Both labels must be present (exact match, as they appear in Biigle).
+            # Biigle whole-file label entries are nested: {"label": {"name": "..."}, ...}.
+            # Flat fallback ("name" at top level) guards against API shape changes.
+            found_labels = set()
+            for label_entry in labels:
+                name = label_entry.get("label", {}).get("name", "")
+                if not name:
+                    name = label_entry.get("name", "")
+                if name:
+                    found_labels.add(name)
+
+            if labels and not found_labels:
+                logging.warning(
+                    f"Could not extract label names from {len(labels)} label entries "
+                    f"on {media_type} {first_id} (volume {volume_id}). "
+                    f"Sample entry: {labels[0]}"
+                )
+
             if all(lbl in found_labels for lbl in done_labels):
-                logging.info(f"All done labels {done_labels} found on {media_type} {first_id} in volume {volume_id}.")
+                logging.info(
+                    f"All done labels {done_labels} found on {media_type} {first_id} in volume {volume_id}."
+                )
                 return True, media_type
 
             return False, media_type
@@ -554,7 +646,9 @@ class BiigleHandler:
 
     # ── Annotations Upload ────────────────────────────────────────────────────
 
-    def upload_image_annotations(self, volume_id: int, annotations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def upload_image_annotations(
+        self, volume_id: int, annotations: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """
         Upload multiple image annotations via bulk endpoint.
         Uses POST /api/v1/image-annotations
@@ -575,13 +669,17 @@ class BiigleHandler:
             logging.warning("No annotations to bulk upload.")
             return {}
 
-        logging.info(f"Bulk uploading {len(annotations)} image annotations to volume {volume_id} in batches of 100...")
+        logging.info(
+            f"Bulk uploading {len(annotations)} image annotations to volume {volume_id} in batches of 100..."
+        )
 
         final_result = []
         try:
             for i in range(0, len(annotations), 100):
-                batch = annotations[i:i + 100]
-                logging.info(f"Uploading batch {i//100 + 1}/{(len(annotations) - 1)//100 + 1} ({len(batch)} items)")
+                batch = annotations[i : i + 100]
+                logging.info(
+                    f"Uploading batch {i // 100 + 1}/{(len(annotations) - 1) // 100 + 1} ({len(batch)} items)"
+                )
                 response = self.api.post("image-annotations", json=batch)
 
                 # Biigle API returns an array, but if we encounter errors, we capture the exception below
@@ -591,11 +689,15 @@ class BiigleHandler:
                 elif isinstance(batch_result, dict):
                     final_result.append(batch_result)
 
-            logging.info(f"Successfully uploaded {len(annotations)} annotations in { (len(annotations) - 1)//100 + 1 } batches.")
+            logging.info(
+                f"Successfully uploaded {len(annotations)} annotations in {(len(annotations) - 1) // 100 + 1} batches."
+            )
             return {"uploaded_count": len(final_result), "details": final_result}
 
         except Exception as e:
-            logging.error(f"Failed to bulk upload image annotations to volume {volume_id}: {e}")
+            logging.error(
+                f"Failed to bulk upload image annotations to volume {volume_id}: {e}"
+            )
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 logging.error(f"Response: {e.response.text}")
             raise

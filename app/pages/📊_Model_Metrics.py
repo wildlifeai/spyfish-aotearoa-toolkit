@@ -11,8 +11,7 @@ Displays metrics for trained ML models, including:
 Reads metrics CSVs and confusion matrix images from S3 under
     process_files/training/results/
 """
-import io
-import json
+
 import logging
 import shutil
 from pathlib import Path
@@ -20,16 +19,16 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-
-from spyfish.config import config
-from spyfish.storage.s3_handler import S3Handler
-from spyfish.utils import validate_model_path
 from utils import check_password, render_sidebar_refresh
 
+from spyfish.config.wrapper import config
+from spyfish.storage.s3_handler import S3Handler
+from spyfish.utils import validate_model_path
 
 # ---------------------------------------------------------------------------
 # Data loading helpers
 # ---------------------------------------------------------------------------
+
 
 @st.cache_data(ttl=300)
 def list_result_dirs_from_s3(bucket: str, results_prefix: str) -> list[str]:
@@ -38,13 +37,15 @@ def list_result_dirs_from_s3(bucket: str, results_prefix: str) -> list[str]:
         s3 = S3Handler(bucket=bucket)
         # We look for common prefixes (directories) under results_prefix
         paginator = s3.s3.get_paginator("list_objects_v2")
-        result = paginator.paginate(Bucket=bucket, Prefix=results_prefix.rstrip('/') + '/', Delimiter='/')
+        result = paginator.paginate(
+            Bucket=bucket, Prefix=results_prefix.rstrip("/") + "/", Delimiter="/"
+        )
 
         dirs = []
         for page in result:
-            for prefix in page.get('CommonPrefixes', []):
+            for prefix in page.get("CommonPrefixes", []):
                 # prefix['Prefix'] is e.g. 'process_files/training/results/20260301_100000/'
-                dir_name = Path(prefix['Prefix']).name
+                dir_name = Path(prefix["Prefix"]).name
                 dirs.append(dir_name)
         return sorted(dirs, reverse=True)  # newest first
     except Exception as e:
@@ -93,25 +94,32 @@ def load_local_metrics(local_results_dir: Path) -> Optional[pd.DataFrame]:
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
+
 def render_metrics_table(metrics_df: pd.DataFrame) -> None:
     """Render a styled metrics comparison table."""
-    display_cols = [c for c in ["role", "mAP50", "mAP50_95", "precision", "recall", "model_path"] if c in metrics_df.columns]
+    display_cols = [
+        c
+        for c in ["role", "mAP50", "mAP50_95", "precision", "recall", "model_path"]
+        if c in metrics_df.columns
+    ]
     st.dataframe(
-        metrics_df[display_cols].rename(columns={
-            "role": "Model",
-            "mAP50": "mAP@0.5",
-            "mAP50_95": "mAP@0.5:0.95",
-            "precision": "Precision",
-            "recall": "Recall",
-            "model_path": "Weights Path",
-        }),
+        metrics_df[display_cols].rename(
+            columns={
+                "role": "Model",
+                "mAP50": "mAP@0.5",
+                "mAP50_95": "mAP@0.5:0.95",
+                "precision": "Precision",
+                "recall": "Recall",
+                "model_path": "Weights Path",
+            }
+        ),
         width="stretch",
         hide_index=True,
         column_config={
-            "mAP@0.5":       st.column_config.NumberColumn(format="%.4f"),
-            "mAP@0.5:0.95":  st.column_config.NumberColumn(format="%.4f"),
-            "Precision":     st.column_config.NumberColumn(format="%.4f"),
-            "Recall":        st.column_config.NumberColumn(format="%.4f"),
+            "mAP@0.5": st.column_config.NumberColumn(format="%.4f"),
+            "mAP@0.5:0.95": st.column_config.NumberColumn(format="%.4f"),
+            "Precision": st.column_config.NumberColumn(format="%.4f"),
+            "Recall": st.column_config.NumberColumn(format="%.4f"),
         },
     )
 
@@ -125,7 +133,9 @@ def render_training_curves(results_df: pd.DataFrame) -> None:
         st.info("No 'epoch' column found in results.csv.")
         return
 
-    map_cols = [c for c in results_df.columns if "map50" in c.lower() and "95" not in c.lower()]
+    map_cols = [
+        c for c in results_df.columns if "map50" in c.lower() and "95" not in c.lower()
+    ]
     loss_cols = [c for c in results_df.columns if "loss" in c.lower()]
 
     if map_cols:
@@ -153,7 +163,10 @@ def render_promote_button(
         "The backup to S3 will occur during the next pipeline sync."
     )
 
-    confirm = st.checkbox("I have reviewed the metrics and want to promote this model", key="confirm_promote")
+    confirm = st.checkbox(
+        "I have reviewed the metrics and want to promote this model",
+        key="confirm_promote",
+    )
     if st.button("✅ Promote to Production", disabled=not confirm, type="primary"):
         with st.spinner(f"Promoting {model_path} ..."):
             try:
@@ -167,7 +180,9 @@ def render_promote_button(
                 shutil.copy2(model_path, prod_model_path)
 
                 st.success(f"✅ Model promoted locally to: `{prod_model_path}`")
-                st.info("The new model will be backed up to S3 during the final sync stage of the next pipeline run.")
+                st.info(
+                    "The new model will be backed up to S3 during the final sync stage of the next pipeline run."
+                )
                 st.cache_data.clear()
             except Exception as e:
                 st.error(f"Promotion failed: {e}")
@@ -177,6 +192,7 @@ def render_promote_button(
 # Main page
 # ---------------------------------------------------------------------------
 
+
 def main():
     st.set_page_config(page_title="Model Metrics", page_icon="📊", layout="wide")
     if not check_password():
@@ -185,14 +201,15 @@ def main():
     render_sidebar_refresh()
 
     st.title("📊 Model Metrics")
-    st.caption("Review and compare trained ML model performance before promoting to production.")
+    st.caption(
+        "Review and compare trained ML model performance before promoting to production."
+    )
 
     training_cfg = config.get_section("training")
     paths_cfg = config.get_section("paths")
     bucket = paths_cfg.get("bucket_name")
-    # TODO hardcoded paths
-    results_prefix = "process_files/training/results"
-    local_training_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
+    results_prefix = config.training_results_s3_prefix
+    local_results_root = config.training_results_dir
 
     # --- Sidebar: select result run ---
     st.sidebar.header("Select Run")
@@ -201,11 +218,16 @@ def main():
 
     # Also check local results as a fallback
     local_result_dirs = []
-    local_results_root = local_training_dir / "results"
     if local_results_root.exists():
-        local_result_dirs = [d.name for d in sorted(local_results_root.iterdir(), reverse=True) if d.is_dir()]
+        local_result_dirs = [
+            d.name
+            for d in sorted(local_results_root.iterdir(), reverse=True)
+            if d.is_dir()
+        ]
 
-    all_runs = result_dirs + [f"[local] {d}" for d in local_result_dirs if d not in result_dirs]
+    all_runs = result_dirs + [
+        f"[local] {d}" for d in local_result_dirs if d not in result_dirs
+    ]
 
     if not all_runs:
         st.info(
@@ -253,14 +275,20 @@ def main():
                 prod_row = metrics_df[metrics_df["role"] == "production"]
 
             if not new_row.empty and not prod_row.empty:
-                delta = float(new_row["mAP50"].iloc[0]) - float(prod_row["mAP50"].iloc[0])
+                delta = float(new_row["mAP50"].iloc[0]) - float(
+                    prod_row["mAP50"].iloc[0]
+                )
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("New mAP@0.5",  f"{float(new_row['mAP50'].iloc[0]):.4f}")
+                    st.metric("New mAP@0.5", f"{float(new_row['mAP50'].iloc[0]):.4f}")
                 with col2:
-                    st.metric("Production mAP@0.5", f"{float(prod_row['mAP50'].iloc[0]):.4f}")
+                    st.metric(
+                        "Production mAP@0.5", f"{float(prod_row['mAP50'].iloc[0]):.4f}"
+                    )
                 with col3:
-                    min_improvement = training_cfg.get("retrain_min_improvement_pct", 2.0) / 100.0
+                    min_improvement = (
+                        training_cfg.get("retrain_min_improvement_pct", 2.0) / 100.0
+                    )
                     st.metric(
                         "Improvement",
                         f"{delta:+.4f}",
@@ -270,7 +298,11 @@ def main():
             st.info("No metrics CSV found for this run.")
 
         # Promote button (only if we have a new model path)
-        if metrics_df is not None and "model_path" in metrics_df.columns and "role" in metrics_df.columns:
+        if (
+            metrics_df is not None
+            and "model_path" in metrics_df.columns
+            and "role" in metrics_df.columns
+        ):
             new_rows = metrics_df[metrics_df["role"] == "new"]
             if not new_rows.empty:
                 new_model_path = str(new_rows["model_path"].iloc[0])
@@ -312,7 +344,11 @@ def main():
                     break
 
         if confusion_img:
-            st.image(confusion_img, caption=f"Confusion matrix — {run_name}", use_container_width=True)
+            st.image(
+                confusion_img,
+                caption=f"Confusion matrix — {run_name}",
+                use_container_width=True,
+            )
         else:
             st.info(
                 "No confusion matrix image found. "

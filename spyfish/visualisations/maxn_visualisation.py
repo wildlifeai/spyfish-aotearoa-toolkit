@@ -8,12 +8,16 @@ Called programmatically:
     from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
     plot_maxn_timeline(raw_df, maxn_df, drop_id, output_dir, base_conf, maxn_conf, interval_seconds)
 """
+
+import argparse
 import logging
+from pathlib import Path
+
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import pandas as pd
-from pathlib import Path
-from spyfish.config import config
+
+from spyfish.config.wrapper import config
 
 
 def plot_maxn_timeline(
@@ -46,16 +50,22 @@ def plot_maxn_timeline(
     # Aggregate fish counts at both thresholds
     base_fish = (
         raw_df[raw_df["confidence"] >= base_conf]
-        .groupby("time_seconds").size().reset_index(name="count")
+        .groupby("time_seconds")
+        .size()
+        .reset_index(name="count")
     )
     maxn_fish = (
         raw_df[raw_df["confidence"] >= maxn_conf]
-        .groupby("time_seconds").size().reset_index(name="count")
+        .groupby("time_seconds")
+        .size()
+        .reset_index(name="count")
     )
 
     if base_fish.empty:
-        logging.warning(f"No detections above base_conf={base_conf} for {drop_id}. Skipping plot.")
-        return None
+        logging.warning(
+            f"No detections above base_conf={base_conf} for {drop_id}. Skipping plot."
+        )
+        return None  # type: ignore
 
     max_time = base_fish["time_seconds"].max()
 
@@ -71,36 +81,77 @@ def plot_maxn_timeline(
     for _, row in maxn_df.iterrows():
         t = row[config.csv_maxn_time_ms_column]
         interval_start = (t // interval_seconds) * interval_seconds
-        ax.axvspan(interval_start, interval_start + interval_seconds,
-                   alpha=0.15, color="#2ecc71", zorder=1)
+        ax.axvspan(
+            interval_start,
+            interval_start + interval_seconds,
+            alpha=0.15,
+            color="#2ecc71",
+            zorder=1,
+        )
 
     # 3. Base confidence line (light grey)
-    ax.fill_between(base_fish["time_seconds"], base_fish["count"],
-                    alpha=0.15, color="#95a5a6", zorder=2)
-    ax.plot(base_fish["time_seconds"], base_fish["count"],
-            color="#95a5a6", linewidth=1, alpha=0.6, zorder=3,
-            label=f"Fish (conf ≥ {base_conf})")
+    ax.fill_between(
+        base_fish["time_seconds"],
+        base_fish["count"],
+        alpha=0.15,
+        color="#95a5a6",
+        zorder=2,
+    )
+    ax.plot(
+        base_fish["time_seconds"],
+        base_fish["count"],
+        color="#95a5a6",
+        linewidth=1,
+        alpha=0.6,
+        zorder=3,
+        label=f"Fish (conf ≥ {base_conf})",
+    )
 
     # 4. MaxN confidence line (solid blue)
     if not maxn_fish.empty:
-        ax.fill_between(maxn_fish["time_seconds"], maxn_fish["count"],
-                        alpha=0.25, color="#3498db", zorder=4)
-        ax.plot(maxn_fish["time_seconds"], maxn_fish["count"],
-                color="#2980b9", linewidth=2, zorder=5,
-                label=f"Fish (conf ≥ {maxn_conf}) — used for MaxN")
+        ax.fill_between(
+            maxn_fish["time_seconds"],
+            maxn_fish["count"],
+            alpha=0.25,
+            color="#3498db",
+            zorder=4,
+        )
+        ax.plot(
+            maxn_fish["time_seconds"],
+            maxn_fish["count"],
+            color="#2980b9",
+            linewidth=2,
+            zorder=5,
+            label=f"Fish (conf ≥ {maxn_conf}) — used for MaxN",
+        )
 
     # 5. Red dots: MaxN peaks with annotation
     for _, row in maxn_df.iterrows():
         t = row[config.csv_maxn_time_ms_column]
         count = row[config.csv_max_interval_column]
-        ax.scatter(t, count, color="#e74c3c", s=120, zorder=6,
-                   edgecolors="white", linewidth=1.5)
+        ax.scatter(
+            t,
+            count,
+            color="#e74c3c",
+            s=120,
+            zorder=6,
+            edgecolors="white",
+            linewidth=1.5,
+        )
         ax.annotate(
             f"MaxN={count}\n({row[config.csv_confidence_agreement_column]:.2f})",
-            xy=(t, count), xytext=(5, 10), textcoords="offset points",
-            fontsize=8, color="#c0392b", fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                      edgecolor="#e74c3c", alpha=0.8),
+            xy=(t, count),
+            xytext=(5, 10),
+            textcoords="offset points",
+            fontsize=8,
+            color="#c0392b",
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="#e74c3c",
+                alpha=0.8,
+            ),
         )
 
     # Styling
@@ -114,16 +165,23 @@ def plot_maxn_timeline(
     ax.grid(axis="y", alpha=0.3)
 
     legend_elements = [
-        plt.Line2D([0], [0], color="#95a5a6", linewidth=1,
-                   label=f"Fish (conf ≥ {base_conf})"),
-        plt.Line2D([0], [0], color="#2980b9", linewidth=2,
-                   label=f"Fish (conf ≥ {maxn_conf}) — MaxN"),
-        plt.scatter([], [], color="#e74c3c", s=80, edgecolors="white",
-                    label="MaxN peak"),
-        mpatches.Patch(facecolor="#2ecc71", alpha=0.15,
-                       label="Selected clip window"),
-        mpatches.Patch(facecolor="#ebebeb", alpha=0.6,
-                       label=f"{interval_seconds}s intervals"),
+        plt.Line2D(
+            [0], [0], color="#95a5a6", linewidth=1, label=f"Fish (conf ≥ {base_conf})"
+        ),
+        plt.Line2D(
+            [0],
+            [0],
+            color="#2980b9",
+            linewidth=2,
+            label=f"Fish (conf ≥ {maxn_conf}) — MaxN",
+        ),
+        plt.scatter(
+            [], [], color="#e74c3c", s=80, edgecolors="white", label="MaxN peak"
+        ),
+        mpatches.Patch(facecolor="#2ecc71", alpha=0.15, label="Selected clip window"),
+        mpatches.Patch(
+            facecolor="#ebebeb", alpha=0.6, label=f"{interval_seconds}s intervals"
+        ),
     ]
     ax.legend(handles=legend_elements, loc="upper right", fontsize=9, framealpha=0.9)
 
@@ -136,11 +194,6 @@ def plot_maxn_timeline(
 
 
 if __name__ == "__main__":
-    import logging
-    from pathlib import Path
-    from spyfish.config import config
-    import argparse
-
     parser = argparse.ArgumentParser(description="Generate MaxN visualisations.")
     parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
     args = parser.parse_args()
@@ -153,7 +206,9 @@ if __name__ == "__main__":
 
     output_dir = config.data_quality_dir / drop_id
 
-    raw_df = pd.read_csv(config.get_raw_csv_path(drop_id, model_name))
-    maxn_df = pd.read_csv(config.get_maxn_csv_path(drop_id, model_name))
+    raw_df = pd.read_csv(config.get_raw_csv_path(drop_id, model_name))  # type: ignore
+    maxn_df = pd.read_csv(config.get_maxn_csv_path(drop_id, model_name))  # type: ignore
 
-    plot_maxn_timeline(raw_df, maxn_df, drop_id, output_dir, base_conf, maxn_conf, interval_seconds)
+    plot_maxn_timeline(
+        raw_df, maxn_df, drop_id, output_dir, base_conf, maxn_conf, interval_seconds
+    )

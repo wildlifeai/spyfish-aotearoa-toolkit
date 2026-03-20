@@ -1,10 +1,12 @@
 import logging
 import os
+
 import pandas as pd
-from pathlib import Path
+
+from spyfish.config.wrapper import config
 from spyfish.extraction.extract_frames import extract_frames_from_selections
 from spyfish.ml.draw_frames import draw_boxes_on_video_frames
-from spyfish.config import config
+
 
 def manual_extract():
     # Test values (update these to match your local data)
@@ -40,7 +42,7 @@ def manual_extract():
         selections_csv_path=selections_csv,
         video_path=video_path,
         raw_csv_path=raw_csv,
-        output_dir=clean_dir
+        output_dir=clean_dir,
     )
 
     # 2. Extract QA frames (with boxes)
@@ -51,9 +53,9 @@ def manual_extract():
     # For each peak time, find the nearest frame index in the raw CSV
     frame_indices = []
     for _, row in df.iterrows():
-        t_sec = float(row['TimeOfMaxnMs'])
-        closest = raw_df.iloc[(raw_df['time_seconds'] - t_sec).abs().argsort()[:1]]
-        frame_indices.append(int(closest['frame'].iloc[0]))
+        t_sec = float(row["TimeOfMaxnMs"])
+        closest = raw_df.iloc[(raw_df["time_seconds"] - t_sec).abs().argsort()[:1]]
+        frame_indices.append(int(closest["frame"].iloc[0]))
 
     draw_boxes_on_video_frames(
         video_path=video_path,
@@ -61,13 +63,13 @@ def manual_extract():
         output_dir=qa_dir,
         frame_list=frame_indices,
         confidence_threshold=config.confidence_threshold,
-        sampling_start=int(df['SamplingStart'].iloc[0]) if 'SamplingStart' in df.columns else 0,
-        drop_id=drop_id
+        drop_id=drop_id,
     )
 
     logging.info("\nDone!")
     logging.info(f"Clean frames (for Biigle): {clean_dir}")
     logging.info(f"QA frames (with boxes): {qa_dir}")
+
 
 if __name__ == "__main__":
     manual_extract()

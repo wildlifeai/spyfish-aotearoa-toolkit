@@ -1,9 +1,9 @@
 import logging
 import os
-from pathlib import Path
 
-from spyfish.config import config
+from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
+
 
 def download_db() -> bool:
     """
@@ -17,9 +17,12 @@ def download_db() -> bool:
 
     # Check if object exists and get metadata
     try:
-        from botocore.exceptions import ClientError
-        response = s3.s3.head_object(Bucket=bucket, Key=s3_key)
-        s3_mtime = response['LastModified'].timestamp()
+        last_modified = s3.get_object_last_modified(s3_key)
+        if last_modified is None:
+            logging.info("Database not found on S3. Starting fresh.")
+            return True
+
+        s3_mtime = last_modified.timestamp()
 
         # If local file exists, check if it's already newer or same as S3
         if local_path.exists():
@@ -28,10 +31,7 @@ def download_db() -> bool:
                 logging.info("Local database is up-to-date with S3. Skipping download.")
                 return True
 
-    except ClientError as e:
-        if e.response['Error']['Code'] in ["404", "403"]:
-            logging.info("Database not found on S3. Starting fresh.")
-            return True
+    except Exception as e:
         logging.error(f"Error checking database on S3: {e}")
         return False
 
@@ -40,12 +40,14 @@ def download_db() -> bool:
         s3.download_object_from_s3(s3_key, str(local_path))
         # Ensure local mtime matches S3 so we don't re-download next time
         import time
+
         os.utime(local_path, (time.time(), s3_mtime))
         logging.info("Database downloaded successfully.")
         return True
     except Exception as e:
         logging.error(f"Failed to download database: {e}")
         return False
+
 
 def upload_db() -> bool:
     """
@@ -71,6 +73,7 @@ def upload_db() -> bool:
         logging.error(f"Failed to upload database: {e}")
         return False
 
+
 def download_annotations_db() -> bool:
     """
     Downloads the annotations database from S3 if it doesn't exist locally or S3 is newer.
@@ -80,31 +83,30 @@ def download_annotations_db() -> bool:
     local_path = config.annotations_db_path
 
     try:
-        from botocore.exceptions import ClientError
         s3 = S3Handler()
-        response = s3.s3.head_object(Bucket=config.s3_bucket, Key=s3_key)
-        s3_mtime = response['LastModified'].timestamp()
+        last_modified = s3.get_object_last_modified(s3_key)
+        if last_modified is None:
+            logging.info("Annotations database not found on S3 yet. Starting fresh.")
+            return True
+
+        s3_mtime = last_modified.timestamp()
 
         if local_path.exists():
             local_mtime = local_path.stat().st_mtime
             if local_mtime >= s3_mtime:
-                logging.info("Local annotations database is up-to-date with S3. Skipping download.")
+                logging.info(
+                    "Local annotations database is up-to-date with S3. Skipping download."
+                )
                 return True
 
-        logging.info(f"Downloading annotations database...")
+        logging.info("Downloading annotations database...")
         s3.download_object_from_s3(s3_key, str(local_path))
         import time
+
         os.utime(local_path, (time.time(), s3_mtime))
         logging.info("Annotations database downloaded successfully.")
         return True
 
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code")
-        if code in ["404", "403"]:
-            logging.info("Annotations database not found on S3 yet. Starting fresh.")
-            return True
-        logging.error(f"Error downloading annotations database: {e}")
-        return False
     except Exception as e:
         logging.warning(f"Could not download annotations database: {e}")
         return False
@@ -118,10 +120,14 @@ def upload_annotations_db() -> bool:
     local_path = config.annotations_db_path
 
     if not local_path.exists():
-        logging.warning(f"Annotations database {local_path} does not exist. Skipping upload.")
+        logging.warning(
+            f"Annotations database {local_path} does not exist. Skipping upload."
+        )
         return False
 
-    logging.info(f"Uploading annotations database to s3://{config.s3_bucket}/{s3_key}...")
+    logging.info(
+        f"Uploading annotations database to s3://{config.s3_bucket}/{s3_key}..."
+    )
     try:
         s3 = S3Handler()
         s3.upload_file_to_s3(str(local_path), s3_key)
@@ -131,13 +137,12 @@ def upload_annotations_db() -> bool:
         logging.error(f"Failed to upload annotations database: {e}")
         return False
 
-def sync_annotations(upload_videos: bool = False) -> bool:
+
+def sync_annotations() -> bool:
     """
     Synchronizes the local nested annotations and images to S3.
-    By default, excludes large video files to save bandwidth and storage.
-
-    Args:
-        upload_videos: If True, also uploads .mp4 files. Default False.
+    Excludes .mp4 files — Zooniverse clips are uploaded directly to Zooniverse,
+    and raw BUV footage already lives in media/ on S3.
     """
     s3 = S3Handler()
     local_dq_dir = config.data_quality_dir
@@ -166,20 +171,17 @@ def sync_annotations(upload_videos: bool = False) -> bool:
     models_prefix = "models"
     filters += ["--include", f"{models_prefix}/**"]
 
-    # Optionally include videos
-    if upload_videos:
-        filters += ["--include", "*.mp4"]
-
     # This sync is additive only (no --delete flag is passed to aws s3 sync inside sync_local_to_s3)
     return s3.sync_local_to_s3(str(local_dq_dir), s3_prefix, filters=filters)
 
-def sync_pipeline_results(upload_videos: bool = False) -> bool:
+
+def sync_pipeline_results() -> bool:
     """
     Comprehensive sync of all pipeline outputs to S3:
     1. Uploads both databases (pipeline and annotations)
-    2. Syncs the data_quality directory (filtered to exclude large binaries)
+    2. Syncs the data_quality directory (CSVs, images, models — no .mp4s)
     """
-    logging.info(f"Starting consolidated pipeline sync to S3 (upload_videos={upload_videos})...")
+    logging.info("Starting consolidated pipeline sync to S3...")
     success = True
 
     # 1. Databases
@@ -193,7 +195,7 @@ def sync_pipeline_results(upload_videos: bool = False) -> bool:
 
     # 2. Annotations & Selections
     if not config.is_test_run:
-        if not sync_annotations(upload_videos=upload_videos):
+        if not sync_annotations():
             logging.error("Failed to sync annotations directory.")
             success = False
 

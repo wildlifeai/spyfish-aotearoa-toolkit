@@ -11,24 +11,23 @@ Usage:
     python -m spyfish.ml.training.evaluate --model /path/to/best.pt --data /path/to/data.yaml --test-txt /path/to/test.txt
     python -m spyfish.ml.training.evaluate --model /path/to/best.pt --data /path/to/data.yaml --promote
 """
+
 import argparse
 import json
 import logging
-import subprocess
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
 import pandas as pd
 
-from spyfish.config import config
+from spyfish.config.wrapper import config
 from spyfish.utils import validate_model_path
-
 
 # ---------------------------------------------------------------------------
 # Core evaluation
 # ---------------------------------------------------------------------------
+
 
 def evaluate_model(
     model_path: str,
@@ -119,7 +118,9 @@ def compare_with_production(
         return {}, True
 
     logging.info(f"Evaluating production model for comparison: {production_model_path}")
-    prod_metrics = evaluate_model(production_model_path, data_yaml, split=split, imgsz=imgsz)
+    prod_metrics = evaluate_model(
+        production_model_path, data_yaml, split=split, imgsz=imgsz
+    )
 
     improvement = new_metrics["mAP50"] - prod_metrics["mAP50"]
     should_promote = improvement >= min_improvement
@@ -144,7 +145,9 @@ def save_metrics(
     rows = []
     for role, m in [("new", new_metrics), ("production", prod_metrics)]:
         if m:
-            rows.append({"role": role, **{k: v for k, v in m.items() if k != "timestamp"}})
+            rows.append(
+                {"role": role, **{k: v for k, v in m.items() if k != "timestamp"}}
+            )
     df = pd.DataFrame(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
@@ -154,6 +157,7 @@ def save_metrics(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def run_evaluation_pipeline(
     model_path: str,
@@ -173,16 +177,15 @@ def run_evaluation_pipeline(
     Returns:
         Dict with evaluation results and promotion decision.
     """
-    training_cfg = config.get_section("training")
-    ml_cfg = config.get_section("ml_inference")
-
-    imgsz = training_cfg.get("imgsz", 640)
-    local_training_dir = Path(training_cfg.get("local_training_dir", "process_files/training"))
+    imgsz = config.training_imgsz
+    local_training_dir = config.local_training_dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Evaluate new model
-    local_results_dir = local_training_dir / "results" / f"{timestamp}_{model_type}"
-    new_metrics = evaluate_model(model_path, data_yaml, split=split, imgsz=imgsz, output_dir=local_results_dir)
+    local_results_dir = config.training_results_dir / f"{timestamp}_{model_type}"
+    new_metrics = evaluate_model(
+        model_path, data_yaml, split=split, imgsz=imgsz, output_dir=local_results_dir
+    )
 
     # TODO check whats up
 
@@ -205,19 +208,35 @@ def run_evaluation_pipeline(
         "production_metrics": prod_metrics,
         "should_promote": should_promote,
     }
-    logging.info(f"Evaluation pipeline complete: {json.dumps({k: v for k, v in new_metrics.items() if isinstance(v, (int, float, str))}, indent=2)}")
+    logging.info(
+        f"Evaluation pipeline complete: {json.dumps({k: v for k, v in new_metrics.items() if isinstance(v, (int, float, str))}, indent=2)}"
+    )
     return summary
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Evaluate a YOLO model and compare with production.")
-    parser.add_argument("--model", required=True, type=str, help="Path to new model weights (.pt)")
-    parser.add_argument("--data", required=True, type=str, help="Path to YOLO data.yaml")
-    parser.add_argument("--model-type", type=str, default="binary", choices=["binary", "species"])
+    parser = argparse.ArgumentParser(
+        description="Evaluate a YOLO model and compare with production."
+    )
+    parser.add_argument(
+        "--model", required=True, type=str, help="Path to new model weights (.pt)"
+    )
+    parser.add_argument(
+        "--data", required=True, type=str, help="Path to YOLO data.yaml"
+    )
+    parser.add_argument(
+        "--model-type", type=str, default="binary", choices=["binary", "species"]
+    )
     parser.add_argument("--split", type=str, default="test", choices=["test", "val"])
-    parser.add_argument("--promote", action="store_true", help="Auto-promote if improvement threshold met")
-    parser.add_argument("--no-upload", action="store_true", help="Skip S3 upload of results")
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="Auto-promote if improvement threshold met",
+    )
+    parser.add_argument(
+        "--no-upload", action="store_true", help="Skip S3 upload of results"
+    )
     args = parser.parse_args()
 
     run_evaluation_pipeline(
