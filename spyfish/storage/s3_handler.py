@@ -23,9 +23,9 @@ Dependencies:
 import datetime
 import io
 import logging
-import subprocess
 import mimetypes
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -38,8 +38,7 @@ from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-import os
-from spyfish.config import config
+from spyfish.config.wrapper import config
 from spyfish.utils import (
     delete_file,
     filter_file_paths_by_extension,
@@ -167,6 +166,7 @@ class S3Handler:
 
     _instance = None
     _lock = threading.Lock()
+    _initialized: bool = False
 
     def __new__(cls, *args, **kwargs) -> "S3Handler":
         """
@@ -180,11 +180,11 @@ class S3Handler:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
-                cls._instance._initialized = False  # Add initialization flag
+                cls._instance._initialized = False  # type: ignore
             return cls._instance
 
     def __init__(self, s3_client: Optional[Any] = None, bucket: Optional[str] = None):
-        if self._initialized:
+        if self._initialized:  # type: ignore
             return
 
         self.bucket = bucket or config.s3_bucket
@@ -202,9 +202,9 @@ class S3Handler:
 
         self.s3 = s3_client or boto3.client(
             "s3",
-            aws_access_key_id=config.aws_access_key_id,
-            aws_secret_access_key=config.aws_secret_access_key,
-            region_name=config.aws_region,  # Dynamically loaded auth region for V4 signatures
+            aws_access_key_id=config.access_key_id,
+            aws_secret_access_key=config.secret_access_key,
+            region_name=config.region,  # Dynamically loaded auth region for V4 signatures
             config=boto_config,  # Add config here
         )
         self._initialized = True
@@ -445,7 +445,13 @@ class S3Handler:
             if delete_file_after_upload:
                 delete_file(filename)
 
-    def sync_local_to_s3(self, local_dir: str, s3_prefix: str, filters: Optional[List[str]] = None, extra_args: Optional[List[str]] = None) -> bool:
+    def sync_local_to_s3(
+        self,
+        local_dir: str,
+        s3_prefix: str,
+        filters: Optional[List[str]] = None,
+        extra_args: Optional[List[str]] = None,
+    ) -> bool:
         """
         Uses 'aws s3 sync' to recursively synchronize a local directory to S3.
         Much more efficient for large batches of files than individual uploads.
@@ -460,7 +466,9 @@ class S3Handler:
             bool: True if sync succeeded, False otherwise.
         """
         if not os.path.isdir(local_dir):
-            logging.warning(f"Local directory {local_dir} does not exist. Skipping sync.")
+            logging.warning(
+                f"Local directory {local_dir} does not exist. Skipping sync."
+            )
             return False
 
         s3_uri = f"s3://{self.bucket}/{s3_prefix}"
@@ -639,7 +647,7 @@ class S3Handler:
 
         # Filter only video files based on their extension
         if valid_extensions:
-            s3_filepaths = filter_file_paths_by_extension(
+            s3_filepaths = filter_file_paths_by_extension(  # type: ignore
                 s3_filepaths, valid_extensions
             )
 
@@ -653,7 +661,7 @@ class S3Handler:
         suffixes: Iterable = (),
         try_run: bool = False,
     ) -> None:
-        files_from_aws = self.get_file_paths_set_from_s3(prefix, suffixes)
+        files_from_aws = self.get_file_paths_set_from_s3(prefix, suffixes)  # type: ignore
         failed_renames = []
 
         for old_name, new_name in rename_pairs.items():
@@ -695,6 +703,28 @@ class S3Handler:
             f"Rename complete, failed to rename {len(failed_renames)} out of {len(rename_pairs)} files."
         )
         logging.info(f"Failed renames: {failed_renames}")
+
+    def get_object_last_modified(self, key: str) -> Optional[datetime.datetime]:
+        """Return the LastModified timestamp for an S3 object, or None if it does not exist.
+
+        Args:
+            key: S3 object key (within the handler's default bucket).
+
+        Returns:
+            datetime with timezone info, or None when the object is absent (404/403).
+
+        Raises:
+            ClientError for any error other than 404/403.
+        """
+        from botocore.exceptions import ClientError
+
+        try:
+            response = self.s3.head_object(Bucket=self.bucket, Key=key)
+            return response["LastModified"]
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("404", "403"):
+                return None
+            raise
 
     def read_df_from_s3_csv(self, csv_s3_path: str) -> pd.DataFrame:
         """

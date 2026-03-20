@@ -2,18 +2,19 @@
 Extract clips from source video files using ffmpeg.
 
 Reads the selections CSV produced by selection strategies and cuts one mp4 per row.
-Clip timestamps are stored relative to SamplingStart in the selections CSV.
-sampling_start is added back to get the correct seek position in the full source video.
+Clip timestamps are absolute video positions (seconds from start of video file).
 """
+
 import logging
 import os
 import subprocess
 from pathlib import Path
+from typing import List, Optional
 
 import pandas as pd
 
-from spyfish.config import config
-from spyfish.utils import time_to_seconds, generate_clip_filename
+from spyfish.config.wrapper import config
+from spyfish.utils import generate_clip_filename
 
 
 def extract_clips_from_selections(
@@ -24,7 +25,7 @@ def extract_clips_from_selections(
     """
     Cuts one mp4 clip per row in the selections CSV using ffmpeg.
 
-    DropID and SamplingStart are read from the selections CSV itself.
+    DropID is read from the selections CSV itself.
     A 'ClipPath' column is added to the returned DataFrame so the caller
     has a single self-contained record of each clip and its metadata.
 
@@ -50,39 +51,45 @@ def extract_clips_from_selections(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    if config.csv_sampling_start_column not in df.columns:
-        raise ValueError(f"Missing mandatory column '{config.csv_sampling_start_column}' in selections CSV. "
-                         "This is required to calculate absolute seek times.")
-
     drop_id = df[config.drop_id_column].iloc[0]
-    sampling_start = int(df[config.csv_sampling_start_column].iloc[0])
 
-    clip_paths = []
+    clip_paths: List[Optional[str]] = []
     for idx, row in df.iterrows():
         if config.csv_clip_start_column not in row:
             logging.error(f"Missing {config.csv_clip_start_column} in row: {row}")
             clip_paths.append(None)
             continue
 
-        clip_start_relative = float(row[config.csv_clip_start_column])
+        clip_start = float(row[config.csv_clip_start_column])
         # Use config-defined clip length as fallback
-        clip_end_relative = float(row[config.csv_clip_end_column]) if config.csv_clip_end_column in row else clip_start_relative + config.zooniverse_clip_length
+        clip_end = (
+            float(row[config.csv_clip_end_column])
+            if config.csv_clip_end_column in row
+            else clip_start + config.clip_length
+        )
 
-        clip_duration = clip_end_relative - clip_start_relative
-        seek_seconds = sampling_start + clip_start_relative
+        clip_duration = clip_end - clip_start
+        seek_seconds = clip_start
 
         out_filename = generate_clip_filename(drop_id, clip_duration, seek_seconds)
         out_path = Path(output_dir) / out_filename
 
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(seek_seconds),
-            "-i", str(video_path),
-            "-t", str(clip_duration),
-            "-c:v", config.ffmpeg_codec,
-            "-preset", config.ffmpeg_preset,
-            "-crf", config.ffmpeg_crf,
-            "-an",   # remove audio — standard for processed clips
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(seek_seconds),
+            "-i",
+            str(video_path),
+            "-t",
+            str(clip_duration),
+            "-c:v",
+            config.ffmpeg_codec,
+            "-preset",
+            config.ffmpeg_preset,
+            "-crf",
+            config.ffmpeg_crf,
+            "-an",  # remove audio — standard for processed clips
             str(out_path),
         ]
 
@@ -94,7 +101,9 @@ def extract_clips_from_selections(
             continue
 
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
             clip_paths.append(str(out_path))
         except subprocess.CalledProcessError as e:
             logging.error(f"ffmpeg failed for clip {idx+1} of {drop_id}: {e}")
@@ -106,9 +115,9 @@ def extract_clips_from_selections(
     return df
 
 
-
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Extract clips from selections.")
     parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
     args = parser.parse_args()

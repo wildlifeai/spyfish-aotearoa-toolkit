@@ -4,6 +4,7 @@ biigle_to_yolo.py — Convert local Biigle expert CSV exports → YOLO label .tx
 This tool is strictly offline; it consumes CSVs previously exported by sync_biigle_annotations
 into process_files/data_quality/{drop_id}/annotations/.
 """
+
 import argparse
 import json
 import logging
@@ -11,12 +12,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from spyfish.config import config
-
 
 # ---------------------------------------------------------------------------
 # Core conversion helpers
 # ---------------------------------------------------------------------------
+
 
 def biigle_rect_to_yolo(
     points: List[float], img_w: int, img_h: int
@@ -35,14 +35,16 @@ def biigle_rect_to_yolo(
 
     cx = (x1 + x2) / 2.0 / img_w
     cy = (y1 + y2) / 2.0 / img_h
-    w  = abs(x2 - x1) / img_w
-    h  = abs(y2 - y1) / img_h
+    w = abs(x2 - x1) / img_w
+    h = abs(y2 - y1) / img_h
 
     cx, cy, w, h = (max(0.0, min(1.0, v)) for v in (cx, cy, w, h))
     return round(cx, 6), round(cy, 6), round(w, 6), round(h, 6)
 
 
-def build_class_map(df: pd.DataFrame, class_map_path: Optional[Path] = None) -> Dict[str, int]:
+def build_class_map(
+    df: pd.DataFrame, class_map_path: Optional[Path] = None
+) -> Dict[str, int]:
     """
     Build a stable label_name → YOLO class_id mapping.
 
@@ -60,7 +62,9 @@ def build_class_map(df: pd.DataFrame, class_map_path: Optional[Path] = None) -> 
     if class_map_path and class_map_path.exists():
         with open(class_map_path) as f:
             existing_map = {v["name"]: v["class_id"] for v in json.load(f).values()}
-        logging.info(f"Loaded existing class map with {len(existing_map)} labels from {class_map_path}")
+        logging.info(
+            f"Loaded existing class map with {len(existing_map)} labels from {class_map_path}"
+        )
 
     # Stable sort: by the first (lowest) Biigle label_id seen for each label name
     label_info = (
@@ -79,7 +83,9 @@ def build_class_map(df: pd.DataFrame, class_map_path: Optional[Path] = None) -> 
 
 def save_class_map(class_map: Dict[str, int], path: Path) -> None:
     """Persist class_map as {class_id: {name, class_id}} JSON for human readability."""
-    serialisable = {str(cid): {"name": name, "class_id": cid} for name, cid in class_map.items()}
+    serialisable = {
+        str(cid): {"name": name, "class_id": cid} for name, cid in class_map.items()
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(serialisable, f, indent=2)
@@ -146,6 +152,7 @@ def convert_annotations_to_yolo(
 # Visual spot-check
 # ---------------------------------------------------------------------------
 
+
 def draw_frames_on_images(
     images_dir: Path,
     labels_dir: Path,
@@ -157,8 +164,9 @@ def draw_frames_on_images(
     Draw bounding boxes on a random sample of static JPEG images for visual review.
     """
     try:
-        import cv2
         import random
+
+        import cv2
     except ImportError:
         logging.warning("opencv-python not installed — skipping spot-check drawing.")
         return
@@ -203,8 +211,15 @@ def draw_frames_on_images(
                 x2 = int((cx + bw / 2) * w)
                 y2 = int((cy + bh / 2) * h)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(img, id_to_name.get(cls, str(cls)), (x1, max(y1 - 5, 0)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.putText(
+                    img,
+                    id_to_name.get(cls, str(cls)),
+                    (x1, max(y1 - 5, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
 
         out_path = output_dir / img_path.name
         cv2.imwrite(str(out_path), img)
@@ -216,6 +231,7 @@ def draw_frames_on_images(
 # ---------------------------------------------------------------------------
 # High-level entry point
 # ---------------------------------------------------------------------------
+
 
 def biigle_to_yolo(
     data_quality_dir: Path,
@@ -254,10 +270,24 @@ def biigle_to_yolo(
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Convert local Biigle expert CSVs to YOLO labels.")
-    parser.add_argument("--data-dir", required=True, type=Path, help="Root data_quality directory")
-    parser.add_argument("--output-dir", required=True, type=Path, help="Output directory for YOLO labels")
-    parser.add_argument("--spot-check-dir", required=True, type=Path, help="Output directory for spot-check images")
+    parser = argparse.ArgumentParser(
+        description="Convert local Biigle expert CSVs to YOLO labels."
+    )
+    parser.add_argument(
+        "--data-dir", required=True, type=Path, help="Root data_quality directory"
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        help="Output directory for YOLO labels",
+    )
+    parser.add_argument(
+        "--spot-check-dir",
+        required=True,
+        type=Path,
+        help="Output directory for spot-check images",
+    )
 
     args = parser.parse_args()
 

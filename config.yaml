@@ -1,7 +1,12 @@
 csv_mapping:
   drop_id_column: "DropID"
+  pipeline_status_column: "PipelineStatus"
   survey_id_column: "SurveyID"
   site_id_column: "SiteID"
+  replicate_column: "ReplicateWithinSite"
+  file_name_column: "FileName"
+  link_to_marine_reserve_column: "LinkToMarineReserve"
+  site_name_column: "SiteName"
   is_bad_deployment_column: "IsBadDeployment"
   video_file_link_column: "LinkToVideoFile"
   sampling_start_column: "SamplingStart"
@@ -25,7 +30,14 @@ paths:
   # Base directory for all project data
   base_dir: "process_files"
   # S3 Storage configuration
-  bucket_name: "marine-buv-kalindi"
+  bucket_name: "marine-buv"
+  # Path to orchestration files (local only, not synced to S3)
+  orchestration:
+    pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
+    test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
+  movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
+  missing_files_filename: "missing_files_in_aws.txt"
+  extra_files_filename: "extra_files_in_aws.txt"
   # Metadata paths (relative to bucket root)
   metadata:
     root: "spyfish_metadata"
@@ -33,12 +45,16 @@ paths:
     status_dir: "status"
     files:
       deployment_csv: "BUV Deployment.csv"
-      test_deployment_csv: "manual_testing/test_deployment_metadata.csv"
       survey_csv: "BUV Survey Metadata.csv"
       site_csv: "BUV Survey Sites.csv"
       species_csv: "BUV Species.csv"
       reserves_csv: "Marine Reserves.csv"
       legacy_experts_csv: "BUV Annotations Legacy Experts.csv"
+
+  # Optional: absolute path to an alternate base dir for media downloads (e.g. /tmp/spyfish).
+  # Use this for a temp/no-backup location when videos are large or ephemeral.
+  # If unset, media resolves to <project_root>/media as before.
+  media_base_dir:
 
   # Sub-directories (local and S3 suffixes)
   sub_dirs:
@@ -70,6 +86,7 @@ ml_inference:
     annotated_by_prefix: "ml"
 
 zooniverse_extraction:
+  clip_length: 10.0
   project_id: 32041
   # TODO: what are these 2 things about
   health_check_count: 6 # Number of health checks to perform
@@ -101,8 +118,8 @@ ffmpeg:
 
 
 biigle:
-  project_id: 4081        # 3711 Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
-  disk_id: 98             # 134  S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  project_id: 3711         #  4081 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  disk_id: 134             #  134 doc, 98 kalindi, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
@@ -122,6 +139,9 @@ biigle:
   label_mapping:
     # "Pagrus auratus": 12345
     # "Notolabrus fucicola": 67890
+  # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
+  # on slow or unreachable endpoints.
+  request_timeout_secs: 30
   # Polling config for async Biigle operations
   volume_finalize_max_retries: 10
   volume_finalize_retry_interval_secs: 3.0
@@ -139,8 +159,14 @@ training:
   class_ceiling_pct: 0.40       # cap any species above 40% — subsample (iterative, max 3 rounds)
   class_floor_pct: 0.02         # merge species below 2% into "fish"
   ceiling_max_iterations: 3     # safety: never run more than 3 ceiling rounds
+  local_training_dir: "process_files/training"
   retrain_min_improvement_pct: 2.0
 
+
+validation_patterns:
+  drop_id:   "^[A-Z]{3}_\\d{8}_BUV_[A-Z]{3}_\\d{3}_\\d{2}$"
+  survey_id: "^[A-Z]{3}_\\d{8}_BUV$"
+  site_id:   "^[A-Z]{3}_\\d+$"
 
 validation_rules:
   deployments:
