@@ -704,6 +704,28 @@ class S3Handler:
         )
         logging.info(f"Failed renames: {failed_renames}")
 
+    def get_object_last_modified(self, key: str) -> Optional[datetime.datetime]:
+        """Return the LastModified timestamp for an S3 object, or None if it does not exist.
+
+        Args:
+            key: S3 object key (within the handler's default bucket).
+
+        Returns:
+            datetime with timezone info, or None when the object is absent (404/403).
+
+        Raises:
+            ClientError for any error other than 404/403.
+        """
+        from botocore.exceptions import ClientError
+
+        try:
+            response = self.s3.head_object(Bucket=self.bucket, Key=key)
+            return response["LastModified"]
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("404", "403"):
+                return None
+            raise
+
     def read_df_from_s3_csv(self, csv_s3_path: str) -> pd.DataFrame:
         """
         Downloads a CSV file from S3 and loads it into a pandas DataFrame.

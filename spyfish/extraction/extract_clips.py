@@ -65,10 +65,7 @@ def extract_clips_from_selections(
         clip_end = (
             float(row[config.csv_clip_end_column])
             if config.csv_clip_end_column in row
-            else clip_start
-            + float(
-                config.get_section("zooniverse_extraction", {}).get("clip_length")
-            )
+            else clip_start + config.clip_length
         )
 
         clip_duration = clip_end - clip_start

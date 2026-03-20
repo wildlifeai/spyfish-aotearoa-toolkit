@@ -35,7 +35,14 @@ class _ApiWithTimeout(Api):
         super().__init__(*args, **kwargs)
         self._timeout = timeout
 
-    def call(self, method: Any, url: str, raise_for_status: bool = True, *args: Any, **kwargs: Any) -> Any:
+    def call(
+        self,
+        method: Any,
+        url: str,
+        raise_for_status: bool = True,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         kwargs.setdefault("timeout", self._timeout)
         return super().call(method, url, raise_for_status, *args, **kwargs)
 
@@ -607,10 +614,24 @@ class BiigleHandler:
                 )
                 return False, media_type
 
-            # Both labels must be present (exact match, as they appear in Biigle)
-            found_labels = {
-                label_entry.get("label", {}).get("name", "") for label_entry in labels
-            }
+            # Both labels must be present (exact match, as they appear in Biigle).
+            # Biigle whole-file label entries are nested: {"label": {"name": "..."}, ...}.
+            # Flat fallback ("name" at top level) guards against API shape changes.
+            found_labels = set()
+            for label_entry in labels:
+                name = label_entry.get("label", {}).get("name", "")
+                if not name:
+                    name = label_entry.get("name", "")
+                if name:
+                    found_labels.add(name)
+
+            if labels and not found_labels:
+                logging.warning(
+                    f"Could not extract label names from {len(labels)} label entries "
+                    f"on {media_type} {first_id} (volume {volume_id}). "
+                    f"Sample entry: {labels[0]}"
+                )
+
             if all(lbl in found_labels for lbl in done_labels):
                 logging.info(
                     f"All done labels {done_labels} found on {media_type} {first_id} in volume {volume_id}."

@@ -144,7 +144,7 @@ def _ingest_ml_annotations(
                 "external_id": model_name,
             }
         )
-    # TODO check if this is wanted behaviour. 
+    # TODO check if this is wanted behaviour.
     # Always clear previous ML annotations before writing new ones.
     # If annotations_to_add is empty (zero detections above threshold), we still
     # need to wipe stale rows from any prior run — skipping the clear would leave
@@ -310,9 +310,6 @@ def run_post_ml(
                 )
 
         logging.info(f"  → Post-ML processing complete for: {drop_id}")
-
-        # Update status to AWAITING_CITSCI_CLIPS
-        db.advance_status(drop_id, PipelineStatus.AWAITING_CITSCI_CLIPS)
 
     # 4. Finally sync all updated drops to the main pipeline DB
     if drop_ids:

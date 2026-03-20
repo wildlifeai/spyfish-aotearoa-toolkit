@@ -51,13 +51,29 @@ class MLRunner:
             return []
 
         drop_id_col = config.drop_id_column
-        video_link_col = config.csv_mapping.get(
-            "video_file_link_column", "LinkToVideoFile"
-        )
+        video_link_col = config.csv_video_file_link_column
 
         df = pd.DataFrame(
             self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML)
         )
+
+        # Float any drops listed in pipeline_targets.csv to the top (in CSV order)
+        targets_csv = config.pipeline_targets_csv
+        if targets_csv and os.path.exists(targets_csv):
+            try:
+                priority_ids = (
+                    pd.read_csv(targets_csv)[config.drop_id_column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .tolist()
+                )
+                priority_order = {d: i for i, d in enumerate(priority_ids)}
+                df["_priority"] = df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                df = df.sort_values("_priority").drop(columns=["_priority"])
+                logging.debug(f"Priority order applied from {targets_csv}: {priority_ids}")
+            except Exception as e:
+                logging.warning(f"Could not apply priority ordering from {targets_csv}: {e}")
 
         df = df.head(self.limit)
 

@@ -78,6 +78,7 @@ def apply_ceiling(
     df: pd.DataFrame,
     ceiling_pct: float,
     max_iterations: int = 3,
+    min_rows: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Iteratively remove least-diverse frames for over-represented species.
@@ -91,10 +92,16 @@ def apply_ceiling(
             'DropID', 'TimeOfMax' columns.
         ceiling_pct: Maximum allowed fraction for any species (e.g. 0.40).
         max_iterations: Safety cap to prevent infinite loops.
+        min_rows: Minimum viable dataset size after ceiling removal. Defaults to
+            config.training_val_min_images. Removal is skipped (with a warning)
+            if it would reduce the dataset below this threshold.
 
     Returns:
         Filtered DataFrame with ceiling applied.
     """
+    if min_rows is None:
+        min_rows = config.training_val_min_images
+
     for iteration in range(1, max_iterations + 1):
         fractions = compute_species_fractions(df)
         over_ceiling = fractions[fractions > ceiling_pct]
@@ -148,6 +155,17 @@ def apply_ceiling(
                     break
 
             if indices_to_drop:
+                rows_after = len(df) - len(indices_to_drop)
+                if rows_after < min_rows:
+                    logging.warning(
+                        f"  Cannot apply ceiling to '{species}' (was {fraction:.1%}): "
+                        f"removing {len(indices_to_drop)} rows would leave only {rows_after} rows, "
+                        f"below the minimum viable dataset size of {min_rows} "
+                        f"(config training.val_min_images). "
+                        "Training cannot proceed with the current data — collect more annotations "
+                        "or relax the ceiling threshold."
+                    )
+                    continue
                 df = df.drop(index=indices_to_drop)
                 logging.info(
                     f"  Removed {len(indices_to_drop)} rows (~{removed} intervals) "
@@ -223,7 +241,6 @@ def prepare_from_annotations(
     Returns:
         (balanced_df, species_class_names)
     """
-    training_cfg = config.get_section("training")
     ceiling_pct = ceiling_pct or config.training_ceiling_pct
     floor_pct = floor_pct or config.training_floor_pct
     ceiling_max_iterations = (

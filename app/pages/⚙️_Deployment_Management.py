@@ -1,12 +1,10 @@
-import sqlite3
-
 import pandas as pd
 import streamlit as st
 from utils import check_password, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.config.base import PipelineStatus
-from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.database.manager import DatabaseManager
 from spyfish.utils import extract_survey_id, get_survey_summary
 
 
@@ -15,8 +13,9 @@ def load_deployment_status():
     """Load deployment status natively from local spyfish_pipeline.db, syncing from S3 if needed."""
     try:
         sync_db_if_needed()
-        conn = sqlite3.connect(config.db_path)
-        df = pd.read_sql("SELECT * FROM deployments", conn)
+        db = DatabaseManager()
+        with db.get_connection() as conn:
+            df = pd.read_sql("SELECT * FROM deployments", conn)
 
         if df.empty:
             return df
@@ -46,6 +45,11 @@ def load_deployment_status():
         df["TotalAnnotations"] = (
             df["ExpertAnnotations"] + df["MlAnnotations"] + df["CitSciAnnotations"]
         )
+
+        # Video presence column
+        df["VideoStatus"] = "Absent"
+        df.loc[df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES), "VideoStatus"] = "Present"
+        df.loc[df["IsBadDeployment"], "VideoStatus"] = "No video (bad dep.)"
 
         # Determine NeedsAction based strictly on db flags and presence
         # Deployments that are complete or bad do not need action
@@ -92,7 +96,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
             "Show Annotation Columns", key=f"show_ann_{title}", value=False
         )
 
-    display_cols = ["DropID", "SurveyID", "SamplingStart", "Status", "Complete"]
+    display_cols = ["DropID", "SurveyID", "SamplingStart", "Status", "VideoStatus", "Complete"]
     if show_annotations:
         display_cols.extend(["MlAnnotations", "CitSciAnnotations", "ExpertAnnotations"])
 
@@ -102,6 +106,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         hide_index=True,
         column_config={
             "Complete": st.column_config.CheckboxColumn("Complete", width="small"),
+            "VideoStatus": st.column_config.TextColumn("Video", width="small"),
             "MlAnnotations": st.column_config.NumberColumn("ML", width="small"),
             "CitSciAnnotations": st.column_config.NumberColumn("CitSci", width="small"),
             "ExpertAnnotations": st.column_config.NumberColumn("Expert", width="small"),

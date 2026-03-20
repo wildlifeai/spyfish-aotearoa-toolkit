@@ -32,8 +32,8 @@ from spyfish.log_config import log_header
 class GlobalStage:
     """A stage that runs once and manages its own drop iteration internally."""
 
-    flag: str           # CLI flag name, e.g. "ingest" → --ingest
-    description: str    # argparse help text and log header
+    flag: str  # CLI flag name, e.g. "ingest" → --ingest
+    description: str  # argparse help text and log header
     fn: Callable[[], Any]
     run_in_all: bool = True  # included when no step flags are given
 
@@ -137,9 +137,7 @@ class StageRunner:
         drop_ids = [r["drop_id"] for r in records]
 
         if not drop_ids:
-            logging.info(
-                f"No deployments in {statuses} for {stage.flag}. Skipping."
-            )
+            logging.info(f"No deployments in {statuses} for {stage.flag}. Skipping.")
             return
 
         logging.info(f"Processing {len(drop_ids)} drops for {stage.flag}...")

@@ -30,6 +30,8 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
+
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.biigle.upload_frames import upload_frames_to_biigle
 from spyfish.config.base import PipelineStatus
@@ -51,7 +53,6 @@ from spyfish.zooniverse.upload import (
     upload_clips_to_zooniverse,
     upload_frames_to_zooniverse,
 )
-
 
 # ---------------------------------------------------------------------------
 # Path helper
@@ -207,13 +208,34 @@ def _step5_process_drop(drop_id: str) -> str:
 def _step6_process_drop(drop_id: str) -> str:
     """Step 6: Biigle frame extraction + volume upload."""
     paths = _get_common_paths(drop_id)
+    selections_path = Path(paths["selections_csv"])
 
-    if not Path(paths["selections_csv"]).exists():
-        logging.error(
-            f"Missing {paths['selections_csv']} for {drop_id}. "
-            "Advancing to AWAITING_EXPERT_REVIEW (skipped upload)."
+    if not selections_path.exists():
+        # Biigle-direct path: generate frame selections from MaxN CSV
+        maxn_path = Path(paths["maxn_csv"])
+        if not maxn_path.exists():
+            logging.error(
+                f"Missing MaxN CSV at {maxn_path} for {drop_id}. Cannot generate frame selections."
+            )
+            return PipelineStatus.AWAITING_EXPERT_REVIEW
+
+        maxn_df = pd.read_csv(maxn_path)
+        if maxn_df.empty:
+            logging.warning(
+                f"Empty MaxN CSV for {drop_id} — no detections, no frames to upload to Biigle. "
+                "Advancing to AWAITING_EXPERT_REVIEW."
+            )
+            return PipelineStatus.AWAITING_EXPERT_REVIEW
+
+        maxn_df = maxn_df.rename(
+            columns={config.csv_maxn_time_ms_column: config.csv_clip_max_time_column}
         )
-        return PipelineStatus.AWAITING_EXPERT_REVIEW
+        maxn_df["SelectionReason"] = "MaxN Peak"
+        selections_path.parent.mkdir(parents=True, exist_ok=True)
+        maxn_df.to_csv(selections_path, index=False)
+        logging.info(
+            f"Generated {len(maxn_df)} frame selections from MaxN CSV for {drop_id} (biigle-direct path)."
+        )
 
     frames_df = extract_frames_from_selections(
         selections_csv_path=paths["selections_csv"],
@@ -255,16 +277,54 @@ def _biigle_input_statuses(args: argparse.Namespace, run_all: bool) -> list[str]
 # ---------------------------------------------------------------------------
 
 STAGES: list = [
-    GlobalStage("ingest",           "Step 1: metadata ingestion",                _run_step1_ingest),
-    GlobalStage("check-arrivals",   "Check S3 for video arrivals",               _run_arrival_check,   run_in_all=False),
-    GlobalStage("set-targets",      "Bulk set pipeline stages from CSV",         _run_set_targets,     run_in_all=False),
-    GlobalStage("ml",               "Steps 2+3: ML inference + post-processing", _run_steps2_and_3_ml),
-    DropStage(  "zooniverse-clips",  "Step 4: Zooniverse clip extraction",       _step4_process_drop,  [PipelineStatus.AWAITING_CITSCI_CLIPS]),
-    DropStage(  "zooniverse-images", "Step 5: Zooniverse image extraction",      _step5_process_drop,         [PipelineStatus.CITSCI_CLIPS_COMPLETE]),
-    DropStage(  "zooniverse-sync",   "Step 5b: Zooniverse volunteer sync-back",  _step_zooniverse_sync_drop,  [PipelineStatus.AWAITING_CITSCI_FRAMES]),
-    DropStage(  "biigle-upload",     "Step 6: Biigle frame extraction + upload", _step6_process_drop,         _biigle_input_statuses),
-    GlobalStage("biigle-sync",      "Step 7: Biigle annotation sync",            _run_step7_biigle_sync),
-    GlobalStage("retrain",          "Step 8: Retraining pipeline",               _run_step8_retrain),
+    GlobalStage("ingest", "Step 1: metadata ingestion", _run_step1_ingest),
+    GlobalStage(
+        "check-arrivals",
+        "Check S3 for video arrivals",
+        _run_arrival_check,
+        run_in_all=False,
+    ),
+    GlobalStage(
+        "set-targets",
+        "Bulk set pipeline stages from CSV",
+        _run_set_targets,
+        run_in_all=False,
+    ),
+    GlobalStage(
+        "ml", "Steps 2+3: ML inference + post-processing", _run_steps2_and_3_ml
+    ),
+    DropStage(
+        "zooniverse-clips",
+        "Step 4: Zooniverse clip extraction",
+        _step4_process_drop,
+        [PipelineStatus.ML_COMPLETE, PipelineStatus.AWAITING_CITSCI_CLIPS],
+    ),
+    DropStage(
+        "zooniverse-images",
+        "Step 5: Zooniverse image extraction",
+        _step5_process_drop,
+        [PipelineStatus.CITSCI_CLIPS_COMPLETE],
+    ),
+    DropStage(
+        "zooniverse-sync",
+        "Step 5b: Zooniverse volunteer sync-back",
+        _step_zooniverse_sync_drop,
+        [PipelineStatus.AWAITING_CITSCI_FRAMES],
+    ),
+    DropStage(
+        "biigle-upload",
+        "Step 6: Biigle frame extraction + upload",
+        _step6_process_drop,
+        _biigle_input_statuses,
+    ),
+    GlobalStage(
+        "biigle-sync", "Step 7: Biigle annotation sync", _run_step7_biigle_sync
+    ),
+    GlobalStage(
+        "retrain",
+        "Step 8: Retraining pipeline (run --biigle-sync first)",
+        _run_step8_retrain,
+    ),
 ]
 
 
@@ -278,9 +338,15 @@ def main() -> None:
     runner = StageRunner(STAGES, db)
 
     parser = runner.build_parser()
-    parser.add_argument("--step0",         action="store_true", help="Run Step 0: test run")
-    parser.add_argument("--no-upload",     action="store_true", help="Skip all S3 uploads (DB, models, results)")
-    parser.add_argument("--test-run",      action="store_true", help="Run in test mode with mock data")
+    parser.add_argument("--step0", action="store_true", help="Run Step 0: test run")
+    parser.add_argument(
+        "--no-upload",
+        action="store_true",
+        help="Skip all S3 uploads (DB, models, results)",
+    )
+    parser.add_argument(
+        "--test-run", action="store_true", help="Run in test mode with mock data"
+    )
     args = parser.parse_args()
 
     logging.info("═" * 60)
@@ -295,9 +361,13 @@ def main() -> None:
 
     # Bind no_upload to set-targets (only stage whose behaviour depends on it)
     patched_stages = [
-        replace(s, fn=functools.partial(_run_set_targets, push_s3=not args.no_upload))
-        if s.flag == "set-targets"
-        else s
+        (
+            replace(
+                s, fn=functools.partial(_run_set_targets, push_s3=not args.no_upload)
+            )
+            if s.flag == "set-targets"
+            else s
+        )
         for s in STAGES
     ]
     runner = StageRunner(patched_stages, db)

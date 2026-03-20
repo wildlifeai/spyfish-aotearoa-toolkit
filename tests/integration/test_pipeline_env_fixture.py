@@ -29,12 +29,13 @@ from tests.conftest import (
     RAW_ML_DETECTIONS,
 )
 
-
 # ── Config wiring ─────────────────────────────────────────────────────────────
+
 
 def test_config_yaml_written_to_disk(pipeline_env):
     """The test config.yaml must exist in tmp_path and parse cleanly."""
     import yaml
+
     assert pipeline_env.config_path.exists()
     loaded = yaml.safe_load(pipeline_env.config_path.read_text())
     assert loaded["orchestrator"]["is_test_run"] is True
@@ -60,6 +61,7 @@ def test_all_paths_resolve_under_tmp(pipeline_env):
 
 # ── Database seeding ──────────────────────────────────────────────────────────
 
+
 def test_deployments_seeded_with_correct_statuses(pipeline_env):
     db = pipeline_env.db
 
@@ -83,14 +85,15 @@ def test_get_deployments_by_status(pipeline_env):
     db = pipeline_env.db
     ready = db.get_deployments_by_status(PipelineStatus.READY_FOR_ML)
     stuck = db.get_deployments_by_status(PipelineStatus.PROCESSING_ML)
-    done  = db.get_deployments_by_status(PipelineStatus.ML_COMPLETE)
+    done = db.get_deployments_by_status(PipelineStatus.ML_COMPLETE)
 
     assert len(ready) == 1 and ready[0]["drop_id"] == DROP_NORMAL
     assert len(stuck) == 1 and stuck[0]["drop_id"] == DROP_STUCK
-    assert len(done)  == 1 and done[0]["drop_id"]  == DROP_ML_COMPLETE
+    assert len(done) == 1 and done[0]["drop_id"] == DROP_ML_COMPLETE
 
 
 # ── Videos ────────────────────────────────────────────────────────────────────
+
 
 def test_videos_are_readable_by_cv2(pipeline_env):
     """cv2 must open each video and report the correct 320×240 dimensions."""
@@ -106,6 +109,7 @@ def test_videos_are_readable_by_cv2(pipeline_env):
 
 
 # ── ML CSV files ──────────────────────────────────────────────────────────────
+
 
 def test_raw_csv_written_for_drop_normal_only(pipeline_env):
     """Only DROP_NORMAL should have a raw ML CSV — DROP_STUCK crashed before inference."""
@@ -150,6 +154,7 @@ def test_annotations_pre_seeded_for_ml_complete(pipeline_env):
 
 # ── Ground truth ──────────────────────────────────────────────────────────────
 
+
 def test_process_maxn_matches_ground_truth(pipeline_env):
     """
     process_maxn() on DROP_NORMAL's raw CSV must produce the exact hardcoded
@@ -172,10 +177,10 @@ def test_process_maxn_matches_ground_truth(pipeline_env):
     result = result.sort_values("time_of_maxn_ms").reset_index(drop=True)
 
     assert len(result) == len(expected)
-    assert list(result["MaxInterval"])         == list(expected["MaxInterval"])
-    assert list(result["time_of_maxn_ms"])     == list(expected["time_of_maxn_ms"])
+    assert list(result["MaxInterval"]) == list(expected["MaxInterval"])
+    assert list(result["time_of_maxn_ms"]) == list(expected["time_of_maxn_ms"])
     assert list(result["ConfidenceAgreement"]) == list(expected["ConfidenceAgreement"])
-    assert list(result["TimeOfMax"])           == list(expected["TimeOfMax"])
+    assert list(result["TimeOfMax"]) == list(expected["TimeOfMax"])
 
 
 def test_process_maxn_respects_confidence_threshold(pipeline_env):
