@@ -33,7 +33,7 @@ def test_health_check_times_are_relative_to_sampling_start(
     # Large sampling_start relative to sampling window: makes the bug clearly detectable.
     # Old (buggy) times would be 610, 620, ... (> sampling_start=600).
     # Fixed times are 10, 20, ... (< sampling_start=600).
-    sampling_start = 600   # 10 minutes of pre-deployment video before sampling starts
+    sampling_start = 600  # 10 minutes of pre-deployment video before sampling starts
     sampling_end = 660
     duration = sampling_end - sampling_start  # 60s sampling window
     clip_length = 5
@@ -74,7 +74,9 @@ def test_health_check_times_are_relative_to_sampling_start(
     selections_csv = tmp_path / "selections.csv"
     drop_id = "KSF_20240124_BUV_KSF_085_01"
 
-    result = process_zooniverse_clips(str(maxn_csv), str(selections_csv), drop_id, mock_config)
+    result = process_zooniverse_clips(
+        str(maxn_csv), str(selections_csv), drop_id, mock_config
+    )
 
     assert not result.empty, "Expected health check clips to be generated"
 

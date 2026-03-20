@@ -75,11 +75,25 @@ class AnnotationDatabaseManager:
             conn.commit()
 
     def clear_annotations(self, drop_id: str, annotated_by: str):
-        """Clears existing annotations for a given drop and source (annotated_by)."""
+        """Clears ALL existing annotations for a given drop and source (annotated_by)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "DELETE FROM annotations WHERE drop_id = ? AND annotated_by = ?",
+                (drop_id, annotated_by),
+            )
+            conn.commit()
+
+    def clear_synced_annotations(self, drop_id: str, annotated_by: str):
+        """Clears only Biigle-sourced annotations (external_id IS NOT NULL) for a drop.
+
+        Used by the Biigle sync path to replace previously downloaded annotations
+        without touching any manually-entered rows (external_id = NULL).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM annotations WHERE drop_id = ? AND annotated_by = ? AND external_id IS NOT NULL",
                 (drop_id, annotated_by),
             )
             conn.commit()

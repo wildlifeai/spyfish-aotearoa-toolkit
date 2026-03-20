@@ -22,6 +22,12 @@ class ZooniverseConfig(BaseConfig):
         return int(get_required(self.extraction, "project_id", "zooniverse_extraction"))
 
     @property
+    def clip_length(self) -> float:
+        return float(
+            get_required(self.extraction, "clip_length", "zooniverse_extraction")
+        )
+
+    @property
     def health_check_count(self) -> int:
         return int(
             get_required(self.extraction, "health_check_count", "zooniverse_extraction")

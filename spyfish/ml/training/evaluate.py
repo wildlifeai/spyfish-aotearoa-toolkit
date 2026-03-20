@@ -177,9 +177,7 @@ def run_evaluation_pipeline(
     Returns:
         Dict with evaluation results and promotion decision.
     """
-    training_cfg = config.get_section("training")
-
-    imgsz = training_cfg.get("imgsz", 640)
+    imgsz = config.training_imgsz
     local_training_dir = config.local_training_dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 

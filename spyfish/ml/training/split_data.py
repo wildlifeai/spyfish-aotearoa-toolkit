@@ -160,7 +160,7 @@ def print_species_breakdown(
 
     logging.info("\n=== Per-species split breakdown ===")
     logging.info(pivot.to_string())
-    val_min_images = config.get_section("training").get("val_min_images", 20)
+    val_min_images = config.training_val_min_images
     logging.info(
         f"\n  ⚠ Minimum val images recommended: {val_min_images}. "
         "If any species val count is too low, extract more frames from those deployments."
@@ -191,9 +191,8 @@ def split_data(
     Returns:
         (train_drops, val_drops, test_drops)
     """
-    training_cfg = config.get_section("training")
-    train_pct = training_cfg.get("train_pct", 0.80)
-    val_pct = training_cfg.get("val_pct", 0.10)
+    train_pct = config.training_train_pct
+    val_pct = config.training_val_pct
 
     all_drop_ids = balanced_df["DropID"].unique().tolist()
     if len(all_drop_ids) == 0:

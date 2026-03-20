@@ -1,10 +1,11 @@
+from typing import Optional
+
 import pandas as pd
 import streamlit as st
 from utils import check_password, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.database.manager import DatabaseManager
 
-from typing import Optional
 
 @st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
 def load_error_data():
@@ -68,7 +69,7 @@ def display_file_breakdown(errors_df: pd.DataFrame):
     st.dataframe(file_counts, width="stretch", hide_index=True, height=300)
 
 
-def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None): 
+def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None):
     if errors_df.empty:
         st.info("No errors match the current filters")
         return
@@ -151,8 +152,7 @@ def main():
         )
         if selected_error_types:
             display_error_table(
-                errors_df[errors_df["ErrorType"].isin(selected_error_types)],
-                "Errors by Type",
+                errors_df[errors_df["ErrorType"].isin(selected_error_types)]
             )
 
     with tab2:
@@ -161,10 +161,7 @@ def main():
             "Select surveys to view", options=sorted(errors_df["SurveyID"].unique())
         )
         if selected_surveys:
-            display_error_table(
-                errors_df[errors_df["SurveyID"].isin(selected_surveys)],
-                "Errors by Survey",
-            )
+            display_error_table(errors_df[errors_df["SurveyID"].isin(selected_surveys)])
 
     with tab3:
         display_file_breakdown(errors_df)
@@ -174,13 +171,11 @@ def main():
             options=sorted(errors_df["FileName"].unique()),
         )
         if selected_files:
-            display_error_table(
-                errors_df[errors_df["FileName"].isin(selected_files)], "Errors by File"
-            )
+            display_error_table(errors_df[errors_df["FileName"].isin(selected_files)])
 
     with tab4:
         st.subheader("All Validation Errors")
-        display_error_table(errors_df, "All Errors", None)
+        display_error_table(errors_df)
 
 
 if __name__ == "__main__":

@@ -25,8 +25,8 @@ import pytest
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations, process_maxn
 from tests.conftest import DROP_NORMAL, MODEL_NAME
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _count_ml_annotations(ann_db, drop_id: str) -> int:
     """Return the number of ML annotation rows for drop_id in ann_db."""
@@ -48,13 +48,60 @@ def _count_ml_annotations(ann_db, drop_id: str) -> int:
 #   (interval=20, class="Notolabrus fucicola")
 #   (interval=30, class="Pagrus auratus")
 #   (interval=40, class="Notolabrus fucicola")
-_RAW_DETECTIONS_5 = pd.DataFrame([
-    {"frame": 1,  "time_seconds": 0.5,  "class": "Pagrus auratus",      "confidence": 0.80, "x": 160, "y": 120, "h": 50, "w": 40},
-    {"frame": 15, "time_seconds": 10.5, "class": "Pagrus auratus",      "confidence": 0.75, "x": 160, "y": 120, "h": 50, "w": 40},
-    {"frame": 30, "time_seconds": 20.5, "class": "Notolabrus fucicola", "confidence": 0.85, "x": 160, "y": 120, "h": 50, "w": 40},
-    {"frame": 45, "time_seconds": 30.5, "class": "Pagrus auratus",      "confidence": 0.90, "x": 160, "y": 120, "h": 50, "w": 40},
-    {"frame": 60, "time_seconds": 40.5, "class": "Notolabrus fucicola", "confidence": 0.95, "x": 160, "y": 120, "h": 50, "w": 40},
-])
+_RAW_DETECTIONS_5 = pd.DataFrame(
+    [
+        {
+            "frame": 1,
+            "time_seconds": 0.5,
+            "class": "Pagrus auratus",
+            "confidence": 0.80,
+            "x": 160,
+            "y": 120,
+            "h": 50,
+            "w": 40,
+        },
+        {
+            "frame": 15,
+            "time_seconds": 10.5,
+            "class": "Pagrus auratus",
+            "confidence": 0.75,
+            "x": 160,
+            "y": 120,
+            "h": 50,
+            "w": 40,
+        },
+        {
+            "frame": 30,
+            "time_seconds": 20.5,
+            "class": "Notolabrus fucicola",
+            "confidence": 0.85,
+            "x": 160,
+            "y": 120,
+            "h": 50,
+            "w": 40,
+        },
+        {
+            "frame": 45,
+            "time_seconds": 30.5,
+            "class": "Pagrus auratus",
+            "confidence": 0.90,
+            "x": 160,
+            "y": 120,
+            "h": 50,
+            "w": 40,
+        },
+        {
+            "frame": 60,
+            "time_seconds": 40.5,
+            "class": "Notolabrus fucicola",
+            "confidence": 0.95,
+            "x": 160,
+            "y": 120,
+            "h": 50,
+            "w": 40,
+        },
+    ]
+)
 
 # Same frames and timestamps, confidence dropped to 0.30 — below the 0.50 threshold.
 # process_maxn() will return an empty DataFrame, simulating a re-run on a video
@@ -63,6 +110,7 @@ _RAW_DETECTIONS_ZERO = _RAW_DETECTIONS_5.assign(confidence=0.30)
 
 
 # ── Test ──────────────────────────────────────────────────────────────────────
+
 
 def test_stale_annotations_cleared_on_zero_detection_rerun(pipeline_env):
     """
@@ -96,9 +144,9 @@ def test_stale_annotations_cleared_on_zero_detection_rerun(pipeline_env):
     _ingest_ml_annotations(ann_db, drop_id, maxn_df_run1, MODEL_NAME)
 
     count_run1 = _count_ml_annotations(ann_db, drop_id)
-    assert count_run1 == 5, (
-        f"Expected 5 annotations after first inference run, got {count_run1}"
-    )
+    assert (
+        count_run1 == 5
+    ), f"Expected 5 annotations after first inference run, got {count_run1}"
 
     # ── Run 2: same frames, all confidence below threshold → empty MaxN ───────
     maxn_csv_run2 = pipeline_env.tmp_path / f"{drop_id}_run2_maxn.csv"

@@ -10,8 +10,10 @@ Ported from: Spyfish-Aotearoa-toolkit_old/sftk/biigle_parser.py
 Changes: sftk imports replaced by spyfish equivalents; cache directory uses config.
 """
 
+import io
 import logging
 import math
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +43,7 @@ class BiigleParser:
             self.cache_dir = config.get_biigle_cache_dir(drop_id)
         else:
             # No drop context — use a shared root-level biigle cache
-            self.cache_dir = config.data_quality_dir / config._sub("biigle_cache")
+            self.cache_dir = config.shared_biigle_cache_dir
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Biigle cache directory: {self.cache_dir}")
@@ -61,10 +63,19 @@ class BiigleParser:
         """Export report from Biigle API with optional local ZIP cache."""
         cache_path = self._get_cached_zip_path(resource, resource_id)
 
+        zip_bytes: Optional[bytes] = None
         if use_cache and cache_path.exists():
-            logging.info(f"Using cached report: {cache_path}")
-            zip_bytes = cache_path.read_bytes()
-        else:
+            candidate = cache_path.read_bytes()
+            if not zipfile.is_zipfile(io.BytesIO(candidate)):
+                logging.warning(
+                    f"Cached ZIP at {cache_path} failed integrity check — deleting and re-downloading."
+                )
+                cache_path.unlink()
+            else:
+                logging.info(f"Using cached report: {cache_path}")
+                zip_bytes = candidate
+
+        if zip_bytes is None:
             logging.info(
                 f"Downloading report from Biigle API ({resource} {resource_id})"
             )
@@ -72,6 +83,11 @@ class BiigleParser:
                 resource, resource_id, type_id  # type: ignore
             )
             zip_bytes = self.biigle_handler.download_report_zip_bytes(report_id)
+            if not zipfile.is_zipfile(io.BytesIO(zip_bytes)):
+                raise ValueError(
+                    f"Downloaded report for {resource} {resource_id} is not a valid ZIP "
+                    f"({len(zip_bytes)} bytes). Not caching — retry to force a fresh download."
+                )
             if use_cache:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_bytes(zip_bytes)
@@ -89,6 +105,24 @@ class BiigleParser:
             f"Loaded {len(dfs)} CSV(s), {len(result_df)} total rows from {resource} {resource_id}"
         )
         return result_df
+
+    def download_volume_annotations(
+        self,
+        volume_id: int,
+        type_id: int,
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """Download the annotation report for a volume and return it as a DataFrame.
+
+        Public entry point for callers that only need the raw annotations DataFrame,
+        without the full MaxN/size processing of process_video_annotations().
+        """
+        return self._export_report_with_cache(
+            resource="volumes",
+            resource_id=volume_id,
+            type_id=type_id,
+            use_cache=use_cache,
+        )
 
     # ── Main processing ───────────────────────────────────────────────────────
 

@@ -5,12 +5,6 @@ import yaml
 from dotenv import find_dotenv, load_dotenv
 
 
-def str_to_bool(value: str | None) -> bool:
-    if value is None:
-        return False
-    return value.strip().lower() == "true"
-
-
 def get_required(config_dict, key: str, section: str = ""):
     """Robust getter that works with both Python dicts and ConfigWrapper objects"""
     if isinstance(config_dict, dict):
@@ -117,7 +111,7 @@ class PipelineStatus:
         READY_FOR_ML: {PROCESSING_ML, ON_HOLD, EXCLUDED},
         PROCESSING_ML: {ML_COMPLETE, ERROR, ON_HOLD},
         ML_COMPLETE: {
-            AWAITING_CITSCI_CLIPS,   # full Zooniverse path
+            AWAITING_CITSCI_CLIPS,  # full Zooniverse path
             AWAITING_EXPERT_REVIEW,  # Biigle-direct (skip_zooniverse=True)
             ON_HOLD,
             EXCLUDED,
@@ -125,10 +119,13 @@ class PipelineStatus:
         AWAITING_CITSCI_CLIPS: {CITSCI_CLIPS_COMPLETE, ON_HOLD},
         CITSCI_CLIPS_COMPLETE: {
             AWAITING_CITSCI_FRAMES,  # frames uploaded to Zooniverse, awaiting volunteers
-            CITSCI_COMPLETE,         # skip path (missing CSV)
+            CITSCI_COMPLETE,  # skip path (missing CSV)
             ON_HOLD,
         },
-        AWAITING_CITSCI_FRAMES: {CITSCI_COMPLETE, ON_HOLD},  # advanced by Zooniverse sync (future)
+        AWAITING_CITSCI_FRAMES: {
+            CITSCI_COMPLETE,
+            ON_HOLD,
+        },  # advanced by Zooniverse sync (future)
         CITSCI_COMPLETE: {AWAITING_EXPERT_REVIEW, ON_HOLD},
         AWAITING_EXPERT_REVIEW: {PIPELINE_COMPLETE, ON_HOLD},
         PIPELINE_COMPLETE: {ON_HOLD},

@@ -45,9 +45,11 @@ from spyfish.database.manager import DatabaseManager
 MODEL_NAME = "yolov8n"
 
 # All three drops come from the same survey so cross-drop survey-level tests work.
-DROP_NORMAL      = "KSF_20240124_BUV_KSF_085_01"  # READY_FOR_ML  — inference not yet run
-DROP_STUCK       = "KSF_20240124_BUV_KSF_085_02"  # PROCESSING_ML — crash before CSV written
-DROP_ML_COMPLETE = "KSF_20240124_BUV_KSF_085_03"  # ML_COMPLETE   — MaxN CSV already on disk
+DROP_NORMAL = "KSF_20240124_BUV_KSF_085_01"  # READY_FOR_ML  — inference not yet run
+DROP_STUCK = "KSF_20240124_BUV_KSF_085_02"  # PROCESSING_ML — crash before CSV written
+DROP_ML_COMPLETE = (
+    "KSF_20240124_BUV_KSF_085_03"  # ML_COMPLETE   — MaxN CSV already on disk
+)
 
 # ── Test config.yaml ──────────────────────────────────────────────────────────
 # Written to tmp_path/config.yaml and loaded into the singleton.
@@ -275,12 +277,50 @@ validation_rules:
 #
 # DROP_ML_COMPLETE has no raw CSV — inference already ran in a prior pipeline run.
 RAW_ML_DETECTIONS: dict[str, pd.DataFrame] = {
-    DROP_NORMAL: pd.DataFrame([
-        {"frame": 10, "time_seconds": 4.0,  "class": "Pagrus auratus", "confidence": 0.85, "x": 160, "y": 120, "h": 50, "w": 40},
-        {"frame": 10, "time_seconds": 4.0,  "class": "Pagrus auratus", "confidence": 0.90, "x": 200, "y": 120, "h": 50, "w": 40},
-        {"frame": 25, "time_seconds": 10.0, "class": "Pagrus auratus", "confidence": 0.95, "x": 160, "y": 120, "h": 50, "w": 40},
-        {"frame": 37, "time_seconds": 14.8, "class": "Pagrus auratus", "confidence": 0.72, "x": 160, "y": 120, "h": 50, "w": 40},
-    ]),
+    DROP_NORMAL: pd.DataFrame(
+        [
+            {
+                "frame": 10,
+                "time_seconds": 4.0,
+                "class": "Pagrus auratus",
+                "confidence": 0.85,
+                "x": 160,
+                "y": 120,
+                "h": 50,
+                "w": 40,
+            },
+            {
+                "frame": 10,
+                "time_seconds": 4.0,
+                "class": "Pagrus auratus",
+                "confidence": 0.90,
+                "x": 200,
+                "y": 120,
+                "h": 50,
+                "w": 40,
+            },
+            {
+                "frame": 25,
+                "time_seconds": 10.0,
+                "class": "Pagrus auratus",
+                "confidence": 0.95,
+                "x": 160,
+                "y": 120,
+                "h": 50,
+                "w": 40,
+            },
+            {
+                "frame": 37,
+                "time_seconds": 14.8,
+                "class": "Pagrus auratus",
+                "confidence": 0.72,
+                "x": 160,
+                "y": 120,
+                "h": 50,
+                "w": 40,
+            },
+        ]
+    ),
 }
 
 # ── Ground truth MaxN output ──────────────────────────────────────────────────
@@ -288,47 +328,52 @@ RAW_ML_DETECTIONS: dict[str, pd.DataFrame] = {
 # Column names match csv_mapping in config.yaml — accessed via config.*_column properties.
 # Values are hardcoded (no pipeline code) so any regression in MaxN logic breaks these tests.
 EXPECTED_MAXN: dict[str, pd.DataFrame] = {
-    DROP_NORMAL: pd.DataFrame([
-        {
-            "DropID":              DROP_NORMAL,
-            "ScientificName":      "Pagrus auratus",
-            "TimeOfMax":           "00:00:04.000",   # seconds_to_time(4.0)
-            "MaxInterval":         2,
-            "AnnotatedBy":         MODEL_NAME,
-            "IntervalAnnotation":  10,
-            "ConfidenceAgreement": 0.875,             # (0.85 + 0.90) / 2
-            "time_of_maxn_ms":     4.0,
-        },
-        {
-            "DropID":              DROP_NORMAL,
-            "ScientificName":      "Pagrus auratus",
-            "TimeOfMax":           "00:00:10.000",   # seconds_to_time(10.0)
-            "MaxInterval":         1,
-            "AnnotatedBy":         MODEL_NAME,
-            "IntervalAnnotation":  10,
-            "ConfidenceAgreement": 0.95,              # frame 25 wins tiebreak
-            "time_of_maxn_ms":     10.0,
-        },
-    ]).sort_values("time_of_maxn_ms").reset_index(drop=True),
+    DROP_NORMAL: pd.DataFrame(
+        [
+            {
+                "DropID": DROP_NORMAL,
+                "ScientificName": "Pagrus auratus",
+                "TimeOfMax": "00:00:04.000",  # seconds_to_time(4.0)
+                "MaxInterval": 2,
+                "AnnotatedBy": MODEL_NAME,
+                "IntervalAnnotation": 10,
+                "ConfidenceAgreement": 0.875,  # (0.85 + 0.90) / 2
+                "time_of_maxn_ms": 4.0,
+            },
+            {
+                "DropID": DROP_NORMAL,
+                "ScientificName": "Pagrus auratus",
+                "TimeOfMax": "00:00:10.000",  # seconds_to_time(10.0)
+                "MaxInterval": 1,
+                "AnnotatedBy": MODEL_NAME,
+                "IntervalAnnotation": 10,
+                "ConfidenceAgreement": 0.95,  # frame 25 wins tiebreak
+                "time_of_maxn_ms": 10.0,
+            },
+        ]
+    )
+    .sort_values("time_of_maxn_ms")
+    .reset_index(drop=True),
 }
 
 # Pre-written MaxN data for DROP_ML_COMPLETE — stored in the fixture as if a prior
 # pipeline run already completed inference and wrote this output.
 _ML_COMPLETE_MAXN_ROWS = [
     {
-        "DropID":              DROP_ML_COMPLETE,
-        "ScientificName":      "Notolabrus fucicola",
-        "TimeOfMax":           "00:00:05.000",
-        "MaxInterval":         3,
-        "AnnotatedBy":         MODEL_NAME,
-        "IntervalAnnotation":  10,
+        "DropID": DROP_ML_COMPLETE,
+        "ScientificName": "Notolabrus fucicola",
+        "TimeOfMax": "00:00:05.000",
+        "MaxInterval": 3,
+        "AnnotatedBy": MODEL_NAME,
+        "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
-        "time_of_maxn_ms":     5.0,
+        "time_of_maxn_ms": 5.0,
     },
 ]
 
 
 # ── PipelineEnv dataclass ─────────────────────────────────────────────────────
+
 
 @dataclass
 class PipelineEnv:
@@ -345,6 +390,7 @@ class PipelineEnv:
         expected_maxn:     {drop_id: DataFrame} — ground truth for process_maxn().
         model_name:        Model name string used in CSV/DB path construction.
     """
+
     tmp_path: Path
     config_path: Path
     db: DatabaseManager
@@ -356,6 +402,7 @@ class PipelineEnv:
 
 
 # ── Integration fixture ───────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def pipeline_env(tmp_path, monkeypatch):
@@ -439,10 +486,14 @@ def pipeline_env(tmp_path, monkeypatch):
         video_path.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             [
-                "ffmpeg", "-y",
-                "-f", "lavfi",
-                "-i", "color=c=blue:size=320x240:rate=25",
-                "-t", "5",
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:size=320x240:rate=25",
+                "-t",
+                "5",
                 str(video_path),
             ],
             capture_output=True,
@@ -464,19 +515,21 @@ def pipeline_env(tmp_path, monkeypatch):
     maxn_csv_path = config.get_maxn_csv_path(DROP_ML_COMPLETE, MODEL_NAME)
     maxn_df.to_csv(maxn_csv_path, index=False)
 
-    ann_db.add_annotations([
-        {
-            "drop_id":              row["DropID"],
-            "scientific_name":      row["ScientificName"],
-            "time_of_max":          row["TimeOfMax"],
-            "max_interval":         row["MaxInterval"],
-            "annotated_by":         "ml",
-            "interval_annotation":  "",
-            "confidence_agreement": row["ConfidenceAgreement"],
-            "external_id":          MODEL_NAME,
-        }
-        for row in _ML_COMPLETE_MAXN_ROWS
-    ])
+    ann_db.add_annotations(
+        [
+            {
+                "drop_id": row["DropID"],
+                "scientific_name": row["ScientificName"],
+                "time_of_max": row["TimeOfMax"],
+                "max_interval": row["MaxInterval"],
+                "annotated_by": "ml",
+                "interval_annotation": "",
+                "confidence_agreement": row["ConfidenceAgreement"],
+                "external_id": MODEL_NAME,
+            }
+            for row in _ML_COMPLETE_MAXN_ROWS
+        ]
+    )
 
     return PipelineEnv(
         tmp_path=tmp_path,
@@ -490,6 +543,7 @@ def pipeline_env(tmp_path, monkeypatch):
 
 
 # ── Unit test fixtures (unchanged) ────────────────────────────────────────────
+
 
 @pytest.fixture
 def mock_db():

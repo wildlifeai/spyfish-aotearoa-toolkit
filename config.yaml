@@ -30,7 +30,7 @@ paths:
   # Base directory for all project data
   base_dir: "process_files"
   # S3 Storage configuration
-  bucket_name: "marine-buv-kalindi"
+  bucket_name: "marine-buv"
   # Path to orchestration files (local only, not synced to S3)
   orchestration:
     pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
@@ -113,8 +113,8 @@ ffmpeg:
 
 
 biigle:
-  project_id: 4081        # 3711 Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
-  disk_id: 98             # 134  S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  project_id: 3711         #  4081 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  disk_id: 134             #  134 doc, 98 kalindi, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report

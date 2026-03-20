@@ -406,8 +406,24 @@ class PathsConfig(BaseConfig):
 
     # ── Per-drop helpers ────────────────────────────────────────────────────
 
+    def get_survey_id_from_drop(self, drop_id: str) -> str:
+        """Derive SurveyID from a validated DropID using the config survey_id pattern."""
+        raw = self.get_validation_pattern("survey_id")
+        pattern = raw.lstrip("^").rstrip("$")
+        if not pattern.startswith("("):
+            pattern = f"({pattern})"
+        match = re.search(pattern, drop_id)
+        return match.group(1) if match else "UNKNOWN_SURVEY"
+
     def get_drop_dir(self, drop_id: str) -> Path:
-        return self.data_quality_dir / self.validate_drop_id(drop_id)
+        validated = self.validate_drop_id(drop_id)
+        survey_id = self.get_survey_id_from_drop(validated)
+        return self.data_quality_dir / survey_id / validated
+
+    @property
+    def shared_biigle_cache_dir(self) -> Path:
+        """Root-level Biigle cache directory (not drop-specific)."""
+        return self.data_quality_dir / self._sub("biigle_cache")
 
     def get_biigle_cache_dir(self, drop_id: str) -> Path:
         return self.get_drop_dir(drop_id) / self._sub("biigle_cache")
@@ -473,6 +489,22 @@ class PathsConfig(BaseConfig):
     @property
     def training_ceiling_max_iterations(self) -> int:
         return int(_require(self.training_config, "ceiling_max_iterations", "training"))
+
+    @property
+    def training_train_pct(self) -> float:
+        return float(_require(self.training_config, "train_pct", "training"))
+
+    @property
+    def training_val_pct(self) -> float:
+        return float(_require(self.training_config, "val_pct", "training"))
+
+    @property
+    def training_test_pct(self) -> float:
+        return float(_require(self.training_config, "test_pct", "training"))
+
+    @property
+    def training_val_min_images(self) -> int:
+        return int(_require(self.training_config, "val_min_images", "training"))
 
     @property
     def local_training_dir(self) -> Path:

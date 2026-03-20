@@ -162,10 +162,9 @@ def sync_biigle_annotations():
                 else config.annotation_report_type_images
             )
 
-            # TODO: Add a check here to see if the report has already been downloaded
-            # This will use the cache if it exists, otherwise download and cache in data_quality/{drop_id}/biigle_cache
-            fish_annotations_df = parser._export_report_with_cache(
-                resource="volumes", resource_id=volume_id, type_id=report_type
+            # 3b. Download annotations via public API — uses per-drop cache
+            fish_annotations_df = parser.download_volume_annotations(
+                volume_id=volume_id, type_id=report_type
             )
 
             if fish_annotations_df.empty:
@@ -175,35 +174,63 @@ def sync_biigle_annotations():
                 db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
                 continue
 
+            # Save the raw Biigle report for YOLO retraining (bounding boxes)
+            drop_ann_dir = config.get_drop_annotations_dir(drop_id)
+            drop_ann_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = drop_ann_dir / f"{drop_id}_biigle_expert_raw.csv"
+            fish_annotations_df.to_csv(raw_path, index=False)
+            logging.info(f"  Exported expert raw annotations for ML retraining: {raw_path}")
+
             # 4. Process and aggregate annotations
             annotations_to_add = _aggregate_annotations(fish_annotations_df, drop_id)
 
-            if annotations_to_add:
-                # Clear previous syncs for this drop
-                with ann_db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "DELETE FROM annotations WHERE drop_id = ? AND annotated_by = 'expert' AND external_id IS NOT NULL",
-                        (drop_id,),
-                    )
-                    conn.commit()
-
-                # Add new annotations
-                ann_db.add_annotations(annotations_to_add)
-
-                processed_drops.append(drop_id)
+            if not annotations_to_add:
+                # Report had rows but all were filtered (e.g. only Scale Bar labels).
+                # Volume is done — advance without writing annotations.
                 logging.info(
-                    f"  Ingested {len(annotations_to_add)} annotations for {drop_id}"
+                    f"  No fish annotations after aggregation for {drop_id} "
+                    "(only non-fish labels present). Advancing to PIPELINE_COMPLETE."
                 )
-
-                # Advance status to PIPELINE_COMPLETE
                 db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
-                logging.info(
-                    f"  Advanced {drop_id} to {PipelineStatus.PIPELINE_COMPLETE}"
-                )
+                continue
+
+            # Replace only Biigle-sourced expert annotations (external_id IS NOT NULL).
+            # Manually-entered expert annotations (external_id = NULL) are preserved.
+            ann_db.clear_synced_annotations(drop_id, "expert")
+
+            # Add new annotations
+            ann_db.add_annotations(annotations_to_add)
+
+            # Export the MaxN CSV for ML retraining
+            maxn_df = pd.DataFrame(annotations_to_add).rename(
+                columns={
+                    "drop_id": config.drop_id_column,
+                    "scientific_name": config.csv_scientific_name_column,
+                    "time_of_max": config.csv_maxn_time_column,
+                    "max_interval": config.csv_max_interval_column,
+                    "annotated_by": config.csv_annotated_by_column,
+                    "interval_annotation": config.csv_interval_annotation_column,
+                    "confidence_agreement": config.csv_confidence_agreement_column,
+                }
+            )
+            maxn_path = drop_ann_dir / f"{drop_id}_biigle_expert_maxn.csv"
+            maxn_df.to_csv(maxn_path, index=False)
+            logging.info(f"  Exported expert MaxN annotations for ML retraining: {maxn_path}")
+
+            processed_drops.append(drop_id)
+            logging.info(
+                f"  Ingested {len(annotations_to_add)} annotations for {drop_id}"
+            )
+
+            # Advance status to PIPELINE_COMPLETE
+            db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
+            logging.info(f"  Advanced {drop_id} to {PipelineStatus.PIPELINE_COMPLETE}")
 
         except Exception as e:
-            logging.error(f"  Failed to sync volume {volume_id} for {drop_id}: {e}")
+            logging.error(
+                f"  Failed to sync volume {volume_id} for {drop_id}: {e}",
+                exc_info=True,
+            )
 
     # 5. Final sync of counts to main DB
     if processed_drops:

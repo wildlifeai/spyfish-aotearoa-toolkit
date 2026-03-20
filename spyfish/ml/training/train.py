@@ -148,23 +148,25 @@ def run_training_pipeline(
     patience = config.training_patience
     imgsz = config.training_imgsz
 
-    base_model_path = str(local_training_dir / "base_model" / "base_model.pt")
+    base_model_path = config.base_model_path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results = {}
 
     # Base model must exist locally
-    if not Path(base_model_path).exists():
+    if not base_model_path or not base_model_path.exists():
         logging.error(
             f"Base model weights not found at {base_model_path}. Automatic download is disabled."
         )
         raise FileNotFoundError(f"Base model missing: {base_model_path}")
+
+    base_model_path_str = str(base_model_path)
 
     # Binary model
     if train_binary and binary_data_yaml:
         _clear_yolo_cache(local_training_dir)
         best_pt = train_model(
             data_yaml=binary_data_yaml,
-            base_model_path=base_model_path,
+            base_model_path=base_model_path_str,
             project_dir=local_training_dir / "runs",
             run_name=f"{timestamp}_binary",
             epochs=epochs,
@@ -178,7 +180,7 @@ def run_training_pipeline(
         _clear_yolo_cache(local_training_dir)
         best_pt = train_model(
             data_yaml=species_data_yaml,
-            base_model_path=base_model_path,
+            base_model_path=base_model_path_str,
             project_dir=local_training_dir / "runs",
             run_name=f"{timestamp}_species",
             epochs=epochs,

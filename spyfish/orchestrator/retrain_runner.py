@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Optional
 
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo
-from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
@@ -38,22 +37,14 @@ def _promote_model_locally(model_path: str, model_type: str):
 
 
 def run_retraining(
-    project_id: Optional[int] = None,
-    volume_id: Optional[int] = None,
     binary_only: bool = False,
     species_only: bool = False,
     auto_promote: bool = False,
-    skip_sync: bool = False,
 ) -> dict:
     """
     Run the full retraining pipeline.
     """
     logging.info("Starting Retraining Pipeline...")
-
-    # 1. Sync Biigle Annotations (updates annotations DB)
-    if not skip_sync:
-        logging.info("Step 1: Syncing active Biigle annotations to local DB...")
-        sync_biigle_annotations()
 
     # Configuration for retraining
     local_training_dir = config.local_training_dir
@@ -80,6 +71,13 @@ def run_retraining(
     # 3. Balance and Prepare
     logging.info("Step 3: Balancing annotations and preparing YOLO layout...")
     balanced_df, species_names = prepare_from_annotations()
+
+    if balanced_df.empty:
+        logging.warning(
+            "No data remaining after ceiling/floor balancing — retraining cannot proceed. "
+            "Check the ceiling threshold or collect more annotations."
+        )
+        return {}
 
     # 4. Split
     logging.info("Step 4: Splitting data into train/val/test...")

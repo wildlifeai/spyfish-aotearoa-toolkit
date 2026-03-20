@@ -17,10 +17,12 @@ def download_db() -> bool:
 
     # Check if object exists and get metadata
     try:
-        from botocore.exceptions import ClientError
+        last_modified = s3.get_object_last_modified(s3_key)
+        if last_modified is None:
+            logging.info("Database not found on S3. Starting fresh.")
+            return True
 
-        response = s3.s3.head_object(Bucket=bucket, Key=s3_key)
-        s3_mtime = response["LastModified"].timestamp()
+        s3_mtime = last_modified.timestamp()
 
         # If local file exists, check if it's already newer or same as S3
         if local_path.exists():
@@ -29,10 +31,7 @@ def download_db() -> bool:
                 logging.info("Local database is up-to-date with S3. Skipping download.")
                 return True
 
-    except ClientError as e:
-        if e.response["Error"]["Code"] in ["404", "403"]:
-            logging.info("Database not found on S3. Starting fresh.")
-            return True
+    except Exception as e:
         logging.error(f"Error checking database on S3: {e}")
         return False
 
@@ -84,11 +83,13 @@ def download_annotations_db() -> bool:
     local_path = config.annotations_db_path
 
     try:
-        from botocore.exceptions import ClientError
-
         s3 = S3Handler()
-        response = s3.s3.head_object(Bucket=config.s3_bucket, Key=s3_key)
-        s3_mtime = response["LastModified"].timestamp()
+        last_modified = s3.get_object_last_modified(s3_key)
+        if last_modified is None:
+            logging.info("Annotations database not found on S3 yet. Starting fresh.")
+            return True
+
+        s3_mtime = last_modified.timestamp()
 
         if local_path.exists():
             local_mtime = local_path.stat().st_mtime
@@ -106,13 +107,6 @@ def download_annotations_db() -> bool:
         logging.info("Annotations database downloaded successfully.")
         return True
 
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code")
-        if code in ["404", "403"]:
-            logging.info("Annotations database not found on S3 yet. Starting fresh.")
-            return True
-        logging.error(f"Error downloading annotations database: {e}")
-        return False
     except Exception as e:
         logging.warning(f"Could not download annotations database: {e}")
         return False

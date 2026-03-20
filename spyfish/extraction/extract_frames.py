@@ -273,10 +273,14 @@ def extract_frames_from_selections(
     df["FramePath"] = frame_paths
 
     # Build and save COCO JSON — only include records for frames that were successfully extracted
-    successful_records = [rec for rec, path in zip(frame_records, frame_paths) if path is not None]
+    successful_records = [
+        rec for rec, path in zip(frame_records, frame_paths) if path is not None
+    ]
     skipped = len(frame_records) - len(successful_records)
     if skipped:
-        logging.warning(f"Skipping {skipped} frame(s) from COCO JSON for {drop_id} due to extraction failure")
+        logging.warning(
+            f"Skipping {skipped} frame(s) from COCO JSON for {drop_id} due to extraction failure"
+        )
     coco = build_coco_from_raw_csv(raw_csv_path, successful_records)
 
     # Save the COCO annotations to the drop's annotations directory
