@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from spyfish.biigle.biigle_to_yolo import biigle_to_yolo
+from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
 from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
@@ -55,18 +55,26 @@ def run_retraining(
     labels_dir = local_training_dir / "labels_raw"
     class_map_path = local_training_dir / "class_map.json"
 
-    logging.info("Step 2: Exporting local annotations to YOLO format...")
-    spot_check_dir = local_training_dir / "spot_checks"
+    logging.info("Step 2a: Generating per-drop YOLO labels from Biigle expert CSVs...")
     class_map = biigle_to_yolo(
         data_quality_dir=images_dir,
-        labels_dir=labels_dir,
         class_map_path=class_map_path,
-        spot_check_dir=spot_check_dir,
     )
 
     if not class_map:
         logging.warning("No labels exported from Biigle. Retraining cannot proceed.")
         return {}
+
+    logging.info("Step 2b: Collecting per-drop labels into training staging area...")
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    collected = 0
+    for txt in images_dir.glob("**/annotations/*.txt"):
+        shutil.copy2(txt, labels_dir / txt.name)
+        collected += 1
+    logging.info(f"  Collected {collected} label files → {labels_dir}")
+
+    spot_check_dir = local_training_dir / "spot_checks"
+    draw_frames_on_images(images_dir, labels_dir, class_map, spot_check_dir)
 
     # 3. Balance and Prepare
     logging.info("Step 3: Balancing annotations and preparing YOLO layout...")
@@ -78,6 +86,37 @@ def run_retraining(
             "Check the ceiling threshold or collect more annotations."
         )
         return {}
+
+    # 3b. Filter to drops that have BOTH labels AND images — skip drops missing either.
+    _image_exts = {".jpg", ".jpeg", ".png"}
+    _trainable_drops = []
+    for drop_id in balanced_df["DropID"].unique():
+        has_labels = any(labels_dir.glob(f"{drop_id}*.txt"))
+        has_images = any(
+            p for p in images_dir.rglob(f"{drop_id}*")
+            if p.suffix.lower() in _image_exts
+        )
+        if has_labels and has_images:
+            _trainable_drops.append(drop_id)
+        else:
+            logging.warning(
+                f"Skipping drop {drop_id} — "
+                f"{'no labels' if not has_labels else ''}"
+                f"{' and ' if not has_labels and not has_images else ''}"
+                f"{'no images' if not has_images else ''} found. "
+                "Extract frames and add Rectangle annotations in Biigle before retraining."
+            )
+
+    balanced_df = balanced_df[balanced_df["DropID"].isin(_trainable_drops)]
+    if balanced_df.empty:
+        logging.error(
+            "No drops have both labels and images — retraining cannot proceed.\n"
+            f"  Labels dir: {labels_dir}\n"
+            f"  Images dir: {images_dir}\n"
+            "Ensure frame extraction (step 3) and Biigle Rectangle annotation export have both run."
+        )
+        return {}
+    logging.info(f"  {len(_trainable_drops)} drops ready for training: {_trainable_drops}")
 
     # 4. Split
     logging.info("Step 4: Splitting data into train/val/test...")
@@ -126,7 +165,8 @@ def run_retraining(
             data_yaml=str(species_yaml),
             model_type="species",
         )
-        # TODO might not need auto_promote here
+        # TODO: decide whether the species model should use the same auto_promote threshold
+        # as the binary model, or require a separate manual promotion review.
         if auto_promote and eval_results["species"].get("should_promote"):
             _promote_model_locally(train_results["species"]["local"], "species")
 

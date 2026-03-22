@@ -361,8 +361,8 @@ def copy_split_files(
           images/{split_name}/   ← source JPEGs
           labels/{split_name}/   ← YOLO .txt label files
 
-    Only images whose stem matches a label file are included.
-    Targets frames specifically in {drop_id}/biigle_frames/ subdirectories.
+    Iterates label files for each drop and searches images_dir recursively for
+    the matching image. This is robust to any subdirectory structure under images_dir.
 
     Args:
         drop_ids: List of DropIDs to include in this split.
@@ -383,38 +383,52 @@ def copy_split_files(
     n_images, n_labels = 0, 0
 
     for drop_id in drop_ids:
-        # Target only the biigle_frames folder for this drop
-        drop_biigle_frames = images_dir / drop_id / "biigle_frames"
-        if not drop_biigle_frames.exists():
-            logging.debug(
-                f"biigle_frames folder not found for {drop_id} at {drop_biigle_frames}"
-            )
+        # Find all label files that belong to this drop (stems start with drop_id)
+        drop_labels = [p for p in labels_dir.glob("*.txt") if p.stem.startswith(drop_id)]
+        if not drop_labels:
+            logging.warning(f"No label files found for {drop_id} in {labels_dir} — skipping.")
             continue
 
-        for ext in ("*.jpg", "*.jpeg", "*.png"):
-            for img_path in drop_biigle_frames.glob(ext):
-                lbl_path = labels_dir / (img_path.stem + ".txt")
-                if not lbl_path.exists():
-                    continue
+        for lbl_path in drop_labels:
+            # Search only inside canonical 'frames/' directories — exclude qa_frames,
+            # zooniverse_frames, biigle_frames, etc.
+            img_path = None
+            for ext in (".jpg", ".jpeg", ".png"):
+                for p in images_dir.rglob(lbl_path.stem + ext):
+                    if p.parent.name == "frames":
+                        img_path = p
+                        break
+                if img_path:
+                    break
 
-                dst_img = img_out / img_path.name
-                dst_lbl = lbl_out / lbl_path.name
+            if img_path is None:
+                logging.warning(f"No image found for label {lbl_path.stem} — skipping.")
+                continue
 
-                if symlink:
-                    if not dst_img.exists():
-                        dst_img.symlink_to(img_path.resolve())
-                    if not dst_lbl.exists():
-                        dst_lbl.symlink_to(lbl_path.resolve())
-                else:
-                    shutil.copy2(img_path, dst_img)
-                    shutil.copy2(lbl_path, dst_lbl)
+            dst_img = img_out / img_path.name
+            dst_lbl = lbl_out / lbl_path.name
 
-                n_images += 1
-                n_labels += 1
+            if symlink:
+                if not dst_img.exists():
+                    dst_img.symlink_to(img_path.resolve())
+                if not dst_lbl.exists():
+                    dst_lbl.symlink_to(lbl_path.resolve())
+            else:
+                shutil.copy2(img_path, dst_img)
+                shutil.copy2(lbl_path, dst_lbl)
 
-    logging.info(
+            n_images += 1
+            n_labels += 1
+
+    log_fn = logging.warning if (n_images == 0 and drop_ids) else logging.info
+    log_fn(
         f"copy_split_files [{split_name}]: {n_images} images + {n_labels} labels → {output_dir}"
     )
+    if n_images == 0 and drop_ids:
+        logging.warning(
+            f"  No labelled images found for {split_name} split — "
+            "check that expert frames exist under images_dir and labels_dir is populated."
+        )
     return n_images, n_labels
 
 

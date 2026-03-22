@@ -21,7 +21,6 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from spyfish.config.wrapper import config
-from spyfish.utils import get_survey_id_from_drop
 
 # ---------------------------------------------------------------------------
 # Core split algorithm
@@ -58,7 +57,7 @@ def split_drops_by_survey(
     # Group by survey
     survey_to_drops: Dict[str, List[str]] = {}
     for drop_id in drop_ids:
-        survey_id = get_survey_id_from_drop(drop_id)
+        survey_id = config.get_survey_id_from_drop(drop_id)
         survey_to_drops.setdefault(survey_id, []).append(drop_id)
 
     train_drops: List[str] = []

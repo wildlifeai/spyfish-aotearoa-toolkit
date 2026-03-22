@@ -235,35 +235,38 @@ def draw_frames_on_images(
 
 def biigle_to_yolo(
     data_quality_dir: Path,
-    labels_dir: Path,
     class_map_path: Path,
-    spot_check_dir: Optional[Path] = None,
 ) -> Dict[str, int]:
     """
     Finds all expert CSVs in data_quality and converts them to YOLO .txt files.
+
+    Labels are written into each drop's annotations/ folder alongside the source CSV.
+    Use biigle_to_yolo_collect() afterwards to copy them into a flat staging directory.
     """
     logging.info(f"Searching for expert CSVs in {data_quality_dir}...")
+    csv_paths = []
     all_dfs = []
 
     # Strictly use the per-drop expert raw CSVs
-    for csv_path in data_quality_dir.glob("**/annotations/*_biigle_expert_raw.csv"):
+    for csv_path in sorted(data_quality_dir.glob("**/annotations/*_biigle_expert_raw.csv")):
         logging.debug(f"  Found expert CSV: {csv_path}")
+        csv_paths.append(csv_path)
         all_dfs.append(pd.read_csv(csv_path))
 
     if not all_dfs:
         logging.warning("No expert CSV files found. Retraining cannot proceed.")
         return {}
 
+    # Build class map across all drops first so class IDs are consistent
     df = pd.concat(all_dfs, ignore_index=True)
     logging.info(f"Loaded {len(df)} annotations from {len(all_dfs)} CSVs.")
-
     class_map = build_class_map(df, class_map_path)
     save_class_map(class_map, class_map_path)
 
-    convert_annotations_to_yolo(df, class_map, labels_dir)
-
-    if spot_check_dir:
-        draw_frames_on_images(data_quality_dir, labels_dir, class_map, spot_check_dir)
+    # Write YOLO .txt labels into each drop's annotations/ folder
+    for csv_path, drop_df in zip(csv_paths, all_dfs):
+        convert_annotations_to_yolo(drop_df, class_map, csv_path.parent)
+        logging.info(f"  Wrote labels for {csv_path.parent.parent.name} → {csv_path.parent}")
 
     return class_map
 
@@ -277,22 +280,15 @@ def main():
         "--data-dir", required=True, type=Path, help="Root data_quality directory"
     )
     parser.add_argument(
-        "--output-dir",
+        "--class-map",
         required=True,
         type=Path,
-        help="Output directory for YOLO labels",
-    )
-    parser.add_argument(
-        "--spot-check-dir",
-        required=True,
-        type=Path,
-        help="Output directory for spot-check images",
+        help="Path to write/update the class_map.json",
     )
 
     args = parser.parse_args()
 
-    class_map_path = args.output_dir / "class_map.json"
-    biigle_to_yolo(args.data_dir, args.output_dir, class_map_path, args.spot_check_dir)
+    biigle_to_yolo(args.data_dir, args.class_map)
 
 
 if __name__ == "__main__":

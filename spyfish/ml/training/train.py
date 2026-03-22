@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from spyfish.config.wrapper import config
 from spyfish.utils import validate_model_path
 
@@ -64,6 +66,49 @@ def _clear_yolo_cache(training_dir: Path) -> None:
             logging.debug(f"Removed cache: {cache_file}")
         except OSError:
             pass
+
+
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
+
+
+def validate_dataset(data_yaml: str) -> None:
+    """
+    Check that the train and val splits in a YOLO data.yaml are non-empty before training.
+
+    Raises:
+        FileNotFoundError: If the data.yaml file doesn't exist.
+        ValueError: If train or val split directories are missing or contain no images.
+    """
+    yaml_path = Path(data_yaml)
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"data.yaml not found: {yaml_path}")
+
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f)
+
+    issues = []
+    for split in ("train", "val"):
+        split_dir = data.get(split)
+        if not split_dir:
+            issues.append(f"  '{split}' key missing from {yaml_path.name}")
+            continue
+        split_path = Path(split_dir)
+        if not split_path.exists():
+            issues.append(f"  '{split}' directory does not exist: {split_path}")
+            continue
+        n_images = sum(
+            1 for p in split_path.rglob("*") if p.suffix.lower() in _IMAGE_EXTENSIONS
+        )
+        if n_images == 0:
+            issues.append(f"  '{split}' has 0 images in {split_path}")
+        else:
+            logging.info(f"  {split}: {n_images} images found in {split_path}")
+
+    if issues:
+        raise ValueError(
+            f"Dataset validation failed for {yaml_path}:\n" + "\n".join(issues) + "\n"
+            "Ensure prepare_training_data and split_data completed successfully before training."
+        )
 
 
 def train_model(
@@ -163,6 +208,8 @@ def run_training_pipeline(
 
     # Binary model
     if train_binary and binary_data_yaml:
+        logging.info(f"Validating binary dataset: {binary_data_yaml}")
+        validate_dataset(binary_data_yaml)
         _clear_yolo_cache(local_training_dir)
         best_pt = train_model(
             data_yaml=binary_data_yaml,
@@ -177,6 +224,8 @@ def run_training_pipeline(
 
     # Species model
     if train_species and species_data_yaml:
+        logging.info(f"Validating species dataset: {species_data_yaml}")
+        validate_dataset(species_data_yaml)
         _clear_yolo_cache(local_training_dir)
         best_pt = train_model(
             data_yaml=species_data_yaml,

@@ -54,21 +54,21 @@ class DataValidator:
     ):
         """Main function to run data validation."""
         logging.info("Error validation started")
-        config = ValidationConfig(
+        validation_config = ValidationConfig(
             file_presence=file_presence,
             remove_duplicates=remove_duplicates,
             extract_clean_dataframes=extract_clean_dataframes,
             known_files=known_files,
         )
 
-        result_df = self.validate_with_config(config)
+        result_df = self.validate_with_config(validation_config)
         logging.info(f"Error validation completed, {result_df.shape[0]} errors found")
 
-        if config.extract_clean_dataframes:
+        if validation_config.extract_clean_dataframes:
             summary = self.get_clean_summary()
             logging.info(f"Data info: {summary}")
 
-        if config.file_presence:
+        if validation_config.file_presence:
             self.export_file_differences()
 
         logging.info("Error validation process completed.")
@@ -194,27 +194,6 @@ class DataValidator:
         self.errors_df = self.errors_df.drop_duplicates(
             subset=key_cols, ignore_index=True
         )
-
-    def export_to_csv(self, drop_id: Optional[str] = None):
-        """
-        Export validation errors to a CSV file or S3 bucket.
-        If a drop_id is given, it's saved into that drop's log folder.
-        """
-        # TODO check when this is used and if necessary
-
-        if drop_id:
-            # Save to per-drop log folder
-            path = config.data_quality_dir / drop_id / "logs" / "validation_errors.csv"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self.errors_df.to_csv(path, index=False)
-            logging.info(f"Errors for {drop_id} exported to {path}")
-            return
-        else:
-            # Fallback/Centralized (deprecated - we should ideally move towards per-drop or per-survey)
-            path = config.data_quality_dir / "validation_errors_summary.csv"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self.errors_df.to_csv(path, index=False)
-            logging.info(f"Errors exported centrally to {path}")
 
     def get_file_differences(
         self,
