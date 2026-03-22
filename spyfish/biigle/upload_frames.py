@@ -11,7 +11,6 @@ Ported and structured from:
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -20,14 +19,6 @@ import pandas as pd
 from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
-
-
-def _get_survey_id(drop_id: str) -> str:
-    """Derive survey ID from drop_id (e.g. 'KSF_20240124_BUV' from 'KSF_20240124_BUV_RIK_001_01').
-    Uses regex for robustness; falls back to first 16 chars if pattern doesn't match.
-    """
-    match = re.match(r"^([A-Z]{3}_\d{8}_BUV)", drop_id)
-    return match.group(1) if match else drop_id[:16]
 
 
 # ── Step 1: S3 upload ────────────────────────────────────────────────────────
@@ -256,7 +247,7 @@ def upload_frames_to_biigle(
     logging.info(f"Starting Biigle upload for drop {drop_id}")
 
     # Build S3 prefix: {base_prefix}/{survey_id}/{drop_id}/
-    survey_id = _get_survey_id(drop_id)
+    survey_id = config.get_survey_id_from_drop(drop_id)
     s3_prefix = f"{config.biigle_s3_images_prefix}/{survey_id}/{drop_id}/"
 
     # Verify COCO JSON exists before committing any uploads — a missing file means

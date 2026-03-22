@@ -21,11 +21,28 @@ from typing import Optional
 
 import cv2
 import pandas as pd
+import piexif
 
 from spyfish.config.wrapper import config
 from spyfish.utils import generate_frame_filename
 
 # ── ffmpeg frame extraction ──────────────────────────────────────────────────
+
+
+_ROTATION_MAP = {
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
+
+
+def _read_video_rotation(cap: cv2.VideoCapture) -> int:
+    """Read rotation degrees from video container metadata (0, 90, 180, or 270)."""
+    try:
+        degrees = int(cap.get(cv2.CAP_PROP_ORIENTATION_META)) % 360
+        return degrees if degrees in _ROTATION_MAP else 0
+    except Exception:
+        return 0
 
 
 def extract_frame(
@@ -38,6 +55,10 @@ def extract_frame(
     Extract a single JPEG frame from a video at the given seek position using OpenCV.
     Using cv2 (instead of ffmpeg) ensures 100% parity with the YOLO inference stream.
 
+    Rotation metadata from the video container is read and applied to the pixel data,
+    then EXIF Orientation = 1 is embedded so downstream tools (e.g. Biigle) do not
+    attempt a second rotation.
+
     Args:
         video_path: Path to the source video.
         seek_seconds: Absolute seek position in the video (fallback if frame_index is missing).
@@ -49,6 +70,10 @@ def extract_frame(
         logging.error(f"Could not open video with cv2: {video_path}")
         return False
 
+    rotation = _read_video_rotation(cap)
+    if rotation:
+        logging.debug(f"Video rotation metadata: {rotation}° — will apply to frames.")
+
     if frame_index is not None:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
     else:
@@ -56,7 +81,16 @@ def extract_frame(
 
     ret, frame = cap.read()
     if ret:
+        if rotation:
+            frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
         cv2.imwrite(str(out_path), frame)
+        # Embed EXIF Orientation = 1: rotation is already baked into the pixels,
+        # so no viewer should attempt to rotate again.
+        try:
+            exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Orientation: 1}})
+            piexif.insert(exif_bytes, str(out_path))
+        except Exception as e:
+            logging.debug(f"Could not embed EXIF orientation for {out_path}: {e}")
     else:
         logging.error(
             f"cv2 failed to read frame at {'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}"
@@ -153,7 +187,8 @@ def build_coco_from_raw_csv(
                     "area": round(bbox[2] * bbox[3], 2),
                     "iscrowd": 0,
                     "score": round(float(row.get("confidence", 0.0)), 4),
-                    # TODO check if it works with this
+                    # TODO: verify Biigle accepts the non-standard `score` field in COCO JSON
+                    # (COCO spec doesn't require it, but Biigle may use it for display)
                 }
             )
 
@@ -175,7 +210,6 @@ def extract_frames_from_selections(
     selections_csv_path: str,
     video_path: str,
     raw_csv_path: str,
-    output_dir: str,
 ) -> pd.DataFrame:
     """
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
@@ -188,11 +222,13 @@ def extract_frames_from_selections(
     this extracts a clean frame with annotations stored separately as COCO JSON —
     suitable for upload.
 
+    Frames are written to the canonical frames/ directory for the drop and shared
+    across Zooniverse and Biigle upload steps. Already-extracted frames are skipped.
+
     Args:
         selections_csv_path: CSV from select_clips.select_zooniverse_clips().
         video_path: Full path to the source video file.
         raw_csv_path: Raw YOLO CSV ({drop_id}_{model}_raw.csv), for COCO annotations.
-        output_dir: Directory to write JPEG frames and _coco_annotations_for_biigle.json.
 
     Returns:
         selections_df with 'FramePath' column added.
@@ -208,10 +244,10 @@ def extract_frames_from_selections(
         df["FramePath"] = pd.Series(dtype=str)
         return df
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     drop_id = df[config.drop_id_column].iloc[0]
+
+    out_dir = config.get_frames_dir(drop_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     raw_df = (
         pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
@@ -232,8 +268,9 @@ def extract_frames_from_selections(
     frame_paths = []
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # Absolute video timestamp in seconds (from start of video file).
-        seek_seconds = float(row[config.csv_clip_max_time_column])
+        # TimeOfMaxnMs is relative to SamplingStart — add it to get the absolute video position.
+        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
+        seek_seconds = sampling_start + float(row[config.csv_clip_max_time_column])
         frame_index = None
 
         if not raw_df.empty:
@@ -247,6 +284,11 @@ def extract_frames_from_selections(
 
         out_filename = generate_frame_filename(drop_id, seek_seconds)
         out_path = out_dir / out_filename
+
+        if out_path.exists():
+            logging.debug(f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}")
+            frame_paths.append(str(out_path))
+            continue
 
         logging.info(
             f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
@@ -296,6 +338,6 @@ def extract_frames_from_selections(
 
     successful = df["FramePath"].notna().sum()
     logging.info(
-        f"Extracted {successful}/{len(df)} frames for {drop_id} → {output_dir}"
+        f"Extracted {successful}/{len(df)} frames for {drop_id} → {out_dir}"
     )
     return df

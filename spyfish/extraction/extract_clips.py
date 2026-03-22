@@ -20,19 +20,16 @@ from spyfish.utils import generate_clip_filename
 def extract_clips_from_selections(
     selections_csv_path: str,
     video_path: str,
-    output_dir: str,
 ) -> pd.DataFrame:
     """
     Cuts one mp4 clip per row in the selections CSV using ffmpeg.
 
-    DropID is read from the selections CSV itself.
-    A 'ClipPath' column is added to the returned DataFrame so the caller
-    has a single self-contained record of each clip and its metadata.
+    DropID is read from the selections CSV itself. Clips are written to the
+    canonical clips/ directory for the drop. Already-extracted clips are skipped.
 
     Args:
         selections_csv_path: CSV produced by select_clips.select_zooniverse_clips().
         video_path: Full path to the source video file.
-        output_dir: Directory to write clip mp4 files into.
 
     Returns:
         selections_df with a 'ClipPath' column added (None where ffmpeg failed).
@@ -49,9 +46,10 @@ def extract_clips_from_selections(
         df["ClipPath"] = pd.Series(dtype=str)
         return df
 
-    os.makedirs(output_dir, exist_ok=True)
-
     drop_id = df[config.drop_id_column].iloc[0]
+
+    output_dir = str(config.get_clips_dir(drop_id))
+    os.makedirs(output_dir, exist_ok=True)
 
     clip_paths: List[Optional[str]] = []
     for idx, row in df.iterrows():
@@ -60,16 +58,17 @@ def extract_clips_from_selections(
             clip_paths.append(None)
             continue
 
-        clip_start = float(row[config.csv_clip_start_column])
+        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
+        clip_start_relative = float(row[config.csv_clip_start_column])
         # Use config-defined clip length as fallback
-        clip_end = (
+        clip_end_relative = (
             float(row[config.csv_clip_end_column])
             if config.csv_clip_end_column in row
-            else clip_start + config.clip_length
+            else clip_start_relative + config.clip_length
         )
 
-        clip_duration = clip_end - clip_start
-        seek_seconds = clip_start
+        clip_duration = clip_end_relative - clip_start_relative
+        seek_seconds = sampling_start + clip_start_relative
 
         out_filename = generate_clip_filename(drop_id, clip_duration, seek_seconds)
         out_path = Path(output_dir) / out_filename
@@ -126,6 +125,5 @@ if __name__ == "__main__":
     logging.info(f"Running clip extraction for Drop ID: {drop_id}")
     selections_csv = str(config.get_selections_csv_path(drop_id))
     video_path = str(config.get_video_path(drop_id))
-    output_dir = str(config.get_clips_dir(drop_id))
 
-    extract_clips_from_selections(selections_csv, video_path, output_dir)
+    extract_clips_from_selections(selections_csv, video_path)

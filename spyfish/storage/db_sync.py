@@ -154,10 +154,10 @@ def sync_annotations() -> bool:
     # Include metadata and annotations
     filters += ["--include", "*/annotations/*.csv"]
     filters += ["--include", "*/annotations/*.json"]
-    filters += ["--include", "*/zooniverse_clips/*.csv"]
+    filters += ["--include", "*/clips/*.csv"]
 
     # Include images (standardize on .jpg/.jpeg/.png)
-    image_patterns = ["*/qa_frames/*", "*/biigle_cache/*", "*/zooniverse_images/*"]
+    image_patterns = ["*/qa_frames/*", "*/biigle_cache/*", "*/frames/*"]
     for pattern in image_patterns:
         filters += ["--include", f"{pattern}.jpg"]
         filters += ["--include", f"{pattern}.jpeg"]
