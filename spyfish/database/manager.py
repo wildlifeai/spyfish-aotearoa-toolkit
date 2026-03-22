@@ -54,21 +54,6 @@ class DatabaseManager:
 
             cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS ml_jobs (
-                    job_id TEXT PRIMARY KEY,
-                    slurm_id TEXT,
-                    status TEXT NOT NULL,
-                    job_type TEXT NOT NULL,
-                    drop_ids TEXT NOT NULL,
-                    stdout_path TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    finished_at TIMESTAMP
-                )
-            """
-            )
-
-            cursor.execute(
-                """
                 CREATE TABLE IF NOT EXISTS validation_errors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     SurveyID TEXT,
@@ -160,9 +145,9 @@ class DatabaseManager:
                 "UPDATE deployments SET status = ? WHERE drop_id = ?",
                 (new_status, drop_id),
             )
-            # TODO sus check what's happening here
-
             # If we're moving away from ERROR, clear the PIPELINE_ERROR entries for this drop
+            # TODO: confirm this is wanted — clearing errors on status transition means
+            # re-running a drop that previously errored will always start with a clean slate.
             if current_status == "ERROR" and new_status != "ERROR":
                 cursor.execute(
                     "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
@@ -200,6 +185,27 @@ class DatabaseManager:
                 )
 
         self.update_status(drop_id, to_status)
+
+    def update_deployment_fields(self, drop_id: str, **fields) -> bool:
+        """Update arbitrary columns on a deployment record. Returns False if drop_id not found."""
+        allowed = {
+            "status", "sampling_start", "sampling_end", "video_path",
+            "is_bad_deployment", "error_message", "biigle_volume_id",
+        }
+        invalid = set(fields) - allowed
+        if invalid:
+            raise ValueError(f"Unknown fields: {invalid}. Allowed: {allowed}")
+        if not fields:
+            return True
+        set_clause = ", ".join(f"{col} = ?" for col in fields)
+        values = list(fields.values()) + [drop_id]
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE deployments SET {set_clause} WHERE drop_id = ?", values
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def update_biigle_volume_id(self, drop_id: str, volume_id: str):
         """Sets the biigle_volume_id for a specific deployment."""

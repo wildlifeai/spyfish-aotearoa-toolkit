@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
@@ -96,17 +95,6 @@ def convert_int_num_columns_to_int(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def write_data_to_file(data_str: str, output_path: str) -> None:
-    """Write data to a text file."""
-    try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(data_str)
-        logging.info(f"Wrote data to {output_path}")
-    except (IOError, OSError) as e:
-        logging.error(f"Failed to write file paths to {output_path}: {e}")
-        raise
-
-
 def time_to_seconds(time_str: str) -> float:
     """Converts a time string (HH:MM:SS or HH:MM:SS.mmm) to seconds."""
     if pd.isna(time_str):
@@ -195,7 +183,8 @@ def validate_model_path(model_path: str | Path) -> Path:
     Validates that a model path is a .pt file located within trusted local directories.
     Prevents path traversal and loading of arbitrary files.
     """
-    # TODO is this necessary
+    # TODO: review whether this guard is still needed once we standardise on a single models/ root.
+    # Currently prevents path traversal and loading of arbitrary files from untrusted sources.
     path = Path(model_path).resolve()
 
     # 1. Check extension
@@ -253,18 +242,3 @@ def validate_model_path(model_path: str | Path) -> Path:
     return path
 
 
-def get_survey_id_from_drop(drop_id: str) -> str:
-    """Derive SurveyID from DropID using the config format regex."""
-    raw = config.get_validation_pattern("survey_id")
-    pattern = raw.lstrip("^").rstrip("$")
-    if not pattern.startswith("("):
-        pattern = f"({pattern})"
-
-    match = re.search(pattern, drop_id)
-    if not match:
-        logging.warning(
-            f"Could not extract SurveyID from DropID '{drop_id}'. Grouping under 'UNKNOWN_SURVEY'."
-        )
-        return "UNKNOWN_SURVEY"
-
-    return match.group(1)

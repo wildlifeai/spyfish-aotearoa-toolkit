@@ -1,5 +1,3 @@
-from typing import Optional
-
 """
 Post-ML annotation processing: MaxN extraction and optional frame drawing for QA review.
 This module is the single entry point called by the pipeline runner after YOLO inference.
@@ -7,6 +5,7 @@ This module is the single entry point called by the pipeline runner after YOLO i
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -162,7 +161,6 @@ def _run_qa_visualizations(
     maxn_df: pd.DataFrame,
     drop_id: str,
     video_dir: Path,
-    output_root: Path,
     base_conf: float,
     maxn_conf: float,
     interval: float,
@@ -174,7 +172,7 @@ def _run_qa_visualizations(
         raw_df=raw_df,
         maxn_df=maxn_df,
         drop_id=drop_id,
-        output_dir=output_root / drop_id,
+        output_dir=config.get_drop_dir(drop_id),
         base_conf=base_conf,
         maxn_conf=maxn_conf,
         interval_seconds=interval,  # type: ignore
@@ -201,7 +199,7 @@ def _run_qa_visualizations(
         logging.warning(f"Video not found at {video_path}, skipping QA frame drawing")
         return
 
-    frames_dir = str(output_root / drop_id / "qa_frames")
+    frames_dir = str(config.get_drop_dir(drop_id) / "qa_frames")
     draw_boxes_on_video_frames(
         video_path=video_path,
         raw_csv_path=raw_csv_path,
@@ -214,9 +212,7 @@ def _run_qa_visualizations(
 
 def run_post_ml(
     drop_ids: list,
-    annotations_dir: str,
     video_dir: str,
-    output_root: str,
     draw_images: bool = True,
 ):
     """
@@ -226,9 +222,7 @@ def run_post_ml(
 
     Args:
         drop_ids: List of DropIDs that were successfully processed by YOLO.
-        annotations_dir: Directory containing the raw YOLO CSVs.
         video_dir: Directory containing the source video files.
-        output_root: Root directory for data quality outputs.
         draw_images: Whether to draw QA review frames (default: True).
     """
     model_name = Path(config.pipeline_model_path).stem
@@ -297,7 +291,6 @@ def run_post_ml(
                     maxn_df=maxn_df,
                     drop_id=drop_id,
                     video_dir=Path(video_dir),
-                    output_root=Path(output_root),
                     base_conf=base_conf,
                     maxn_conf=maxn_conf,
                     interval=interval,

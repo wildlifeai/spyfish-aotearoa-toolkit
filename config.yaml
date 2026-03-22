@@ -75,7 +75,7 @@ paths:
 ml_inference:
   limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
-  frame_skip: 15   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
+  frame_skip: 10   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
   imgsz: 640  #1920
   confidence_threshold: 0.25      # Base YOLO inference threshold
   maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
@@ -118,7 +118,7 @@ ffmpeg:
 
 
 biigle:
-  project_id: 3711         #  4081 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  project_id:  4081        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
   disk_id: 134             #  134 doc, 98 kalindi, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report

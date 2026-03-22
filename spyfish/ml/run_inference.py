@@ -147,54 +147,25 @@ def run_yolo_inference(
         raise
 
 
-def main(args=None):
-    import argparse
+def main(args):
+    """Entry point called by the orchestrator (ml_runner.py) with an args dict."""
+    drop_id = args.get("drop_id")
+    video_url = args.get("video_url")
+    sampling_start = args.get("sampling_start")
+    sampling_end = args.get("sampling_end")
 
-    parser = argparse.ArgumentParser(description="Run YOLO inference on a video.")
-    parser.add_hide = True  # Internal flag for orchestrator
+    if sampling_start is None or sampling_end is None:
+        raise ValueError(
+            f"Missing mandatory sampling metadata for {drop_id}. Both start and end times must be provided."
+        )
 
-    # If running standalone via CLI, parse args.
-    # If called from orchestrator, args will be passed as a dict or object.
-    if args is None:
-        import argparse
-
-        parser = argparse.ArgumentParser(description="Run YOLO inference on a video.")
-        parser.add_argument("drop_id", type=str, help="The Drop ID to process.")
-        cli_args = parser.parse_args()
-
-        # Standalone manual run
-        logging.info(f"Running in standalone manual mode for drop {cli_args.drop_id}.")
-        drop_id = cli_args.drop_id
-
-        # We don't need sampling_start/end for a full manual inference test right now
-        # the user can provide it via arguments if needed in the future
-        video_url = str(config.get_video_path(drop_id))
-        # TODO make required if worried about dialing
-        model_path = config.pipeline_model_path
-        vid_stride = int(config.frame_skip)
-        imgsz = int(config.imgsz)
-        conf = float(config.confidence_threshold)
-        model_name = Path(model_path).stem
-        output_csv = str(config.get_raw_csv_path(drop_id, model_name))
-    else:
-        # Called from Orchestrator (ml_runner.py)
-        drop_id = args.get("drop_id")
-        video_url = args.get("video_url")
-        sampling_start = args.get("sampling_start")
-        sampling_end = args.get("sampling_end")
-
-        if sampling_start is None or sampling_end is None:
-            raise ValueError(
-                f"Missing mandatory sampling metadata for {drop_id}. Both start and end times must be provided."
-            )
-
-        sampling_start = float(sampling_start)
-        sampling_end = float(sampling_end)
-        model_path = args.get("model_path")
-        vid_stride = int(args.get("frame_skip", config.frame_skip))
-        imgsz = int(args.get("imgsz", config.imgsz))
-        conf = float(args.get("confidence_threshold", config.confidence_threshold))
-        output_csv = args.get("output_csv")
+    sampling_start = float(sampling_start)
+    sampling_end = float(sampling_end)
+    model_path = args.get("model_path")
+    vid_stride = int(args.get("frame_skip", config.frame_skip))
+    imgsz = int(args.get("imgsz", config.imgsz))
+    conf = float(args.get("confidence_threshold", config.confidence_threshold))
+    output_csv = args.get("output_csv")
 
     logging.info(f"Starting YOLO inference on {drop_id}")
     logging.info(f"Video Source: {video_url}")
@@ -219,5 +190,3 @@ def main(args=None):
     )
 
 
-if __name__ == "__main__":
-    main()

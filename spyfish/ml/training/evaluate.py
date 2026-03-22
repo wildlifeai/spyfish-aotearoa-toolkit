@@ -187,8 +187,6 @@ def run_evaluation_pipeline(
         model_path, data_yaml, split=split, imgsz=imgsz, output_dir=local_results_dir
     )
 
-    # TODO check whats up
-
     # Compare with production model
     try:
         production_model_path = str(config.pipeline_model_path)
@@ -229,14 +227,6 @@ def main():
         "--model-type", type=str, default="binary", choices=["binary", "species"]
     )
     parser.add_argument("--split", type=str, default="test", choices=["test", "val"])
-    parser.add_argument(
-        "--promote",
-        action="store_true",
-        help="Auto-promote if improvement threshold met",
-    )
-    parser.add_argument(
-        "--no-upload", action="store_true", help="Skip S3 upload of results"
-    )
     args = parser.parse_args()
 
     run_evaluation_pipeline(

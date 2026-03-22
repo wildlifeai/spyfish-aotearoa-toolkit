@@ -193,7 +193,10 @@ def _sync_deployments_to_db(
 
         # Determine initial status
         if expert_anns > 0:
-            # TODO Legacy annotations, check if doing this first might ever be an issue
+            # Legacy data: deployments that already have expert annotations (pre-pipeline)
+            # are set to PIPELINE_COMPLETE immediately, skipping ML and citsci stages.
+            # TODO: verify this doesn't interfere with drops that have expert annotations
+            # but still need ML inference (e.g. re-annotated surveys).
             status = PipelineStatus.PIPELINE_COMPLETE
         elif is_bad_deployment:
             status = PipelineStatus.EXCLUDED

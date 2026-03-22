@@ -204,7 +204,7 @@ if __name__ == "__main__":
     maxn_conf = float(config.maxn_confidence_threshold)
     interval_seconds = config.interval_seconds
 
-    output_dir = config.data_quality_dir / drop_id
+    output_dir = config.get_drop_dir(drop_id)
 
     raw_df = pd.read_csv(config.get_raw_csv_path(drop_id, model_name))  # type: ignore
     maxn_df = pd.read_csv(config.get_maxn_csv_path(drop_id, model_name))  # type: ignore

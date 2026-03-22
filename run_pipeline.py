@@ -68,9 +68,6 @@ def _get_common_paths(drop_id: str) -> dict:
         "selections_csv": str(config.get_selections_csv_path(drop_id)),
         "raw_csv": str(config.get_raw_csv_path(drop_id, model_name)),
         "video_path": str(config.get_video_path(drop_id)),
-        "zooniverse_clips": str(config.get_clips_dir(drop_id, target="zooniverse")),
-        "zooniverse_frames": str(config.get_frames_dir(drop_id, target="zooniverse")),
-        "biigle_frames": str(config.get_frames_dir(drop_id, target="biigle")),
     }
 
 
@@ -115,9 +112,7 @@ def _run_steps2_and_3_ml() -> None:
     if results:
         run_post_ml(
             drop_ids=results,
-            annotations_dir=str(config.data_quality_dir),
             video_dir=str(config.media_dir),
-            output_root=str(config.data_quality_dir),
         )
 
 
@@ -176,7 +171,6 @@ def _step4_process_drop(drop_id: str) -> str:
     clips_df = extract_clips_from_selections(
         selections_csv_path=paths["selections_csv"],
         video_path=paths["video_path"],
-        output_dir=paths["zooniverse_clips"],
     )
     clips_df = check_clip_sizes(clips_df)
     logging.info(f"Uploading {len(clips_df)} clips for {drop_id} to Zooniverse.")
@@ -198,7 +192,6 @@ def _step5_process_drop(drop_id: str) -> str:
         selections_csv_path=paths["selections_csv"],
         video_path=paths["video_path"],
         raw_csv_path=paths["raw_csv"],
-        output_dir=paths["zooniverse_frames"],
     )
     logging.info(f"Uploading {len(frames_df)} frames for {drop_id} to Zooniverse.")
     upload_frames_to_zooniverse(frames_df)
@@ -241,7 +234,6 @@ def _step6_process_drop(drop_id: str) -> str:
         selections_csv_path=paths["selections_csv"],
         video_path=paths["video_path"],
         raw_csv_path=paths["raw_csv"],
-        output_dir=paths["biigle_frames"],
     )
     volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
     logging.info(f"Biigle volume created for {drop_id}: id={volume_info.get('id')}")
@@ -339,14 +331,15 @@ def main() -> None:
     runner = StageRunner(STAGES, db)
 
     parser = runner.build_parser()
-    parser.add_argument("--step0", action="store_true", help="Run Step 0: test run")
     parser.add_argument(
         "--no-upload",
         action="store_true",
         help="Skip all S3 uploads (DB, models, results)",
     )
     parser.add_argument(
-        "--test-run", action="store_true", help="Run in test mode with mock data"
+        "--ping",
+        action="store_true",
+        help="Connectivity check: print config summary and exit without running the pipeline",
     )
     args = parser.parse_args()
 
@@ -355,9 +348,11 @@ def main() -> None:
     logging.info(f" NO-UPLOAD: {args.no_upload} ".center(60, "═"))
     logging.info("═" * 60)
 
-    if args.step0:
-        log_header("STEP 0: TEST RUN")
-        logging.info(f"bucket name: {config.s3_bucket}")
+    if args.ping:
+        log_header("PING: CONFIG CHECK")
+        logging.info(f"S3 bucket: {config.s3_bucket}")
+        logging.info(f"Base dir:  {config.base_dir}")
+        logging.info(f"Test run:  {config.is_test_run}")
         return
 
     # Bind no_upload to set-targets (only stage whose behaviour depends on it)
