@@ -18,8 +18,6 @@ def manual_extract():
     video_path = str(config.get_video_path(drop_id))
     raw_csv = str(config.get_raw_csv_path(drop_id, model_name))
 
-    # Output folders within the project root
-    clean_dir = config.project_root / "process_files/test_extraction_debug/clean"
     qa_dir = config.project_root / "process_files/test_extraction_debug/qa_with_boxes"
 
     logging.info("-" * 40)
@@ -36,13 +34,12 @@ def manual_extract():
         logging.error(f"Raw CSV missing: {raw_csv}")
         return
 
-    # 1. Extract clean frames (for Biigle)
+    # 1. Extract clean frames → written to canonical frames/ dir for the drop
     logging.info("\n[1/2] Extracting clean frames...")
     extract_frames_from_selections(
         selections_csv_path=selections_csv,
         video_path=video_path,
         raw_csv_path=raw_csv,
-        output_dir=clean_dir,
     )
 
     # 2. Extract QA frames (with boxes)
@@ -67,7 +64,7 @@ def manual_extract():
     )
 
     logging.info("\nDone!")
-    logging.info(f"Clean frames (for Biigle): {clean_dir}")
+    logging.info(f"Clean frames: {config.get_frames_dir(drop_id)}")
     logging.info(f"QA frames (with boxes): {qa_dir}")
 
 

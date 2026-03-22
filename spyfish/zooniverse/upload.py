@@ -84,7 +84,7 @@ def upload_clips_to_zooniverse(
     Panoptes.connect(username=config.user, password=config.password)
     zoo_project = Project.find(config.zooniverse_project_id)
 
-    set_name = subject_set_name or f"spyfish_{drop_id}_{n}clips"
+    set_name = subject_set_name or f"clips_{drop_id}"
 
     # Check if subject set already exists to avoid "Display name has already been taken"
     existing_sets = list(
@@ -126,7 +126,7 @@ def upload_clips_to_zooniverse(
 
         subject = Subject()
         subject.links.project = zoo_project
-        subject.add_location({"video/mp4": str(clip_path)})
+        subject.add_location(str(clip_path), manual_mimetype="video/mp4")
         subject.metadata.update(meta)
         subject.save()
         new_subjects.append(subject)
@@ -174,7 +174,7 @@ def upload_frames_to_zooniverse(
     Panoptes.connect(username=config.user, password=config.password)
     zoo_project = Project.find(config.zooniverse_project_id)
 
-    set_name = subject_set_name or f"spyfish_{drop_id}_{n}images"
+    set_name = subject_set_name or f"frames_{drop_id}"
 
     # Check if subject set already exists
     existing_sets = list(
@@ -211,14 +211,11 @@ def upload_frames_to_zooniverse(
 
         subject = Subject()
         subject.links.project = zoo_project
-        subject.add_location({"image/jpeg": str(frame_path)})
+        subject.add_location(str(frame_path), manual_mimetype="image/jpeg")
         subject.metadata.update(meta)
         subject.save()
         new_subjects.append(subject)
         logging.info(f"  Saved: {frame_path.name} ({row.get('SelectionReason', '')})")
-    logging.info(
-        f"!!!!! !!!! !!!This is what the rows have {uploadable.columns} check if metadata is good {meta}"
-    )
     subject_set.add(new_subjects)
     logging.info(
         f"Uploaded {len(new_subjects)}/{n} frames to subject set '{set_name}'."

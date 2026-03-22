@@ -432,7 +432,7 @@ class PathsConfig(BaseConfig):
         return self.get_drop_dir(drop_id) / self._sub("biigle_cache")
 
     def get_drop_annotations_dir(self, drop_id: str) -> Path:
-        return self.data_quality_dir / self.validate_drop_id(drop_id) / "annotations"
+        return self.get_drop_dir(drop_id) / "annotations"
 
     def get_video_path(self, drop_id: str) -> Path:
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
@@ -457,11 +457,11 @@ class PathsConfig(BaseConfig):
 
     def get_clips_dir(self, drop_id: str, target: str = "") -> Path:
         sub_path = f"{target}_clips" if target else "clips"
-        return self.data_quality_dir / self.validate_drop_id(drop_id) / sub_path
+        return self.get_drop_dir(drop_id) / sub_path
 
     def get_frames_dir(self, drop_id: str, target: str = "") -> Path:
         sub_path = f"{target}_frames" if target else "frames"
-        return self.data_quality_dir / self.validate_drop_id(drop_id) / sub_path
+        return self.get_drop_dir(drop_id) / sub_path
 
     # ── Training ────────────────────────────────────────────────────────────
 

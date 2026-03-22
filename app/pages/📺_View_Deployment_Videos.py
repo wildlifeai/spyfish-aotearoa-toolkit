@@ -1,7 +1,6 @@
-import os
-import subprocess
-import tempfile
+import io
 
+import av
 import streamlit as st
 from utils import check_password
 
@@ -21,27 +20,24 @@ def get_presigned_url(key: str, expires_in: int = 3600) -> str | None:
 
 
 def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
-    duration = end_s - start_s
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(start_s),
-            "-i", video_url,
-            "-t", str(duration),
-            "-c:v", "copy",   # stream copy — no re-encode, near-instant
-            "-an",
-            tmp_path,
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.decode())
-        with open(tmp_path, "rb") as f:
-            return f.read()
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    buf = io.BytesIO()
+    with av.open(video_url) as in_container:
+        video_stream = in_container.streams.video[0]
+        # Seek to near start_s using HTTP range requests — doesn't download the whole file
+        in_container.seek(int(start_s * 1_000_000))
+        with av.open(buf, "w", format="mp4") as out_container:
+            out_stream = out_container.add_stream(template=video_stream)
+            for packet in in_container.demux(video_stream):
+                if packet.pts is None:
+                    continue
+                pts_s = float(packet.pts * video_stream.time_base)
+                if pts_s < start_s:
+                    continue
+                if pts_s > end_s:
+                    break
+                packet.stream = out_stream
+                out_container.mux(packet)
+    return buf.getvalue()
 
 
 # --- MAIN APP ---
