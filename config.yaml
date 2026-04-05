@@ -91,9 +91,10 @@ zooniverse_extraction:
   # TODO: what are these 2 things about
   health_check_count: 6 # Number of health checks to perform
   video_start_threshold_seconds: 120 # Number of seconds to sample from the start of the video to do the start of the video health check
-  clip_cap: 50 # Maximum number of clips to extract per video
+  clip_cap: 180 # Maximum number of clips to extract per video
+  size_limit_mb: 12.0 # Zooniverse upload limit — CRF is calibrated to stay under this
   force_binary_strategy: false # If true, use binary strategy regardless of species count
-  temporal_spacing_seconds: 0 # Minimum seconds between selected clips (0 to disable)
+  sample_all_clips: true # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
   binary_strategy:
     maxn_clips: 10
     confusing_clips: 20
@@ -194,7 +195,7 @@ validation_rules:
     values:
       - column: "Latitude"
         rule: "value_range"
-        range: [-46, -36]
+        range: [-48, -36]
         allowed_values: [0]
       - column: "Longitude"
         rule: "value_range"

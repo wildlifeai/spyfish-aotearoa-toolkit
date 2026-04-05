@@ -2,6 +2,7 @@ import logging
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from spyfish.config.wrapper import config
@@ -10,15 +11,42 @@ from spyfish.extraction.select_clips import ClipSelector, select_clips_with_stra
 from spyfish.utils import time_to_seconds
 
 
+def _select_all_clips(
+    drop_id: str,
+    sampling_start: float,
+    sampling_end: float,
+    clip_length: float,
+    clip_cap: int,
+) -> pd.DataFrame:
+    """Generate every non-overlapping clip across the full sampling window."""
+    starts = np.arange(sampling_start, sampling_end - clip_length + 1, clip_length)
+    if clip_cap and len(starts) > clip_cap:
+        # Evenly space the selected clips across the full window rather than front-loading
+        indices = np.linspace(0, len(starts) - 1, clip_cap, dtype=int)
+        starts = starts[indices]
+    rows = [
+        {
+            config.drop_id_column: drop_id,
+            config.csv_sampling_start_column: sampling_start,
+            config.csv_clip_start_column: float(s),
+            config.csv_clip_end_column: float(s) + clip_length,
+            config.csv_clip_max_time_column: float(s),
+            config.csv_scientific_name_column: "All",
+            "SelectionReason": "Full Video Sample",
+            config.csv_max_interval_column: 0,
+            config.csv_confidence_agreement_column: -1.0,  # sentinel: no ML data
+        }
+        for s in starts
+    ]
+    return pd.DataFrame(rows)
+
+
 def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, config):
     """
     Selects n-second intervals from the MaxN CSV to send to Zooniverse.
     Uses the generic selection strategy with Zooniverse-specific overrides.
     """
     logging.info(f"Selecting Zooniverse intervals for {drop_id}")
-
-    if not os.path.exists(maxn_csv_path):
-        raise FileNotFoundError(f"MaxN CSV not found: {maxn_csv_path}")
 
     db = DatabaseManager()
     with db.get_connection() as conn:
@@ -40,6 +68,20 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
 
     sampling_start = dep_row["sampling_start"]
     sampling_end = dep_row["sampling_end"]
+
+    # Full-video sampling — bypasses ML strategy and MaxN CSV entirely
+    if config.sample_all_clips:
+        logging.info(f"sample_all_clips=true: selecting every clip in sampling window for {drop_id}.")
+        selections_df = _select_all_clips(
+            drop_id, sampling_start, sampling_end, config.clip_length, config.clip_cap
+        )
+        Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
+        selections_df.to_csv(output_selections_path, index=False)
+        logging.info(f"Full video sample: {len(selections_df)} clips selected.")
+        return selections_df
+
+    if not os.path.exists(maxn_csv_path):
+        raise FileNotFoundError(f"MaxN CSV not found: {maxn_csv_path}")
 
     df = pd.read_csv(maxn_csv_path)
 

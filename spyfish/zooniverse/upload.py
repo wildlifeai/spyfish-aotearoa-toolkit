@@ -9,15 +9,60 @@ import pandas as pd
 from panoptes_client import Panoptes, Project, Subject, SubjectSet
 
 from spyfish.config.wrapper import config
+from spyfish.storage.s3_handler import S3Handler
 from spyfish.utils import seconds_to_time
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
+def _derive_drop_metadata(drop_id: str) -> dict:
+    """Derive survey_id, site_id, and video_filename from a DropID.
+
+    DropID format: {SurveyID}_{SiteID}_{Replicate:02}
+    e.g. TON_20231015_BUV_TON_003_01 → survey_id=TON_20231015_BUV, site_id=TON_003
+    """
+    parts = drop_id.split("_")
+    survey_id = "_".join(parts[:3])
+    site_id = "_".join(parts[3:5])
+    return {
+        "survey_id": survey_id,
+        "site_id": site_id,
+        "video_filename": f"media/{survey_id}/{drop_id}/{drop_id}.mp4",
+    }
+
+
+def _load_sites_df() -> pd.DataFrame | None:
+    """Load the BUV Survey Sites CSV from S3. Returns None on failure (reserve metadata skipped)."""
+    try:
+        storage = S3Handler(bucket=config.s3_bucket)
+        return storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
+    except Exception as e:
+        logging.warning(f"Could not load sites CSV from S3: {e} — reserve metadata will be omitted.")
+        return None
+
+
+def _get_site_reserve_meta(site_id: str, sites_df: pd.DataFrame) -> dict:
+    """Look up !LinkToMarineReserve and ProtectionStatus for a SiteID."""
+    match = sites_df[sites_df[config.site_id_column] == site_id]
+    if match.empty:
+        logging.warning(f"No site found for SiteID '{site_id}' in sites_df — reserve metadata omitted.")
+        return {}
+    row = match.iloc[0]
+    meta = {"!LinkToMarineReserve": row.get(config.link_to_marine_reserve_column, "")}
+    if "ProtectionStatus" in sites_df.columns:
+        meta["ProtectionStatus"] = row.get("ProtectionStatus", "")
+    return meta
+
+
 def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Checks clip file sizes from a selections_df with a ClipPath column.
-    Logs a warning for clips over 12 MB (Zooniverse practical limit).
+    Checks clip file sizes and warns if any exceed size_limit_mb.
+
+    CRF calibration is handled upstream in extract_clips_from_selections via _probe_crf,
+    so oversized clips here indicate an edge case (e.g. very complex scene, unusual codec).
+
+    # TODO: can likely be deleted — _probe_crf in extract_clips.py now handles calibration
+    # before extraction, making this check redundant for normal runs.
 
     Returns:
         clips_df with a SizeMB column added.
@@ -26,16 +71,14 @@ def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
     clips_df["SizeMB"] = clips_df["ClipPath"].apply(
         lambda p: Path(p).stat().st_size / (1 << 20) if p and Path(p).exists() else None
     )
-    over_limit = clips_df[clips_df["SizeMB"] >= 12]
+    over_limit = clips_df[clips_df["SizeMB"] >= config.size_limit_mb]
     if not over_limit.empty:
         logging.warning(
-            f"{len(over_limit)} clips exceed 12 MB and may be rejected by Zooniverse. "
-            f"Consider re-encoding with a higher CRF.{clips_df["SizeMB"]}"
+            f"{len(over_limit)} clips still exceed {config.size_limit_mb} MB after CRF calibration — "
+            "they may be rejected by Zooniverse."
         )
     else:
-        logging.info(
-            f"All {clips_df['SizeMB'].notna().sum()} clips are under 12 MB. Ready to upload."
-        )
+        logging.info(f"All {clips_df['SizeMB'].notna().sum()} clips are under {config.size_limit_mb} MB.")
     return clips_df
 
 
@@ -49,9 +92,14 @@ def upload_clips_to_zooniverse(
     Reads clip paths and metadata from selections_df (produced by extract_clips_from_selections).
     DropID and ClipPath are read from the DataFrame directly.
 
-    Metadata attached to each subject (hidden from volunteers, prefix '#'):
-        #DropID, #SelectionReason, #TargetSpecies, #MaxCount, #Confidence,
-        #StartTime, #EndTime, #SamplingStart
+    Metadata attached to each subject:
+        '#' prefix — hidden from volunteers, used for traceability and QA.
+        '!' prefix — visible to volunteers in Talk (discussion) only, not during classification.
+
+        #DropID, #VideoFilename, #siteName,
+        #SelectionReason, #TargetSpecies, #MaxInterval, #ConfidenceAgreement,
+        #StartTime, #EndTime, #SamplingStart,
+        !LinkToMarineReserve, ProtectionStatus (when BUV Sites CSV is reachable on S3)
 
     Args:
         selections_df: DataFrame with one row per clip, including 'ClipPath' and 'DropID' columns.
@@ -79,6 +127,13 @@ def upload_clips_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
+    drop_meta = _derive_drop_metadata(drop_id)
+    sites_df = _load_sites_df()
+    site_reserve_meta = (
+        _get_site_reserve_meta(drop_meta["site_id"], sites_df)
+        if sites_df is not None
+        else {}
+    )
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -107,14 +162,13 @@ def upload_clips_to_zooniverse(
             logging.warning(f"Clip file missing, skipping: {clip_path.name}")
             continue
 
-        # Derive human-readable times for volunteers from numeric columns
         start_sec = float(row[config.csv_clip_start_column])
         end_sec = float(row[config.csv_clip_end_column])
 
-        # Metadata hidden from volunteers (prefix '#')
-        # These help trace classifications back to source deployments and inform QA
         meta = {
             "#DropID": row.get(config.drop_id_column, drop_id),
+            "#VideoFilename": drop_meta["video_filename"],
+            "#siteName": drop_meta["site_id"],
             "#SelectionReason": row.get("SelectionReason", ""),
             "#TargetSpecies": row.get("TargetSpecies", ""),
             "#MaxInterval": row.get("MaxInterval", ""),
@@ -122,6 +176,7 @@ def upload_clips_to_zooniverse(
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
             "#SamplingStart": row[config.csv_sampling_start_column],
+            **site_reserve_meta,
         }
 
         subject = Subject()
@@ -145,6 +200,10 @@ def upload_frames_to_zooniverse(
 
     Reads frame paths and metadata from frames_df (produced by extract_frames_from_selections).
     DropID and FramePath are read from the DataFrame directly.
+
+    Args:
+        frames_df: DataFrame with one row per frame, including 'FramePath' and 'DropID' columns.
+        subject_set_name: Optional override for the Zooniverse subject set display name.
     """
 
     if not all(
@@ -169,6 +228,13 @@ def upload_frames_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
+    drop_meta = _derive_drop_metadata(drop_id)
+    sites_df = _load_sites_df()
+    site_reserve_meta = (
+        _get_site_reserve_meta(drop_meta["site_id"], sites_df)
+        if sites_df is not None
+        else {}
+    )
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -196,17 +262,19 @@ def upload_frames_to_zooniverse(
         if not frame_path.exists():
             logging.warning(f"Frame file missing, skipping: {frame_path.name}")
             continue
-        # Metadata strictly mirrors standardized selections outputs. Legacy selections are handled separately.
         time_of_max = float(row[config.csv_clip_max_time_column])
 
         meta = {
             "#DropID": row.get(config.drop_id_column, drop_id),
+            "#VideoFilename": drop_meta["video_filename"],
+            "#siteName": drop_meta["site_id"],
             "#SelectionReason": row.get("SelectionReason", ""),
             "#TargetSpecies": row.get("TargetSpecies", ""),
             "#MaxInterval": row.get("MaxInterval", ""),
             "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
             "#SamplingStart": row[config.csv_sampling_start_column],
+            **site_reserve_meta,
         }
 
         subject = Subject()
