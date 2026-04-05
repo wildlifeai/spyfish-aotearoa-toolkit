@@ -20,6 +20,9 @@ def _select_all_clips(
 ) -> pd.DataFrame:
     """Generate every non-overlapping clip across the full sampling window."""
     starts = np.arange(sampling_start, sampling_end - clip_length + 1, clip_length)
+    if len(starts) == 0:
+        logging.warning(f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id} — no clips generated.")
+        return pd.DataFrame()
     if clip_cap and len(starts) > clip_cap:
         # Evenly space the selected clips across the full window rather than front-loading
         indices = np.linspace(0, len(starts) - 1, clip_cap, dtype=int)

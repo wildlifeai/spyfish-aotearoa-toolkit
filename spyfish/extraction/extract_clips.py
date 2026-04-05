@@ -61,6 +61,9 @@ def _probe_crf(
     The winning clip stays on disk — the main loop's exists() check skips it.
     """
     _extract_clip(video_path, seek_seconds, duration, output_path, base_crf)
+    if not output_path.exists():
+        logging.error("CRF probe: initial extraction failed. Falling back to base CRF.")
+        return base_crf
     size_mb = output_path.stat().st_size / (1 << 20)
     logging.info(f"CRF probe: CRF {base_crf} → {size_mb:.1f} MB")
 
@@ -72,8 +75,8 @@ def _probe_crf(
     target_crf = min(math.ceil(base_crf + 6 * math.log2(size_mb / size_limit_mb)) + 1, 51)
     logging.info(f"CRF probe: {size_mb:.1f} MB over limit — recalculating to CRF {target_crf}")
 
-    try:
-        _extract_clip(video_path, seek_seconds, duration, output_path, target_crf)
+    _extract_clip(video_path, seek_seconds, duration, output_path, target_crf)
+    if output_path.exists():
         final_size_mb = output_path.stat().st_size / (1 << 20)
         logging.info(f"CRF probe: CRF {target_crf} → {final_size_mb:.1f} MB")
         if final_size_mb >= size_limit_mb:
@@ -81,8 +84,8 @@ def _probe_crf(
                 f"CRF probe: still {final_size_mb:.1f} MB at CRF {target_crf} "
                 "(log₂ estimate was approximate) — upload may be rejected by Zooniverse."
             )
-    except subprocess.CalledProcessError as e:
-        logging.error(f"CRF probe: ffmpeg failed at CRF {target_crf}: {e}")
+    else:
+        logging.error(f"CRF probe: extraction failed at CRF {target_crf} — upload may be rejected.")
 
     return target_crf
 
