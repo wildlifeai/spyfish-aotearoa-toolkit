@@ -25,6 +25,7 @@ def load_deployment_status():
             columns={
                 "drop_id": "DropID",
                 "status": "Status",
+                "source_status": "SourceStatus",
                 "expert_annotations": "ExpertAnnotations",
                 "ml_annotations": "MlAnnotations",
                 "citsci_annotations": "CitSciAnnotations",

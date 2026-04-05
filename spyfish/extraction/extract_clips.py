@@ -22,22 +22,28 @@ def _extract_clip(video_path: str, seek_seconds: float, duration: float, output_
     """Extract a single clip at the given CRF. Raises subprocess.CalledProcessError on failure."""
     if output_path.exists():
         output_path.unlink()
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-ss", str(seek_seconds),
-            "-i", str(video_path),
-            "-t", str(duration),
-            "-c:v", config.ffmpeg_codec,
-            "-preset", config.ffmpeg_preset,
-            "-crf", str(crf),
-            "-an",
-            str(output_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", str(seek_seconds),
+                "-i", str(video_path),
+                "-t", str(duration),
+                "-c:v", config.ffmpeg_codec,
+                "-preset", config.ffmpeg_preset,
+                "-crf", str(crf),
+                "-an",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        size_mb = output_path.stat().st_size / (1 << 20)
+        logging.info(f"CRF probe: CRF {crf} → {size_mb:.1f} MB")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"CRF probe failed for CRF {crf}: {e.stderr}")
+        size_mb = float("inf")
 
 
 def _probe_crf(
@@ -63,7 +69,7 @@ def _probe_crf(
 
     # Calculate required CRF: each +6 halves the size → delta = 6 * log₂(size / limit)
     # math.ceil ensures we land under the limit; +1 adds a small safety margin
-    target_crf = math.ceil(base_crf + 6 * math.log2(size_mb / size_limit_mb)) + 1
+    target_crf = min(math.ceil(base_crf + 6 * math.log2(size_mb / size_limit_mb)) + 1, 51)
     logging.info(f"CRF probe: {size_mb:.1f} MB over limit — recalculating to CRF {target_crf}")
 
     try:

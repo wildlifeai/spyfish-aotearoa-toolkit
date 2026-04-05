@@ -9,7 +9,7 @@ import pandas as pd
 from panoptes_client import Panoptes, Project, Subject, SubjectSet
 
 from spyfish.config.wrapper import config
-from spyfish.storage.s3_handler import S3Handler
+from spyfish.database.manager import DatabaseManager
 from spyfish.utils import seconds_to_time
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -31,27 +31,16 @@ def _derive_drop_metadata(drop_id: str) -> dict:
     }
 
 
-def _load_sites_df() -> pd.DataFrame | None:
-    """Load the BUV Survey Sites CSV from S3. Returns None on failure (reserve metadata skipped)."""
-    try:
-        storage = S3Handler(bucket=config.s3_bucket)
-        return storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
-    except Exception as e:
-        logging.warning(f"Could not load sites CSV from S3: {e} — reserve metadata will be omitted.")
-        return None
-
-
-def _get_site_reserve_meta(site_id: str, sites_df: pd.DataFrame) -> dict:
-    """Look up !LinkToMarineReserve and ProtectionStatus for a SiteID."""
-    match = sites_df[sites_df[config.site_id_column] == site_id]
-    if match.empty:
-        logging.warning(f"No site found for SiteID '{site_id}' in sites_df — reserve metadata omitted.")
+def _get_site_reserve_meta(site_id: str) -> dict:
+    """Look up !LinkToMarineReserve and ProtectionStatus for a SiteID from the pipeline DB."""
+    site = DatabaseManager().get_site(site_id)
+    if not site:
+        logging.warning(f"No site found for SiteID '{site_id}' in DB — reserve metadata omitted. Run ingest first.")
         return {}
-    row = match.iloc[0]
-    meta = {"!LinkToMarineReserve": row.get(config.link_to_marine_reserve_column, "")}
-    if "ProtectionStatus" in sites_df.columns:
-        meta["ProtectionStatus"] = row.get("ProtectionStatus", "")
-    return meta
+    return {
+        "!LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
+        config.protection_status_column: site.get(config.protection_status_column, ""),
+    }
 
 
 def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
@@ -128,12 +117,7 @@ def upload_clips_to_zooniverse(
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
     drop_meta = _derive_drop_metadata(drop_id)
-    sites_df = _load_sites_df()
-    site_reserve_meta = (
-        _get_site_reserve_meta(drop_meta["site_id"], sites_df)
-        if sites_df is not None
-        else {}
-    )
+    site_reserve_meta = _get_site_reserve_meta(drop_meta["site_id"])
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -169,9 +153,9 @@ def upload_clips_to_zooniverse(
             "#DropID": row.get(config.drop_id_column, drop_id),
             "#VideoFilename": drop_meta["video_filename"],
             "#siteName": drop_meta["site_id"],
-            "#SelectionReason": row.get("SelectionReason", ""),
-            "#TargetSpecies": row.get("TargetSpecies", ""),
-            "#MaxInterval": row.get("MaxInterval", ""),
+            "#SelectionReason": row.get(config.selection_reason_column, ""),
+            "#TargetSpecies": row.get(config.csv_scientific_name_column, ""),
+            "#MaxInterval": row.get(config.csv_max_interval_column, ""),
             "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
@@ -229,12 +213,7 @@ def upload_frames_to_zooniverse(
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
     drop_meta = _derive_drop_metadata(drop_id)
-    sites_df = _load_sites_df()
-    site_reserve_meta = (
-        _get_site_reserve_meta(drop_meta["site_id"], sites_df)
-        if sites_df is not None
-        else {}
-    )
+    site_reserve_meta = _get_site_reserve_meta(drop_meta["site_id"])
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -268,9 +247,9 @@ def upload_frames_to_zooniverse(
             "#DropID": row.get(config.drop_id_column, drop_id),
             "#VideoFilename": drop_meta["video_filename"],
             "#siteName": drop_meta["site_id"],
-            "#SelectionReason": row.get("SelectionReason", ""),
-            "#TargetSpecies": row.get("TargetSpecies", ""),
-            "#MaxInterval": row.get("MaxInterval", ""),
+            "#SelectionReason": row.get(config.selection_reason_column, ""),
+            "#TargetSpecies": row.get(config.csv_scientific_name_column, ""),
+            "#MaxInterval": row.get(config.csv_max_interval_column, ""),
             "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
             "#SamplingStart": row[config.csv_sampling_start_column],

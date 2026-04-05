@@ -4,7 +4,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from spyfish.config.base import InvalidTransitionError, PipelineStatus
+from spyfish.config.base import InvalidTransitionError, PipelineStatus, SourceStatus
 from spyfish.config.wrapper import config
 
 
@@ -38,6 +38,7 @@ class DatabaseManager:
                     drop_id TEXT PRIMARY KEY,
                     video_path TEXT,
                     status TEXT NOT NULL,
+                    source_status TEXT NOT NULL DEFAULT 'OK',
                     is_bad_deployment BOOLEAN NOT NULL DEFAULT 0,
                     error_message TEXT,
                     sampling_start INTEGER,
@@ -48,6 +49,17 @@ class DatabaseManager:
                     biigle_volume_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sites (
+                    site_id TEXT PRIMARY KEY,
+                    site_name TEXT,
+                    link_to_marine_reserve TEXT,
+                    protection_status TEXT
                 )
             """
             )
@@ -78,12 +90,70 @@ class DatabaseManager:
                 END;
             """
             )
+
+            # TODO: delete this migration block once all envs have run it at least once
+            # (source_status added 2026-04-05; safe to remove after next full deploy)
+            cursor.execute("PRAGMA table_info(deployments)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if "source_status" not in existing_cols:
+                cursor.execute(
+                    "ALTER TABLE deployments ADD COLUMN source_status TEXT NOT NULL DEFAULT 'OK'"
+                )
+                logging.info("Migrated deployments table: added source_status column.")
+
             conn.commit()
+
+    def upsert_sites(self, sites_df) -> None:
+        """Replace all site metadata from BUV Survey Sites DataFrame.
+
+        Full replace (delete + insert) rather than upsert — sites are config data with no
+        pipeline state, so removed sites should not linger in the DB.
+        """
+        from spyfish.config.wrapper import config
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM sites")
+            for _, row in sites_df.iterrows():
+                cursor.execute(
+                    """
+                    INSERT INTO sites (site_id, site_name, link_to_marine_reserve, protection_status)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(site_id) DO UPDATE SET
+                        site_name=excluded.site_name,
+                        link_to_marine_reserve=excluded.link_to_marine_reserve,
+                        protection_status=excluded.protection_status
+                    """,
+                    (
+                        str(row.get(config.site_id_column, "")),
+                        str(row.get(config.site_name_column, "")),
+                        str(row.get(config.link_to_marine_reserve_column, "")),
+                        str(row.get(config.protection_status_column, "")),
+                    ),
+                )
+            conn.commit()
+        logging.info(f"Upserted {len(sites_df)} sites into DB.")
+
+    def get_site(self, site_id: str) -> Optional[Dict[str, str]]:
+        """Fetch site metadata by SiteID. Returns a config-keyed dict or None if not found."""
+        from spyfish.config.wrapper import config
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM sites WHERE site_id = ?", (site_id,))
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            config.site_id_column: row["site_id"],
+            config.site_name_column: row["site_name"],
+            config.link_to_marine_reserve_column: row["link_to_marine_reserve"],
+            config.protection_status_column: row["protection_status"],
+        }
 
     def add_or_update_deployment(
         self,
         drop_id: str,
         status: str,
+        source_status: str = SourceStatus.OK,
         video_path: str = "",
         is_bad_deployment: bool = False,
         error_message: str = "",
@@ -99,11 +169,12 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO deployments (drop_id, video_path, status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO deployments (drop_id, video_path, status, source_status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
                     status=excluded.status,
+                    source_status=excluded.source_status,
                     is_bad_deployment=excluded.is_bad_deployment,
                     error_message=excluded.error_message,
                     sampling_start=excluded.sampling_start,
@@ -117,6 +188,7 @@ class DatabaseManager:
                     drop_id,
                     video_path,
                     status,
+                    source_status,
                     is_bad_deployment,
                     error_message,
                     sampling_start,
@@ -189,7 +261,7 @@ class DatabaseManager:
     def update_deployment_fields(self, drop_id: str, **fields) -> bool:
         """Update arbitrary columns on a deployment record. Returns False if drop_id not found."""
         allowed = {
-            "status", "sampling_start", "sampling_end", "video_path",
+            "status", "source_status", "sampling_start", "sampling_end", "video_path",
             "is_bad_deployment", "error_message", "biigle_volume_id",
         }
         invalid = set(fields) - allowed
@@ -326,7 +398,7 @@ class DatabaseManager:
         ann_db = AnnotationDatabaseManager()
 
         query = """
-            SELECT drop_id, annotated_by as source, SUM(max_interval) as total
+            SELECT drop_id, annotated_by as source, COUNT(*) as total
             FROM annotations
         """
         params = []
@@ -380,3 +452,20 @@ class DatabaseManager:
         logging.info(
             f"Updated annotation counts for {len(counts_by_drop)} deployments."
         )
+
+    def export_to_csv(self, output_dir: Optional[str] = None) -> List[str]:
+        """Export all DB tables to CSV files. Returns list of written file paths."""
+        import pandas as pd
+
+        out = Path(output_dir) if output_dir else Path(self.db_path).parent
+        out.mkdir(parents=True, exist_ok=True)
+
+        tables = ["deployments", "validation_errors", "sites"]
+        written = []
+        with self.get_connection() as conn:
+            for table in tables:
+                path = out / f"{table}.csv"
+                pd.read_sql(f"SELECT * FROM {table}", conn).to_csv(path, index=False)
+                written.append(str(path))
+                logging.info(f"Exported {table} → {path}")
+        return written

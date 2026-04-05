@@ -167,3 +167,53 @@ class AnnotationDatabaseManager:
         ]
 
         return df[export_cols]
+
+    def get_maxn_summary(self, drop_id: Optional[str] = None, annotated_by: Optional[str] = None) -> pd.DataFrame:
+        """
+        Returns the canonical MaxN per drop × species × source — i.e. the peak
+        max_interval across all time intervals for each combination.
+
+        This is the scientific result; contrast with deployments.ml_annotations
+        which is a COUNT of MaxN records used only for pipeline monitoring.
+
+        Args:
+            drop_id: Filter to a single deployment. If None, returns all.
+            annotated_by: Filter by source ('ml', 'expert', 'citsci'). If None, returns all.
+        """
+        query = """
+            SELECT drop_id, scientific_name, annotated_by,
+                   MAX(max_interval) as maxn,
+                   confidence_agreement
+            FROM annotations
+        """
+        conditions, params = [], []
+        if drop_id:
+            conditions.append("drop_id = ?")
+            params.append(drop_id)
+        if annotated_by:
+            conditions.append("annotated_by = ?")
+            params.append(annotated_by)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " GROUP BY drop_id, scientific_name, annotated_by ORDER BY drop_id, maxn DESC"
+
+        with self.get_connection() as conn:
+            return pd.read_sql_query(query, conn, params=params)
+
+    def export_to_csv(self, output_dir: Optional[str] = None) -> List[str]:
+        """Export all annotation DB tables to CSV files. Returns list of written file paths."""
+        out = Path(output_dir) if output_dir else Path(self.db_path).parent
+        out.mkdir(parents=True, exist_ok=True)
+
+        paths = []
+        with self.get_connection() as conn:
+            raw_path = out / "annotations.csv"
+            pd.read_sql("SELECT * FROM annotations", conn).to_csv(raw_path, index=False)
+            logging.info(f"Exported annotations → {raw_path}")
+            paths.append(str(raw_path))
+
+        maxn_path = out / "maxn_summary.csv"
+        self.get_maxn_summary().to_csv(maxn_path, index=False)
+        logging.info(f"Exported MaxN summary → {maxn_path}")
+        paths.append(str(maxn_path))
+        return paths
