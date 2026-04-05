@@ -15,22 +15,6 @@ from spyfish.utils import seconds_to_time
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
-def _derive_drop_metadata(drop_id: str) -> dict:
-    """Derive survey_id, site_id, and video_filename from a DropID.
-
-    DropID format: {SurveyID}_{SiteID}_{Replicate:02}
-    e.g. TON_20231015_BUV_TON_003_01 → survey_id=TON_20231015_BUV, site_id=TON_003
-    """
-    parts = drop_id.split("_")
-    survey_id = "_".join(parts[:3])
-    site_id = "_".join(parts[3:5])
-    return {
-        "survey_id": survey_id,
-        "site_id": site_id,
-        "video_filename": f"media/{survey_id}/{drop_id}/{drop_id}.mp4",
-    }
-
-
 def _get_site_reserve_meta(site_id: str) -> dict:
     """Look up !LinkToMarineReserve and ProtectionStatus for a SiteID from the pipeline DB."""
     site = DatabaseManager().get_site(site_id)
@@ -40,6 +24,38 @@ def _get_site_reserve_meta(site_id: str) -> dict:
     return {
         "!LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
         config.protection_status_column: site.get(config.protection_status_column, ""),
+    }
+
+
+def _get_uploaded_filenames(subject_set) -> set:
+    """Return the set of filenames already uploaded to a subject set.
+
+    Used to skip re-uploading on interrupted runs. Panoptes paginates — we
+    exhaust the iterator to get all subjects.
+    """
+    uploaded = set()
+    for subject in Subject.where(subject_set_id=subject_set.id):
+        for loc in subject.raw.get("locations", []):
+            # loc is {"image/jpeg": "https://..."} or {"video/mp4": "..."}
+            for url in loc.values():
+                uploaded.add(url.split("/")[-1].split("?")[0])  # strip path + query string
+    if uploaded:
+        logging.info(f"Found {len(uploaded)} already-uploaded subjects in set — will skip duplicates.")
+    return uploaded
+
+
+def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: str, site_reserve_meta: dict) -> dict:
+    """Common Zooniverse subject metadata shared between clips and frames uploads."""
+    return {
+        "#DropID": row.get(config.drop_id_column, drop_id),
+        "#VideoFilename": video_filename,
+        "#siteName": site_id,
+        "#SelectionReason": row.get(config.selection_reason_column, ""),
+        "#TargetSpecies": row.get(config.csv_scientific_name_column, ""),
+        "#MaxInterval": row.get(config.csv_max_interval_column, ""),
+        "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+        "#SamplingStart": row[config.csv_sampling_start_column],
+        **site_reserve_meta,
     }
 
 
@@ -116,8 +132,10 @@ def upload_clips_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
-    drop_meta = _derive_drop_metadata(drop_id)
-    site_reserve_meta = _get_site_reserve_meta(drop_meta["site_id"])
+    survey_id = config.get_survey_id_from_drop(drop_id)
+    site_id = config.get_site_id_from_drop(drop_id)
+    video_filename = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
+    site_reserve_meta = _get_site_reserve_meta(site_id)
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -139,28 +157,25 @@ def upload_clips_to_zooniverse(
         subject_set.save()
         logging.info(f"Subject set created: '{set_name}'")
 
+    already_uploaded = _get_uploaded_filenames(subject_set)
+
     new_subjects = []
     for _, row in uploadable.iterrows():
         clip_path = Path(row["ClipPath"])
         if not clip_path.exists():
             logging.warning(f"Clip file missing, skipping: {clip_path.name}")
             continue
+        if clip_path.name in already_uploaded:
+            logging.info(f"  Already uploaded, skipping: {clip_path.name}")
+            continue
 
         start_sec = float(row[config.csv_clip_start_column])
         end_sec = float(row[config.csv_clip_end_column])
 
         meta = {
-            "#DropID": row.get(config.drop_id_column, drop_id),
-            "#VideoFilename": drop_meta["video_filename"],
-            "#siteName": drop_meta["site_id"],
-            "#SelectionReason": row.get(config.selection_reason_column, ""),
-            "#TargetSpecies": row.get(config.csv_scientific_name_column, ""),
-            "#MaxInterval": row.get(config.csv_max_interval_column, ""),
-            "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+            **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
-            "#SamplingStart": row[config.csv_sampling_start_column],
-            **site_reserve_meta,
         }
 
         subject = Subject()
@@ -212,8 +227,10 @@ def upload_frames_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
-    drop_meta = _derive_drop_metadata(drop_id)
-    site_reserve_meta = _get_site_reserve_meta(drop_meta["site_id"])
+    survey_id = config.get_survey_id_from_drop(drop_id)
+    site_id = config.get_site_id_from_drop(drop_id)
+    video_filename = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
+    site_reserve_meta = _get_site_reserve_meta(site_id)
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -235,25 +252,22 @@ def upload_frames_to_zooniverse(
         subject_set.save()
         logging.info(f"Subject set created: '{set_name}'")
 
+    already_uploaded = _get_uploaded_filenames(subject_set)
+
     new_subjects = []
     for _, row in uploadable.iterrows():
         frame_path = Path(row["FramePath"])
         if not frame_path.exists():
             logging.warning(f"Frame file missing, skipping: {frame_path.name}")
             continue
+        if frame_path.name in already_uploaded:
+            logging.info(f"  Already uploaded, skipping: {frame_path.name}")
+            continue
         time_of_max = float(row[config.csv_clip_max_time_column])
 
         meta = {
-            "#DropID": row.get(config.drop_id_column, drop_id),
-            "#VideoFilename": drop_meta["video_filename"],
-            "#siteName": drop_meta["site_id"],
-            "#SelectionReason": row.get(config.selection_reason_column, ""),
-            "#TargetSpecies": row.get(config.csv_scientific_name_column, ""),
-            "#MaxInterval": row.get(config.csv_max_interval_column, ""),
-            "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+            **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
-            "#SamplingStart": row[config.csv_sampling_start_column],
-            **site_reserve_meta,
         }
 
         subject = Subject()

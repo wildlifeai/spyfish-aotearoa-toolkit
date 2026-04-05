@@ -183,7 +183,9 @@ def _run_qa_visualizations(
         logging.debug(f"Skipping QA frame drawing for {drop_id}: no raw detections.")
         return
 
-    review_df = maxn_df.sort_values(config.csv_confidence_agreement_column).head(10)
+    top_maxn = maxn_df.nlargest(5, config.csv_max_interval_column)
+    low_conf = maxn_df.nsmallest(5, config.csv_confidence_agreement_column)
+    review_df = pd.concat([top_maxn, low_conf]).drop_duplicates()
 
     # Map time_of_maxn_ms back to raw CSV frame numbers
     frame_indices = []

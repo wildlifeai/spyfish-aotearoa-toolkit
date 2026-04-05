@@ -109,11 +109,15 @@ class DatabaseManager:
         Full replace (delete + insert) rather than upsert — sites are config data with no
         pipeline state, so removed sites should not linger in the DB.
         """
-        from spyfish.config.wrapper import config
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM sites")
+            skipped = 0
             for _, row in sites_df.iterrows():
+                site_id = str(row.get(config.site_id_column, "")).strip()
+                if not site_id or site_id.lower() == "nan":
+                    skipped += 1
+                    continue
                 cursor.execute(
                     """
                     INSERT INTO sites (site_id, site_name, link_to_marine_reserve, protection_status)
@@ -124,18 +128,19 @@ class DatabaseManager:
                         protection_status=excluded.protection_status
                     """,
                     (
-                        str(row.get(config.site_id_column, "")),
+                        site_id,
                         str(row.get(config.site_name_column, "")),
                         str(row.get(config.link_to_marine_reserve_column, "")),
                         str(row.get(config.protection_status_column, "")),
                     ),
                 )
+            if skipped:
+                logging.warning(f"Skipped {skipped} site rows with missing/empty site_id — check column mapping in config.yaml.")
             conn.commit()
-        logging.info(f"Upserted {len(sites_df)} sites into DB.")
+        logging.info(f"Upserted {len(sites_df) - skipped} sites into DB.")
 
     def get_site(self, site_id: str) -> Optional[Dict[str, str]]:
         """Fetch site metadata by SiteID. Returns a config-keyed dict or None if not found."""
-        from spyfish.config.wrapper import config
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sites WHERE site_id = ?", (site_id,))
