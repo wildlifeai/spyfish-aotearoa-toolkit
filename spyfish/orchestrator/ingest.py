@@ -3,7 +3,7 @@ from typing import Optional, Set
 
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import PipelineStatus, SourceStatus
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
@@ -37,6 +37,10 @@ def check_pending_arrivals(known_files: Optional[Set[str]] = None):
     for drop in pending:
         drop_id = drop["drop_id"]
         video_path = drop["video_path"]
+
+        # Skip deployments with source data issues — they shouldn't enter the pipeline
+        if drop.get("source_status", SourceStatus.OK) != SourceStatus.OK:
+            continue
 
         if video_path and video_path in known_files:
             logging.info(
@@ -137,6 +141,13 @@ def run_ingestion():
             f"Failed to load KSO annotations from S3: {e}. Expert counts will default to 0."
         )
 
+    # Load sites CSV and cache in DB so upload step doesn't need S3
+    try:
+        sites_df = storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
+        db.upsert_sites(sites_df)
+    except Exception as e:
+        logging.warning(f"Failed to load sites CSV from S3: {e}. Site metadata will not be updated in DB.")
+
     _sync_deployments_to_db(
         deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
     )
@@ -191,23 +202,31 @@ def _sync_deployments_to_db(
         ml_anns = 0
         citsci_anns = 0
 
-        # Determine initial status
+        # Determine source_status from data quality checks (orthogonal to pipeline stage)
+        if is_bad_deployment:
+            source_status = SourceStatus.EXCLUDED
+        elif drop_id in structural_error_drops:
+            source_status = SourceStatus.VALIDATION_ERROR
+        else:
+            source_status = SourceStatus.OK
+
+        # Determine pipeline status
         if expert_anns > 0:
             # Legacy data: deployments that already have expert annotations (pre-pipeline)
             # are set to PIPELINE_COMPLETE immediately, skipping ML and citsci stages.
             # TODO: verify this doesn't interfere with drops that have expert annotations
             # but still need ML inference (e.g. re-annotated surveys).
             status = PipelineStatus.PIPELINE_COMPLETE
-        elif is_bad_deployment:
-            status = PipelineStatus.EXCLUDED
-        elif drop_id in structural_error_drops:
-            status = PipelineStatus.ERROR
+        elif source_status != SourceStatus.OK:
+            # Don't advance source-problematic deployments through the pipeline.
+            # Preserve existing stage if already in DB, otherwise default to PENDING_ARRIVAL.
+            existing_record = existing_deployments.get(drop_id)
+            status = existing_record["status"] if existing_record else PipelineStatus.PENDING_ARRIVAL
         else:
             existing_record = existing_deployments.get(drop_id)
             if existing_record and existing_record["status"] not in [
                 PipelineStatus.PENDING_ARRIVAL,
                 PipelineStatus.ERROR,
-                PipelineStatus.MISSING_METADATA,
             ]:
                 # It's already moving through the pipeline, leave it alone.
                 status = existing_record["status"]
@@ -221,10 +240,11 @@ def _sync_deployments_to_db(
         db.add_or_update_deployment(
             drop_id=drop_id,
             status=status,
+            source_status=source_status,
             video_path=video_path,
             is_bad_deployment=is_bad_deployment,
             error_message=(
-                "Found in structural errors" if status == PipelineStatus.ERROR else ""
+                "Found in structural errors" if source_status == SourceStatus.VALIDATION_ERROR else ""
             ),
             sampling_start=sampling_start,
             sampling_end=sampling_end,

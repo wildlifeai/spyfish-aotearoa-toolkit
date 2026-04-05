@@ -110,14 +110,19 @@ def select_clips_with_strategy(
         n_start = strategy_params.get("start_clips")
         spacing = strategy_params.get("temporal_spacing_seconds")
 
-        # 1. Absolute MaxN
-        top_maxn = df.nlargest(n_maxn, config.csv_max_interval_column)
+        # 1. Absolute MaxN — oversample to account for spacing/dedup rejects
+        top_maxn = df.nlargest(n_maxn * 3, config.csv_max_interval_column)
+        added_maxn = 0
         for _, row in top_maxn.iterrows():
-            selector.add_interval(
-                row,
-                reason="Absolute MaxN",
-                species=row[config.csv_scientific_name_column],
-            )
+            if added_maxn >= n_maxn:
+                break
+            if selector.check_temporal_spacing(row[config.csv_time_seconds_column], spacing):
+                if selector.add_interval(
+                    row,
+                    reason="Absolute MaxN",
+                    species=row[config.csv_scientific_name_column],
+                ):
+                    added_maxn += 1
 
         # 2. Confusing
         confusing_df = df.sort_values(

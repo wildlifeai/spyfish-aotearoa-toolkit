@@ -6,6 +6,7 @@ Clip timestamps are absolute video positions (seconds from start of video file).
 """
 
 import logging
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -15,6 +16,78 @@ import pandas as pd
 
 from spyfish.config.wrapper import config
 from spyfish.utils import generate_clip_filename
+
+
+def _extract_clip(video_path: str, seek_seconds: float, duration: float, output_path: Path, crf: int):
+    """Extract a single clip at the given CRF. Raises subprocess.CalledProcessError on failure."""
+    if output_path.exists():
+        output_path.unlink()
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", str(seek_seconds),
+                "-i", str(video_path),
+                "-t", str(duration),
+                "-c:v", config.ffmpeg_codec,
+                "-preset", config.ffmpeg_preset,
+                "-crf", str(crf),
+                "-an",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        size_mb = output_path.stat().st_size / (1 << 20)
+        logging.info(f"CRF probe: CRF {crf} → {size_mb:.1f} MB")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"CRF probe failed for CRF {crf}: {e.stderr}")
+        size_mb = float("inf")
+
+
+def _probe_crf(
+    video_path: str,
+    seek_seconds: float,
+    duration: float,
+    output_path: Path,
+    size_limit_mb: float,
+    base_crf: int,
+) -> int:
+    """Extract the first clip at base_crf, then calculate the exact CRF needed if too large.
+
+    Uses the log₂ relationship between CRF and file size (each +6 CRF ≈ halves size) to
+    compute the target CRF in one step rather than trial-and-error. At most two ffmpeg calls.
+    The winning clip stays on disk — the main loop's exists() check skips it.
+    """
+    _extract_clip(video_path, seek_seconds, duration, output_path, base_crf)
+    if not output_path.exists():
+        logging.error("CRF probe: initial extraction failed. Falling back to base CRF.")
+        return base_crf
+    size_mb = output_path.stat().st_size / (1 << 20)
+    logging.info(f"CRF probe: CRF {base_crf} → {size_mb:.1f} MB")
+
+    if size_mb < size_limit_mb:
+        return base_crf
+
+    # Calculate required CRF: each +6 halves the size → delta = 6 * log₂(size / limit)
+    # math.ceil ensures we land under the limit; +1 adds a small safety margin
+    target_crf = min(math.ceil(base_crf + 6 * math.log2(size_mb / size_limit_mb)) + 1, 51)
+    logging.info(f"CRF probe: {size_mb:.1f} MB over limit — recalculating to CRF {target_crf}")
+
+    _extract_clip(video_path, seek_seconds, duration, output_path, target_crf)
+    if output_path.exists():
+        final_size_mb = output_path.stat().st_size / (1 << 20)
+        logging.info(f"CRF probe: CRF {target_crf} → {final_size_mb:.1f} MB")
+        if final_size_mb >= size_limit_mb:
+            logging.warning(
+                f"CRF probe: still {final_size_mb:.1f} MB at CRF {target_crf} "
+                "(log₂ estimate was approximate) — upload may be rejected by Zooniverse."
+            )
+    else:
+        logging.error(f"CRF probe: extraction failed at CRF {target_crf} — upload may be rejected.")
+
+    return target_crf
 
 
 def extract_clips_from_selections(
@@ -50,6 +123,40 @@ def extract_clips_from_selections(
 
     output_dir = str(config.get_clips_dir(drop_id))
     os.makedirs(output_dir, exist_ok=True)
+
+    # Calibrate CRF using the first clip written to its real output path.
+    # The loop's exists() check will skip it — extracted exactly once, no waste.
+    # On re-runs, if the first clip already exists and is under the limit, skip the probe entirely.
+    first = df.iloc[0]
+    probe_sampling_start = float(first.get(config.csv_sampling_start_column, 0))
+    probe_start = float(first[config.csv_clip_start_column])
+    probe_end = (
+        float(first[config.csv_clip_end_column])
+        if config.csv_clip_end_column in first
+        else probe_start + config.clip_length
+    )
+    probe_duration = probe_end - probe_start
+    probe_seek = probe_sampling_start + probe_start
+    probe_path = Path(output_dir) / generate_clip_filename(drop_id, probe_duration, probe_seek)
+
+    base_crf = int(config.ffmpeg_crf)
+    if probe_path.exists() and probe_path.stat().st_size / (1 << 20) < config.size_limit_mb:
+        logging.info("CRF probe: first clip already exists and is under limit — skipping probe.")
+        effective_crf = base_crf
+    else:
+        effective_crf = _probe_crf(
+            video_path=video_path,
+            seek_seconds=probe_seek,
+            duration=probe_duration,
+            output_path=probe_path,
+            size_limit_mb=config.size_limit_mb,
+            base_crf=base_crf,
+        )
+    if effective_crf != base_crf:
+        logging.info(
+            f"Using CRF {effective_crf} (up from {base_crf}) to stay under "
+            f"{config.size_limit_mb} MB per clip."
+        )
 
     clip_paths: List[Optional[str]] = []
     for idx, row in df.iterrows():
@@ -87,7 +194,7 @@ def extract_clips_from_selections(
             "-preset",
             config.ffmpeg_preset,
             "-crf",
-            config.ffmpeg_crf,
+            str(effective_crf),
             "-an",  # remove audio — standard for processed clips
             str(out_path),
         ]
