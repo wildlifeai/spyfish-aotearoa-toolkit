@@ -23,7 +23,7 @@ def _get_site_reserve_meta(site_id: str) -> dict:
         return {}
     return {
         "!LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
-        config.protection_status_column: site.get(config.protection_status_column, ""),
+        "ProtectionStatus": site.get(config.protection_status_column, ""),
     }
 
 
@@ -46,8 +46,9 @@ def _get_uploaded_filenames(subject_set) -> set:
 
 def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: str, site_reserve_meta: dict) -> dict:
     """Common Zooniverse subject metadata shared between clips and frames uploads."""
-    return {
+    meta = {
         "#DropID": row.get(config.drop_id_column, drop_id),
+        "!DropID": drop_id,
         "#VideoFilename": video_filename,
         "#siteName": site_id,
         "#SelectionReason": row.get(config.selection_reason_column, ""),
@@ -57,6 +58,10 @@ def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: st
         "#SamplingStart": row[config.csv_sampling_start_column],
         **site_reserve_meta,
     }
+    empty_keys = [k for k, v in meta.items() if v == "" or (hasattr(v, "__class__") and str(v) == "nan")]
+    if empty_keys:
+        logging.warning(f"Subject metadata has empty fields: {empty_keys}. Row columns: {list(row.index)}")
+    return meta
 
 
 def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
@@ -159,6 +164,11 @@ def upload_clips_to_zooniverse(
 
     already_uploaded = _get_uploaded_filenames(subject_set)
 
+    logging.info(f"DataFrame columns: {list(uploadable.columns)}")
+    logging.info(f"Config column names — drop_id: '{config.drop_id_column}', selection_reason: '{config.selection_reason_column}', species: '{config.csv_scientific_name_column}', max_interval: '{config.csv_max_interval_column}', sampling_start: '{config.csv_sampling_start_column}'")
+    if not uploadable.empty:
+        logging.info(f"First row sample: {uploadable.iloc[0].to_dict()}")
+
     new_subjects = []
     for _, row in uploadable.iterrows():
         clip_path = Path(row["ClipPath"])
@@ -174,6 +184,7 @@ def upload_clips_to_zooniverse(
 
         meta = {
             **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
+            "!upl_seconds": int(start_sec),  # visible in Talk — clip start offset in source video
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
         }
@@ -267,6 +278,7 @@ def upload_frames_to_zooniverse(
 
         meta = {
             **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
+            "!upl_seconds": int(time_of_max),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
         }
 
@@ -281,3 +293,4 @@ def upload_frames_to_zooniverse(
     logging.info(
         f"Uploaded {len(new_subjects)}/{n} frames to subject set '{set_name}'."
     )
+
