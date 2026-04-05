@@ -133,14 +133,6 @@ class PathsConfig(BaseConfig):
     def s3_extra_files(self) -> str:
         return f"{self.s3_status_path}/{_require(self.paths, 'extra_files_filename', 'paths')}"
 
-    @property
-    def s3_deployment_status_csv(self) -> str:
-        return f"{self.s3_status_path}/deployments_status.csv"
-
-    @property
-    def s3_survey_status_csv(self) -> str:
-        return f"{self.s3_status_path}/surveys_status.csv"
-
     # ── Sub-directories (local + S3) ────────────────────────────────────────
 
     def _sub(self, key: str) -> str:
@@ -288,8 +280,16 @@ class PathsConfig(BaseConfig):
         return self._col("link_to_marine_reserve_column")
 
     @property
+    def protection_status_column(self) -> str:
+        return self._col("protection_status_column")
+
+    @property
     def site_name_column(self) -> str:
         return self._col("site_name_column")
+
+    @property
+    def selection_reason_column(self) -> str:
+        return self._col("selection_reason_column")
 
     @property
     def csv_video_file_link_column(self) -> str:

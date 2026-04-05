@@ -72,14 +72,32 @@ class InvalidTransitionError(Exception):
     """Raised when a pipeline status transition is not permitted."""
 
 
-class PipelineStatus:
-    """Constant string stages of the Spyfish pipeline."""
+class SourceStatus:
+    """Source-data quality flags, stored in the source_status column.
 
-    # Holds and Errors
+    Orthogonal to PipelineStatus — a deployment's source_status reflects
+    what we know about its data quality; its pipeline status reflects where
+    it sits in the processing workflow.
+    """
+
+    OK = "OK"                           # No known source issues
+    EXCLUDED = "EXCLUDED"               # is_bad_deployment = True in CSV
+    MISSING_METADATA = "MISSING_METADATA"  # sampling_start/end absent or unparseable
+    VALIDATION_ERROR = "VALIDATION_ERROR"  # Failed cross-dataset structural checks
+    REMOVED_FROM_SOURCE = "REMOVED_FROM_SOURCE"  # In DB but no longer in the CSV
+
+
+class PipelineStatus:
+    """Constant string stages of the Spyfish pipeline.
+
+    Only contains processing-stage values. Source-data quality issues
+    (bad deployments, missing metadata, validation failures) live in
+    SourceStatus and are stored in the separate source_status column.
+    """
+
+    # Pauses / failures
     ON_HOLD = "ON_HOLD"
-    EXCLUDED = "EXCLUDED"
-    ERROR = "ERROR"
-    MISSING_METADATA = "MISSING_METADATA"
+    ERROR = "ERROR"  # ML or pipeline step failed — not a source data issue
 
     # Healthy cycle
     PENDING_ARRIVAL = "PENDING_ARRIVAL"
@@ -107,14 +125,13 @@ class PipelineStatus:
     # (handled in DatabaseManager.advance_status as a special case).
     # ---------------------------------------------------------------------------
     VALID_TRANSITIONS: dict = {
-        PENDING_ARRIVAL: {READY_FOR_ML, ON_HOLD, EXCLUDED, MISSING_METADATA},
-        READY_FOR_ML: {PROCESSING_ML, ON_HOLD, EXCLUDED},
+        PENDING_ARRIVAL: {READY_FOR_ML, ON_HOLD},
+        READY_FOR_ML: {PROCESSING_ML, ON_HOLD},
         PROCESSING_ML: {ML_COMPLETE, ERROR, ON_HOLD},
         ML_COMPLETE: {
             AWAITING_CITSCI_CLIPS,  # full Zooniverse path
             AWAITING_EXPERT_REVIEW,  # Biigle-direct (skip_zooniverse=True)
             ON_HOLD,
-            EXCLUDED,
         },
         AWAITING_CITSCI_CLIPS: {CITSCI_CLIPS_COMPLETE, ON_HOLD},
         CITSCI_CLIPS_COMPLETE: {
@@ -129,9 +146,7 @@ class PipelineStatus:
         CITSCI_COMPLETE: {AWAITING_EXPERT_REVIEW, ON_HOLD},
         AWAITING_EXPERT_REVIEW: {PIPELINE_COMPLETE, ON_HOLD},
         PIPELINE_COMPLETE: {ON_HOLD},
-        ERROR: {READY_FOR_ML, ON_HOLD, EXCLUDED},
-        EXCLUDED: {PENDING_ARRIVAL, ON_HOLD},
-        MISSING_METADATA: {READY_FOR_ML, EXCLUDED},
+        ERROR: {READY_FOR_ML, ON_HOLD},
         # ON_HOLD is handled as unrestricted in advance_status()
     }
 
@@ -177,7 +192,5 @@ class PipelineStatus:
             "Fully processed and synced from Biigle",
         ),
         ("ON_HOLD", "⏸️ On Hold", "Paused for investigation"),
-        ("EXCLUDED", "🚫 Excluded", "Bad deployment, not processing"),
         ("ERROR", "❌ Error", "Failed a pipeline step"),
-        ("MISSING_METADATA", "⚠️ Missing Metadata", "Required metadata absent"),
     ]
