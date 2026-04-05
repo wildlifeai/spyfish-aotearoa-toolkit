@@ -124,10 +124,15 @@ def extract_clips_from_selections(
     output_dir = str(config.get_clips_dir(drop_id))
     os.makedirs(output_dir, exist_ok=True)
 
-    # Calibrate CRF using the first clip written to its real output path.
+    # Calibrate CRF using the highest-MaxN clip — most fish = most detail = largest file.
+    # This gives a conservative (worst-case) CRF for the whole batch.
     # The loop's exists() check will skip it — extracted exactly once, no waste.
-    # On re-runs, if the first clip already exists and is under the limit, skip the probe entirely.
-    first = df.iloc[0]
+    # On re-runs, if the probe clip already exists and is under the limit, skip entirely.
+    if config.csv_max_interval_column in df.columns:
+        probe_row = df.loc[df[config.csv_max_interval_column].idxmax()]
+    else:
+        probe_row = df.iloc[0]
+    first = probe_row
     probe_sampling_start = float(first.get(config.csv_sampling_start_column, 0))
     probe_start = float(first[config.csv_clip_start_column])
     probe_end = (
@@ -141,7 +146,7 @@ def extract_clips_from_selections(
 
     base_crf = int(config.ffmpeg_crf)
     if probe_path.exists() and probe_path.stat().st_size / (1 << 20) < config.size_limit_mb:
-        logging.info("CRF probe: first clip already exists and is under limit — skipping probe.")
+        logging.info("CRF probe: probe clip already exists and is under limit — skipping probe.")
         effective_crf = base_crf
     else:
         effective_crf = _probe_crf(
