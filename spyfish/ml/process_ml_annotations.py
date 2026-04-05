@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from spyfish.config.base import PipelineStatus
@@ -194,6 +195,15 @@ def _run_qa_visualizations(
         if closest.empty:
             continue
         frame_indices.append(int(closest["frame"].iloc[0]))
+
+    # Add 5 evenly-spaced random frames across the full video for general coverage
+    t_min, t_max = raw_df["time_seconds"].min(), raw_df["time_seconds"].max()
+    if t_max > t_min:
+        boundaries = np.linspace(t_min, t_max, 6)  # 5 equal bands
+        for i in range(5):
+            band = raw_df[(raw_df["time_seconds"] >= boundaries[i]) & (raw_df["time_seconds"] < boundaries[i + 1])]
+            if not band.empty:
+                frame_indices.append(int(band.sample(1)["frame"].iloc[0]))
 
     # Find video file
     video_path = video_dir / f"{drop_id}.mp4"
