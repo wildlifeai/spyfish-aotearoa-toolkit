@@ -419,13 +419,16 @@ class PathsConfig(BaseConfig):
         return match.group(1) if match else "UNKNOWN_SURVEY"
 
     def get_site_id_from_drop(self, drop_id: str) -> str:
-        """Derive SiteID from a validated DropID using the config site_id pattern."""
-        raw = self.get_validation_pattern("site_id")
-        pattern = raw.lstrip("^").rstrip("$")
-        if not pattern.startswith("("):
-            pattern = f"({pattern})"
-        match = re.search(pattern, drop_id)
-        return match.group(1) if match else "UNKNOWN_SITE"
+        """Derive SiteID from a validated DropID.
+
+        DropID format is ^[A-Z]{3}_\d{8}_BUV_[A-Z]{3}_\d{3}_\d{2}$
+        SiteID is always parts[3:5] — positional, not regex, because the
+        site_id pattern also matches parts of the survey prefix.
+        """
+        parts = drop_id.split("_")
+        if len(parts) >= 5:
+            return f"{parts[3]}_{parts[4]}"
+        return "UNKNOWN_SITE"
 
     def get_drop_dir(self, drop_id: str) -> Path:
         validated = self.validate_drop_id(drop_id)

@@ -89,7 +89,7 @@ ml_inference:
 
 zooniverse_extraction:
   clip_length: 10.0
-  project_id: 32041
+  project_id: 32041 # spyfish 14054      # kalindi test: 32041
   # TODO: what are these 2 things about
   health_check_count: 6 # Number of health checks to perform
   video_start_threshold_seconds: 120 # Number of seconds to sample from the start of the video to do the start of the video health check
@@ -169,7 +169,7 @@ training:
 validation_patterns:
   drop_id:   "^[A-Z]{3}_\\d{8}_BUV_[A-Z]{3}_\\d{3}_\\d{2}$"
   survey_id: "^[A-Z]{3}_\\d{8}_BUV$"
-  site_id:   "^[A-Z]{3}_\\d+$"
+  site_id:   "^[A-Z]{3}_\\d{3}$"
 
 validation_rules:
   deployments:
