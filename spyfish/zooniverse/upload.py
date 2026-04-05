@@ -9,15 +9,65 @@ import pandas as pd
 from panoptes_client import Panoptes, Project, Subject, SubjectSet
 
 from spyfish.config.wrapper import config
+from spyfish.database.manager import DatabaseManager
 from spyfish.utils import seconds_to_time
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
+def _get_site_reserve_meta(site_id: str) -> dict:
+    """Look up !LinkToMarineReserve and ProtectionStatus for a SiteID from the pipeline DB."""
+    site = DatabaseManager().get_site(site_id)
+    if not site:
+        logging.warning(f"No site found for SiteID '{site_id}' in DB — reserve metadata omitted. Run ingest first.")
+        return {}
+    return {
+        "!LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
+        config.protection_status_column: site.get(config.protection_status_column, ""),
+    }
+
+
+def _get_uploaded_filenames(subject_set) -> set:
+    """Return the set of filenames already uploaded to a subject set.
+
+    Used to skip re-uploading on interrupted runs. Panoptes paginates — we
+    exhaust the iterator to get all subjects.
+    """
+    uploaded = set()
+    for subject in Subject.where(subject_set_id=subject_set.id):
+        for loc in subject.raw.get("locations", []):
+            # loc is {"image/jpeg": "https://..."} or {"video/mp4": "..."}
+            for url in loc.values():
+                uploaded.add(url.split("/")[-1].split("?")[0])  # strip path + query string
+    if uploaded:
+        logging.info(f"Found {len(uploaded)} already-uploaded subjects in set — will skip duplicates.")
+    return uploaded
+
+
+def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: str, site_reserve_meta: dict) -> dict:
+    """Common Zooniverse subject metadata shared between clips and frames uploads."""
+    return {
+        "#DropID": row.get(config.drop_id_column, drop_id),
+        "#VideoFilename": video_filename,
+        "#siteName": site_id,
+        "#SelectionReason": row.get(config.selection_reason_column, ""),
+        "#TargetSpecies": row.get(config.csv_scientific_name_column, ""),
+        "#MaxInterval": row.get(config.csv_max_interval_column, ""),
+        "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+        "#SamplingStart": row[config.csv_sampling_start_column],
+        **site_reserve_meta,
+    }
+
+
 def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Checks clip file sizes from a selections_df with a ClipPath column.
-    Logs a warning for clips over 12 MB (Zooniverse practical limit).
+    Checks clip file sizes and warns if any exceed size_limit_mb.
+
+    CRF calibration is handled upstream in extract_clips_from_selections via _probe_crf,
+    so oversized clips here indicate an edge case (e.g. very complex scene, unusual codec).
+
+    # TODO: can likely be deleted — _probe_crf in extract_clips.py now handles calibration
+    # before extraction, making this check redundant for normal runs.
 
     Returns:
         clips_df with a SizeMB column added.
@@ -26,16 +76,14 @@ def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
     clips_df["SizeMB"] = clips_df["ClipPath"].apply(
         lambda p: Path(p).stat().st_size / (1 << 20) if p and Path(p).exists() else None
     )
-    over_limit = clips_df[clips_df["SizeMB"] >= 12]
+    over_limit = clips_df[clips_df["SizeMB"] >= config.size_limit_mb]
     if not over_limit.empty:
         logging.warning(
-            f"{len(over_limit)} clips exceed 12 MB and may be rejected by Zooniverse. "
-            f"Consider re-encoding with a higher CRF.{clips_df["SizeMB"]}"
+            f"{len(over_limit)} clips still exceed {config.size_limit_mb} MB after CRF calibration — "
+            "they may be rejected by Zooniverse."
         )
     else:
-        logging.info(
-            f"All {clips_df['SizeMB'].notna().sum()} clips are under 12 MB. Ready to upload."
-        )
+        logging.info(f"All {clips_df['SizeMB'].notna().sum()} clips are under {config.size_limit_mb} MB.")
     return clips_df
 
 
@@ -49,9 +97,14 @@ def upload_clips_to_zooniverse(
     Reads clip paths and metadata from selections_df (produced by extract_clips_from_selections).
     DropID and ClipPath are read from the DataFrame directly.
 
-    Metadata attached to each subject (hidden from volunteers, prefix '#'):
-        #DropID, #SelectionReason, #TargetSpecies, #MaxCount, #Confidence,
-        #StartTime, #EndTime, #SamplingStart
+    Metadata attached to each subject:
+        '#' prefix — hidden from volunteers, used for traceability and QA.
+        '!' prefix — visible to volunteers in Talk (discussion) only, not during classification.
+
+        #DropID, #VideoFilename, #siteName,
+        #SelectionReason, #TargetSpecies, #MaxInterval, #ConfidenceAgreement,
+        #StartTime, #EndTime, #SamplingStart,
+        !LinkToMarineReserve, ProtectionStatus (when BUV Sites CSV is reachable on S3)
 
     Args:
         selections_df: DataFrame with one row per clip, including 'ClipPath' and 'DropID' columns.
@@ -79,6 +132,10 @@ def upload_clips_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
+    survey_id = config.get_survey_id_from_drop(drop_id)
+    site_id = config.get_site_id_from_drop(drop_id)
+    video_filename = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
+    site_reserve_meta = _get_site_reserve_meta(site_id)
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -100,28 +157,25 @@ def upload_clips_to_zooniverse(
         subject_set.save()
         logging.info(f"Subject set created: '{set_name}'")
 
+    already_uploaded = _get_uploaded_filenames(subject_set)
+
     new_subjects = []
     for _, row in uploadable.iterrows():
         clip_path = Path(row["ClipPath"])
         if not clip_path.exists():
             logging.warning(f"Clip file missing, skipping: {clip_path.name}")
             continue
+        if clip_path.name in already_uploaded:
+            logging.info(f"  Already uploaded, skipping: {clip_path.name}")
+            continue
 
-        # Derive human-readable times for volunteers from numeric columns
         start_sec = float(row[config.csv_clip_start_column])
         end_sec = float(row[config.csv_clip_end_column])
 
-        # Metadata hidden from volunteers (prefix '#')
-        # These help trace classifications back to source deployments and inform QA
         meta = {
-            "#DropID": row.get(config.drop_id_column, drop_id),
-            "#SelectionReason": row.get("SelectionReason", ""),
-            "#TargetSpecies": row.get("TargetSpecies", ""),
-            "#MaxInterval": row.get("MaxInterval", ""),
-            "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+            **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
-            "#SamplingStart": row[config.csv_sampling_start_column],
         }
 
         subject = Subject()
@@ -145,6 +199,10 @@ def upload_frames_to_zooniverse(
 
     Reads frame paths and metadata from frames_df (produced by extract_frames_from_selections).
     DropID and FramePath are read from the DataFrame directly.
+
+    Args:
+        frames_df: DataFrame with one row per frame, including 'FramePath' and 'DropID' columns.
+        subject_set_name: Optional override for the Zooniverse subject set display name.
     """
 
     if not all(
@@ -169,6 +227,10 @@ def upload_frames_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
+    survey_id = config.get_survey_id_from_drop(drop_id)
+    site_id = config.get_site_id_from_drop(drop_id)
+    video_filename = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
+    site_reserve_meta = _get_site_reserve_meta(site_id)
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
     Panoptes.connect(username=config.user, password=config.password)
@@ -190,23 +252,22 @@ def upload_frames_to_zooniverse(
         subject_set.save()
         logging.info(f"Subject set created: '{set_name}'")
 
+    already_uploaded = _get_uploaded_filenames(subject_set)
+
     new_subjects = []
     for _, row in uploadable.iterrows():
         frame_path = Path(row["FramePath"])
         if not frame_path.exists():
             logging.warning(f"Frame file missing, skipping: {frame_path.name}")
             continue
-        # Metadata strictly mirrors standardized selections outputs. Legacy selections are handled separately.
+        if frame_path.name in already_uploaded:
+            logging.info(f"  Already uploaded, skipping: {frame_path.name}")
+            continue
         time_of_max = float(row[config.csv_clip_max_time_column])
 
         meta = {
-            "#DropID": row.get(config.drop_id_column, drop_id),
-            "#SelectionReason": row.get("SelectionReason", ""),
-            "#TargetSpecies": row.get("TargetSpecies", ""),
-            "#MaxInterval": row.get("MaxInterval", ""),
-            "#ConfidenceAgreement": row.get(config.csv_confidence_agreement_column, ""),
+            **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
-            "#SamplingStart": row[config.csv_sampling_start_column],
         }
 
         subject = Subject()

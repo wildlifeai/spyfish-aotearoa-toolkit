@@ -6,7 +6,9 @@ csv_mapping:
   replicate_column: "ReplicateWithinSite"
   file_name_column: "FileName"
   link_to_marine_reserve_column: "LinkToMarineReserve"
+  protection_status_column: "ProtectionStatus"
   site_name_column: "SiteName"
+  selection_reason_column: "SelectionReason"
   is_bad_deployment_column: "IsBadDeployment"
   video_file_link_column: "LinkToVideoFile"
   sampling_start_column: "SamplingStart"
@@ -91,14 +93,15 @@ zooniverse_extraction:
   # TODO: what are these 2 things about
   health_check_count: 6 # Number of health checks to perform
   video_start_threshold_seconds: 120 # Number of seconds to sample from the start of the video to do the start of the video health check
-  clip_cap: 50 # Maximum number of clips to extract per video
+  clip_cap: 180 # Maximum number of clips to extract per video
+  size_limit_mb: 12.0 # Zooniverse upload limit — CRF is calibrated to stay under this
   force_binary_strategy: false # If true, use binary strategy regardless of species count
-  temporal_spacing_seconds: 0 # Minimum seconds between selected clips (0 to disable)
+  sample_all_clips: false # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
   binary_strategy:
-    maxn_clips: 10
-    confusing_clips: 20
-    empty_clips: 5
-    start_clips: 2
+    maxn_clips: 30
+    confusing_clips: 60
+    empty_clips: 10
+    start_clips: 3
     temporal_spacing_seconds: 10
   multiclass_strategy:
     per_species_maxn_clips: 5
@@ -194,7 +197,7 @@ validation_rules:
     values:
       - column: "Latitude"
         rule: "value_range"
-        range: [-46, -36]
+        range: [-48, -36]
         allowed_values: [0]
       - column: "Longitude"
         rule: "value_range"
