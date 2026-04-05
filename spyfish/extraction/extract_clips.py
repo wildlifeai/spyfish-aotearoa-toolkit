@@ -6,6 +6,7 @@ Clip timestamps are absolute video positions (seconds from start of video file).
 """
 
 import logging
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -17,6 +18,28 @@ from spyfish.config.wrapper import config
 from spyfish.utils import generate_clip_filename
 
 
+def _extract_clip(video_path: str, seek_seconds: float, duration: float, output_path: Path, crf: int):
+    """Extract a single clip at the given CRF. Raises subprocess.CalledProcessError on failure."""
+    if output_path.exists():
+        output_path.unlink()
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-ss", str(seek_seconds),
+            "-i", str(video_path),
+            "-t", str(duration),
+            "-c:v", config.ffmpeg_codec,
+            "-preset", config.ffmpeg_preset,
+            "-crf", str(crf),
+            "-an",
+            str(output_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _probe_crf(
     video_path: str,
     seek_seconds: float,
@@ -25,45 +48,37 @@ def _probe_crf(
     size_limit_mb: float,
     base_crf: int,
 ) -> int:
-    """Extract the first clip to its real path and find the lowest CRF under size_limit_mb.
+    """Extract the first clip at base_crf, then calculate the exact CRF needed if too large.
 
-    Tries base_crf, +6, +12, +18. If a CRF produces a clip that's too large, the file
-    is deleted and re-extracted at the next CRF. The winning clip stays on disk — the
-    main loop's exists() check skips it so it's never extracted twice.
+    Uses the log₂ relationship between CRF and file size (each +6 CRF ≈ halves size) to
+    compute the target CRF in one step rather than trial-and-error. At most two ffmpeg calls.
+    The winning clip stays on disk — the main loop's exists() check skips it.
     """
-    for crf in range(base_crf, base_crf + 19, 6):
-        if output_path.exists():
-            output_path.unlink()
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-ss", str(seek_seconds),
-                    "-i", str(video_path),
-                    "-t", str(duration),
-                    "-c:v", config.ffmpeg_codec,
-                    "-preset", config.ffmpeg_preset,
-                    "-crf", str(crf),
-                    "-an",
-                    str(output_path),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+    _extract_clip(video_path, seek_seconds, duration, output_path, base_crf)
+    size_mb = output_path.stat().st_size / (1 << 20)
+    logging.info(f"CRF probe: CRF {base_crf} → {size_mb:.1f} MB")
+
+    if size_mb < size_limit_mb:
+        return base_crf
+
+    # Calculate required CRF: each +6 halves the size → delta = 6 * log₂(size / limit)
+    # math.ceil ensures we land under the limit; +1 adds a small safety margin
+    target_crf = math.ceil(base_crf + 6 * math.log2(size_mb / size_limit_mb)) + 1
+    logging.info(f"CRF probe: {size_mb:.1f} MB over limit — recalculating to CRF {target_crf}")
+
+    try:
+        _extract_clip(video_path, seek_seconds, duration, output_path, target_crf)
+        final_size_mb = output_path.stat().st_size / (1 << 20)
+        logging.info(f"CRF probe: CRF {target_crf} → {final_size_mb:.1f} MB")
+        if final_size_mb >= size_limit_mb:
+            logging.warning(
+                f"CRF probe: still {final_size_mb:.1f} MB at CRF {target_crf} "
+                "(log₂ estimate was approximate) — upload may be rejected by Zooniverse."
             )
-            size_mb = output_path.stat().st_size / (1 << 20)
-            logging.info(f"CRF probe: CRF {crf} → {size_mb:.1f} MB")
-        except subprocess.CalledProcessError:
-            size_mb = float("inf")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"CRF probe: ffmpeg failed at CRF {target_crf}: {e}")
 
-        if size_mb < size_limit_mb:
-            return crf
-
-    logging.warning(
-        f"CRF probe: could not get clip under {size_limit_mb} MB at CRF {base_crf + 18}. "
-        "Proceeding anyway — upload may be rejected by Zooniverse."
-    )
-    return base_crf + 18
+    return target_crf
 
 
 def extract_clips_from_selections(
