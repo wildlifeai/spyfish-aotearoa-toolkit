@@ -48,10 +48,22 @@ class ZooniverseConfig(BaseConfig):
         return int(get_required(self.extraction, "clip_cap", "zooniverse_extraction"))
 
     @property
+    def size_limit_mb(self) -> float:
+        return float(get_required(self.extraction, "size_limit_mb", "zooniverse_extraction"))
+
+    @property
     def force_binary_strategy(self) -> bool:
         return bool(
             get_required(
                 self.extraction, "force_binary_strategy", "zooniverse_extraction"
+            )
+        )
+
+    @property
+    def sample_all_clips(self) -> bool:
+        return bool(
+            get_required(
+                self.extraction, "sample_all_clips", "zooniverse_extraction"
             )
         )
 

@@ -17,6 +17,55 @@ from spyfish.config.wrapper import config
 from spyfish.utils import generate_clip_filename
 
 
+def _probe_crf(
+    video_path: str,
+    seek_seconds: float,
+    duration: float,
+    output_path: Path,
+    size_limit_mb: float,
+    base_crf: int,
+) -> int:
+    """Extract the first clip to its real path and find the lowest CRF under size_limit_mb.
+
+    Tries base_crf, +6, +12, +18. If a CRF produces a clip that's too large, the file
+    is deleted and re-extracted at the next CRF. The winning clip stays on disk — the
+    main loop's exists() check skips it so it's never extracted twice.
+    """
+    for crf in range(base_crf, base_crf + 19, 6):
+        if output_path.exists():
+            output_path.unlink()
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", str(seek_seconds),
+                    "-i", str(video_path),
+                    "-t", str(duration),
+                    "-c:v", config.ffmpeg_codec,
+                    "-preset", config.ffmpeg_preset,
+                    "-crf", str(crf),
+                    "-an",
+                    str(output_path),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            size_mb = output_path.stat().st_size / (1 << 20)
+            logging.info(f"CRF probe: CRF {crf} → {size_mb:.1f} MB")
+        except subprocess.CalledProcessError:
+            size_mb = float("inf")
+
+        if size_mb < size_limit_mb:
+            return crf
+
+    logging.warning(
+        f"CRF probe: could not get clip under {size_limit_mb} MB at CRF {base_crf + 18}. "
+        "Proceeding anyway — upload may be rejected by Zooniverse."
+    )
+    return base_crf + 18
+
+
 def extract_clips_from_selections(
     selections_csv_path: str,
     video_path: str,
@@ -50,6 +99,40 @@ def extract_clips_from_selections(
 
     output_dir = str(config.get_clips_dir(drop_id))
     os.makedirs(output_dir, exist_ok=True)
+
+    # Calibrate CRF using the first clip written to its real output path.
+    # The loop's exists() check will skip it — extracted exactly once, no waste.
+    # On re-runs, if the first clip already exists and is under the limit, skip the probe entirely.
+    first = df.iloc[0]
+    probe_sampling_start = float(first.get(config.csv_sampling_start_column, 0))
+    probe_start = float(first[config.csv_clip_start_column])
+    probe_end = (
+        float(first[config.csv_clip_end_column])
+        if config.csv_clip_end_column in first
+        else probe_start + config.clip_length
+    )
+    probe_duration = probe_end - probe_start
+    probe_seek = probe_sampling_start + probe_start
+    probe_path = Path(output_dir) / generate_clip_filename(drop_id, probe_duration, probe_seek)
+
+    base_crf = int(config.ffmpeg_crf)
+    if probe_path.exists() and probe_path.stat().st_size / (1 << 20) < config.size_limit_mb:
+        logging.info("CRF probe: first clip already exists and is under limit — skipping probe.")
+        effective_crf = base_crf
+    else:
+        effective_crf = _probe_crf(
+            video_path=video_path,
+            seek_seconds=probe_seek,
+            duration=probe_duration,
+            output_path=probe_path,
+            size_limit_mb=config.size_limit_mb,
+            base_crf=base_crf,
+        )
+    if effective_crf != base_crf:
+        logging.info(
+            f"Using CRF {effective_crf} (up from {base_crf}) to stay under "
+            f"{config.size_limit_mb} MB per clip."
+        )
 
     clip_paths: List[Optional[str]] = []
     for idx, row in df.iterrows():
@@ -87,7 +170,7 @@ def extract_clips_from_selections(
             "-preset",
             config.ffmpeg_preset,
             "-crf",
-            config.ffmpeg_crf,
+            str(effective_crf),
             "-an",  # remove audio — standard for processed clips
             str(out_path),
         ]
