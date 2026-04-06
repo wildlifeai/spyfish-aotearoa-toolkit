@@ -76,6 +76,14 @@ class ZooniverseConfig(BaseConfig):
         )
 
     @property
+    def zooniverse_min_votes(self) -> int:
+        return int(get_required(self.extraction, "min_votes", "zooniverse_extraction"))
+
+    @property
+    def zooniverse_max_frames_per_run(self) -> int:
+        return int(get_required(self.extraction, "max_frames_per_run", "zooniverse_extraction"))
+
+    @property
     def binary_strategy(self) -> dict:
         return get_required(self.extraction, "binary_strategy", "zooniverse_extraction")
 

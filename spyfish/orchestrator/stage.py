@@ -22,7 +22,7 @@ import argparse
 import logging
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from spyfish.database.manager import DatabaseManager
 from spyfish.log_config import log_header
@@ -57,7 +57,7 @@ class DropStage:
 
     flag: str
     description: str
-    fn: Callable[[str], str]
+    fn: Callable[[str], Optional[str]]
     input_statuses: list[str] | Callable[[argparse.Namespace, bool], list[str]]
     run_in_all: bool = True
     queue_status: str | None = None
@@ -156,9 +156,11 @@ class StageRunner:
                     self.db.advance_status(drop_id, stage.queue_status)
                     logging.info(f"  → {drop_id}: queued as {stage.queue_status}")
                 next_status = stage.fn(drop_id)
-                self.db.advance_status(drop_id, next_status)
-                logging.info(f"  → {drop_id}: advanced to {next_status}")
+                if next_status is None:
+                    logging.info(f"  → {drop_id}: not ready, leaving status unchanged")
+                else:
+                    self.db.advance_status(drop_id, next_status)
+                    logging.info(f"  → {drop_id}: advanced to {next_status}")
             except Exception as e:
                 logging.error(f"{stage.flag} failed for {drop_id}: {e}")
                 logging.error(traceback.format_exc())
-                raise
