@@ -22,7 +22,7 @@ def _get_site_reserve_meta(site_id: str) -> dict:
         logging.warning(f"No site found for SiteID '{site_id}' in DB — reserve metadata omitted. Run ingest first.")
         return {}
     return {
-        "!LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
+        "LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
         "ProtectionStatus": site.get(config.protection_status_column, ""),
     }
 
@@ -48,7 +48,7 @@ def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: st
     """Common Zooniverse subject metadata shared between clips and frames uploads."""
     meta = {
         "#DropID": row.get(config.drop_id_column, drop_id),
-        "!DropID": drop_id,
+        "DropID": drop_id,
         "#VideoFilename": video_filename,
         "#siteName": site_id,
         "#SelectionReason": row.get(config.selection_reason_column, ""),
@@ -95,6 +95,7 @@ def check_clip_sizes(clips_df: pd.DataFrame) -> pd.DataFrame:
 def upload_clips_to_zooniverse(
     selections_df: pd.DataFrame,
     subject_set_name: str | None = None,
+    test_upload: bool = False,
 ) -> None:
     """
     Uploads extracted clips to Zooniverse as a new subject set.
@@ -134,6 +135,10 @@ def upload_clips_to_zooniverse(
     if uploadable.empty:
         logging.error("No clips available to upload (ClipPath is empty for all rows).")
         return
+
+    if test_upload:
+        uploadable = uploadable.iloc[:1]
+        logging.info("test_upload=True — limiting to 1 subject.")
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
@@ -179,14 +184,12 @@ def upload_clips_to_zooniverse(
             logging.info(f"  Already uploaded, skipping: {clip_path.name}")
             continue
 
-        start_sec = float(row[config.csv_clip_start_column])
-        end_sec = float(row[config.csv_clip_end_column])
+        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
+        upl_seconds = sampling_start + float(row[config.csv_clip_start_column])
 
         meta = {
             **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
-            "!upl_seconds": int(start_sec),  # visible in Talk — clip start offset in source video
-            "#StartTime": seconds_to_time(start_sec),
-            "#EndTime": seconds_to_time(end_sec),
+            "UplSeconds": int(upl_seconds),
         }
 
         subject = Subject()
@@ -204,6 +207,7 @@ def upload_clips_to_zooniverse(
 def upload_frames_to_zooniverse(
     frames_df: pd.DataFrame,
     subject_set_name: str | None = None,
+    test_upload: bool = False,
 ) -> None:
     """
     Uploads extracted frames to Zooniverse as a new subject set.
@@ -235,6 +239,10 @@ def upload_frames_to_zooniverse(
             "No frames available to upload (FramePath is empty for all rows)."
         )
         return
+
+    if test_upload:
+        uploadable = uploadable.iloc[:1]
+        logging.info("test_upload=True — limiting to 1 subject.")
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
@@ -274,12 +282,12 @@ def upload_frames_to_zooniverse(
         if frame_path.name in already_uploaded:
             logging.info(f"  Already uploaded, skipping: {frame_path.name}")
             continue
-        time_of_max = float(row[config.csv_clip_max_time_column])
+        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
+        upl_seconds = sampling_start + float(row[config.csv_clip_max_time_column])
 
         meta = {
             **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
-            "!upl_seconds": int(time_of_max),
-            "#TimeOfMaxnMs": seconds_to_time(time_of_max),
+            "UplSeconds": upl_seconds,
         }
 
         subject = Subject()
