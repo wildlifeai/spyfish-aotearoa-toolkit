@@ -47,7 +47,6 @@ def _get_uploaded_filenames(subject_set) -> set:
 def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: str, site_reserve_meta: dict) -> dict:
     """Common Zooniverse subject metadata shared between clips and frames uploads."""
     meta = {
-        "#DropID": row.get(config.drop_id_column, drop_id),
         "DropID": drop_id,
         "#VideoFilename": video_filename,
         "#siteName": site_id,
