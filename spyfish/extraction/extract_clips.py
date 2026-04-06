@@ -128,8 +128,9 @@ def extract_clips_from_selections(
     # This gives a conservative (worst-case) CRF for the whole batch.
     # The loop's exists() check will skip it — extracted exactly once, no waste.
     # On re-runs, if the probe clip already exists and is under the limit, skip entirely.
-    if config.csv_max_interval_column in df.columns:
-        probe_row = df.loc[df[config.csv_max_interval_column].idxmax()]
+    col = config.csv_max_interval_column
+    if col in df.columns and df[col].notna().any():
+        probe_row = df.loc[df[col].idxmax()]
     else:
         probe_row = df.iloc[0]
     first = probe_row
