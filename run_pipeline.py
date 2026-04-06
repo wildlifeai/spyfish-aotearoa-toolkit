@@ -116,7 +116,7 @@ def _run_steps2_and_3_ml() -> None:
         )
 
 
-def _step_zooniverse_sync_drop(drop_id: str) -> str:
+def _step_zooniverse_sync_drop(drop_id: str) -> str | None:
     """Zooniverse volunteer annotation sync-back.
 
     Checks whether volunteer classification is complete for the subject set
@@ -128,17 +128,16 @@ def _step_zooniverse_sync_drop(drop_id: str) -> str:
         or Caesar reduction pipeline completion, or manual sign-off flag).
       - On completion: download classification export, parse volunteer
         annotations, store them for downstream use.
-      - Until done: leave status as AWAITING_CITSCI_FRAMES and return early
-        (do not advance).
+      - Until done: return None so the runner leaves the drop at
+        AWAITING_CITSCI_FRAMES and tries again on the next pipeline run.
 
-    For now this is a no-op placeholder that immediately advances to
-    CITSCI_COMPLETE so the rest of the pipeline (Biigle upload) can proceed.
+    Returns None (not ready) until the Zooniverse API check is implemented.
     """
-    logging.warning(
-        f"zooniverse-sync is a placeholder — no Zooniverse API check performed for {drop_id}. "
-        "Advancing to CITSCI_COMPLETE without verifying volunteer annotation completion."
+    logging.info(
+        f"zooniverse-sync: Zooniverse API check not yet implemented for {drop_id}. "
+        "Leaving at AWAITING_CITSCI_FRAMES until volunteer annotations are confirmed complete."
     )
-    return PipelineStatus.CITSCI_COMPLETE
+    return None
 
 
 def _run_step7_biigle_sync() -> None:
@@ -159,14 +158,19 @@ def _step4_process_drop(drop_id: str) -> str:
     """Step 4: Zooniverse clip selection + extraction."""
     paths = _get_common_paths(drop_id)
 
-    selections_df = process_zooniverse_clips(
-        paths["maxn_csv"], paths["selections_csv"], drop_id, config
-    )
-    if selections_df is None or selections_df.empty:
-        logging.info(
-            f"No high-confidence clips for {drop_id}. Advancing to CITSCI_CLIPS_COMPLETE."
+    try:
+        selections_df = process_zooniverse_clips(
+            paths["maxn_csv"], paths["selections_csv"], drop_id, config
         )
-        return PipelineStatus.CITSCI_CLIPS_COMPLETE
+    except FileNotFoundError as e:
+        logging.error(f"MaxN CSV missing for {drop_id}, cannot select clips: {e}")
+        return None
+
+    if selections_df.empty:
+        logging.error(
+            f"No clips selected for {drop_id} — sampling window may be too short for clip length."
+        )
+        return None
 
     clips_df = extract_clips_from_selections(
         selections_csv_path=paths["selections_csv"],
@@ -183,10 +187,10 @@ def _step5_process_drop(drop_id: str) -> str:
     paths = _get_common_paths(drop_id)
 
     if not Path(paths["selections_csv"]).exists():
-        logging.warning(
-            f"Missing {paths['selections_csv']} for {drop_id}. Advancing to CITSCI_COMPLETE."
+        logging.error(
+            f"Missing selections CSV for {drop_id} — step 4 should have written it."
         )
-        return PipelineStatus.CITSCI_COMPLETE
+        return None
 
     frames_df = extract_frames_from_selections(
         selections_csv_path=paths["selections_csv"],
@@ -210,15 +214,14 @@ def _step6_process_drop(drop_id: str) -> str:
             logging.error(
                 f"Missing MaxN CSV at {maxn_path} for {drop_id}. Cannot generate frame selections."
             )
-            return PipelineStatus.AWAITING_EXPERT_REVIEW
+            return None
 
         maxn_df = pd.read_csv(maxn_path)
         if maxn_df.empty:
-            logging.warning(
-                f"Empty MaxN CSV for {drop_id} — no detections, no frames to upload to Biigle. "
-                "Advancing to AWAITING_EXPERT_REVIEW."
+            logging.error(
+                f"Empty MaxN CSV for {drop_id} — expected frames from strategy but none available."
             )
-            return PipelineStatus.AWAITING_EXPERT_REVIEW
+            return None
 
         maxn_df = maxn_df.rename(
             columns={config.csv_maxn_time_ms_column: config.csv_clip_max_time_column}

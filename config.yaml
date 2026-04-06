@@ -97,6 +97,8 @@ zooniverse_extraction:
   size_limit_mb: 12.0 # Zooniverse upload limit — CRF is calibrated to stay under this
   force_binary_strategy: false # If true, use binary strategy regardless of species count
   sample_all_clips: false # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
+  min_votes: 3            # Min classifiers agreeing on a species to include in Zooniverse MaxN CSV
+  max_frames_per_run: 3   # Max frames extracted per run of identical MaxN count
   binary_strategy:
     maxn_clips: 30
     confusing_clips: 60
@@ -176,6 +178,7 @@ validation_rules:
     file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID","SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
+    formats: ["DropID"]
     info_columns: ["SurveyID", "SiteID"]
     foreign_keys:
       surveys: "SurveyID"
