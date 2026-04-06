@@ -22,7 +22,7 @@ def _get_site_reserve_meta(site_id: str) -> dict:
         logging.warning(f"No site found for SiteID '{site_id}' in DB — reserve metadata omitted. Run ingest first.")
         return {}
     return {
-        "!LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
+        "LinkToMarineReserve": site.get(config.link_to_marine_reserve_column, ""),
         "ProtectionStatus": site.get(config.protection_status_column, ""),
     }
 
@@ -48,7 +48,7 @@ def _build_base_subject_meta(row, drop_id: str, video_filename: str, site_id: st
     """Common Zooniverse subject metadata shared between clips and frames uploads."""
     meta = {
         "#DropID": row.get(config.drop_id_column, drop_id),
-        "!DropID": drop_id,
+        "DropID": drop_id,
         "#VideoFilename": video_filename,
         "#siteName": site_id,
         "#SelectionReason": row.get(config.selection_reason_column, ""),
@@ -184,7 +184,7 @@ def upload_clips_to_zooniverse(
 
         meta = {
             **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
-            "!upl_seconds": int(start_sec),  # visible in Talk — clip start offset in source video
+            "upl_seconds": int(start_sec),
             "#StartTime": seconds_to_time(start_sec),
             "#EndTime": seconds_to_time(end_sec),
         }
@@ -278,7 +278,7 @@ def upload_frames_to_zooniverse(
 
         meta = {
             **_build_base_subject_meta(row, drop_id, video_filename, site_id, site_reserve_meta),
-            "!upl_seconds": int(time_of_max),
+            "upl_seconds": int(time_of_max),
             "#TimeOfMaxnMs": seconds_to_time(time_of_max),
         }
 
