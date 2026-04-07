@@ -47,10 +47,12 @@ def upload_frames_to_s3(
     s3 = S3Handler()
     uploaded = []
 
-    frame_paths = frames_df["FramePath"].dropna().tolist()
+    frame_paths = list(dict.fromkeys(frames_df["FramePath"].dropna().tolist()))
     if not frame_paths:
         logging.warning("No frame paths to upload (all extractions may have failed).")
         return []
+
+    existing_keys = s3.get_file_paths_set_from_s3(prefix=s3_frames_prefix)
 
     skipped = 0
     for local_path in frame_paths:
@@ -60,7 +62,7 @@ def upload_frames_to_s3(
             continue
 
         s3_key = s3_frames_prefix.rstrip("/") + "/" + p.name
-        if s3.get_object_last_modified(s3_key) is not None:
+        if s3_key in existing_keys:
             logging.debug(f"  Already on S3, skipping: {p.name}")
             uploaded.append(p.name)
             skipped += 1
