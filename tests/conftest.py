@@ -83,7 +83,6 @@ csv_mapping:
 
 paths:
   base_dir: "process_files"
-  bucket_name: "marine-buv-test"
   orchestration:
     pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
     test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
@@ -446,6 +445,7 @@ def pipeline_env(tmp_path, monkeypatch):
     # the on-disk test file rather than the production config.yaml.
     monkeypatch.setattr(config, "_project_root", tmp_path)
     monkeypatch.setattr(config, "_yaml_config", test_yaml)
+    monkeypatch.setenv("S3_BUCKET", "marine-buv-test")
 
     # ── 3. Create the expected folder tree ────────────────────────────────
     (tmp_path / "media").mkdir()

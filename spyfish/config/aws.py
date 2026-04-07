@@ -16,5 +16,12 @@ class AWSConfig(BaseConfig):
     def region(self):
         return os.getenv("AWS_REGION", "eu-central-1")
 
+    @property
+    def s3_bucket(self) -> str:
+        bucket = os.getenv("S3_BUCKET")
+        if not bucket:
+            raise ValueError("S3_BUCKET environment variable is not set.")
+        return bucket
+
 
 aws_config = AWSConfig()

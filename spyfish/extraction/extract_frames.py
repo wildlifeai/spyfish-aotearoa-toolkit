@@ -290,17 +290,14 @@ def extract_frames_from_selections(
                 f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}"
             )
             frame_paths.append(str(out_path))
-            continue
-
-        logging.info(
-            f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
-        )
-        success = extract_frame(
-            video_path, seek_seconds, out_path, frame_index=frame_index
-        )
-        frame_paths.append(str(out_path) if success else None)
-
-        img_w, img_h = vid_w, vid_h
+        else:
+            logging.info(
+                f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
+            )
+            success = extract_frame(
+                video_path, seek_seconds, out_path, frame_index=frame_index
+            )
+            frame_paths.append(str(out_path) if success else None)
 
         frame_records.append(
             {
@@ -309,8 +306,8 @@ def extract_frames_from_selections(
                 "time_of_max": seek_seconds,
                 "drop_id": drop_id,
                 "selection_reason": row.get("SelectionReason", ""),
-                "img_w": img_w,
-                "img_h": img_h,
+                "img_w": vid_w,
+                "img_h": vid_h,
             }
         )
 
