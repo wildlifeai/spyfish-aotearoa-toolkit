@@ -202,18 +202,18 @@ def _step5_process_drop(drop_id: str) -> str:
 def _step6_process_drop(drop_id: str) -> str:
     """Step 6: Biigle frame extraction + volume upload."""
     paths = _get_common_paths(drop_id)
-    selections_path = Path(paths["selections_csv"])
+    # Biigle uses its own selections CSV (multiplier applied) separate from the
+    # Zooniverse one so step 4 and step 6 don't overwrite each other's output.
+    biigle_selections_path = config.get_biigle_selections_csv_path(drop_id)
 
-    if not selections_path.exists():
-        # Biigle-direct path: generate frame selections from MaxN CSV via strategy
-        try:
-            select_frames(paths["maxn_csv"], str(selections_path), drop_id)
-        except (FileNotFoundError, ValueError) as e:
-            logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
-            return None
+    try:
+        select_frames(paths["maxn_csv"], str(biigle_selections_path), drop_id)
+    except (FileNotFoundError, ValueError) as e:
+        logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
+        return None
 
     frames_df = extract_frames_from_selections(
-        selections_csv_path=paths["selections_csv"],
+        selections_csv_path=str(biigle_selections_path),
         video_path=paths["video_path"],
         raw_csv_path=paths["raw_csv"],
     )
