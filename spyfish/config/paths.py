@@ -457,6 +457,12 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}_frames_selection.csv"
         )
 
+    def get_biigle_selections_csv_path(self, drop_id: str) -> Path:
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_biigle_frames_selection.csv"
+        )
+
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
