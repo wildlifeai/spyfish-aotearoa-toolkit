@@ -75,10 +75,8 @@ def run_ingestion():
     db = DatabaseManager()
     storage = S3Handler(bucket=config.s3_bucket)
 
-    # 1. Fetch File List & Deployment CSV (One Journey, One S3 Scan)
-    logging.info(
-        "Step 1/3: Fetching known media files and master deployments list from S3..."
-    )
+    # Fetch File List & Deployment CSV (One Journey, One S3 Scan)
+    logging.info("Fetching known media files and master deployments list from S3...")
     known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
 
     csv_path = config.s3_sharepoint_deployment_csv
@@ -122,7 +120,7 @@ def run_ingestion():
     db.clear_validation_errors()
     db.add_validation_errors(structured_errors)
 
-    # 5. Load expert annotations and count per DropID (always from S3)
+    # Load expert annotations and count per DropID (always from S3)
     logging.debug("Fetching expert annotations from S3...")
     expert_counts = {}
     try:

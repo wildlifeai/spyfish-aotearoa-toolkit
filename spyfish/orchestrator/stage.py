@@ -24,6 +24,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from spyfish.config.base import PipelineStatus
 from spyfish.database.manager import DatabaseManager
 from spyfish.log_config import log_header
 
@@ -167,3 +168,4 @@ class StageRunner:
             except Exception as e:
                 logging.error(f"{stage.flag} failed for {drop_id}: {e}")
                 logging.error(traceback.format_exc())
+                self.db.update_status(drop_id, PipelineStatus.ERROR)

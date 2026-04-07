@@ -32,6 +32,16 @@ def _select_frames_with_strategy(
     count and mean confidence. Selections are deduplicated by
     temporal_spacing_seconds, allowing multiple frames within the same 10s
     clip window.
+
+    Parallel implementation: select_clips.select_clips_with_strategy() applies the
+    same MaxN/confusing/start strategy to clip buckets rather than individual frames.
+    Key intentional divergences:
+      - This function deduplicates by float spacing; clips use 10s bucket keys.
+      - No "empty" bucket here — raw CSVs only contain detected frames, so empty
+        intervals cannot be sampled at this stage.
+      - Cap/priority logic is simpler (no full-video health-check weighting).
+    If you change the core strategy logic here, check whether select_clips.py needs
+    the same update.
     """
     columns = [
         config.drop_id_column,
@@ -207,15 +217,17 @@ def select_frames(
         raise ValueError(f"No detections above confidence threshold for {drop_id}.")
 
     frame_df = (
-        raw_df.groupby("frame")
+        raw_df.groupby(["frame", "class"])
         .agg(
             **{
                 config.csv_time_seconds_column: ("time_seconds", "first"),
                 config.csv_max_interval_column: ("confidence", "count"),
                 config.csv_confidence_agreement_column: ("confidence", "mean"),
-                config.csv_scientific_name_column: ("class", "first"),
             }
         )
+        .reset_index()
+        .rename(columns={"class": config.csv_scientific_name_column})
+        .drop(columns=["frame"])
         .reset_index(drop=True)
     )
     frame_df[config.csv_confidence_agreement_column] = frame_df[

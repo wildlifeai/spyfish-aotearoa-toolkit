@@ -46,7 +46,7 @@ def _select_all_clips(
     return pd.DataFrame(rows)
 
 
-def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, config):
+def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
     """
     Selects n-second intervals from the MaxN CSV to send to Zooniverse.
     Uses the generic selection strategy with Zooniverse-specific overrides.
@@ -98,9 +98,11 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
         selector = ClipSelector(drop_id, sampling_start, config.clip_length)
         duration = sampling_end - sampling_start
         if duration > 0:
+            # Center each clip in its band (i + 0.5) so we get exactly health_check_count
+            # clips and none lands at sampling_end (which would produce a truncated ffmpeg clip).
             interval_step = duration / config.health_check_count
-            for i in range(1, config.health_check_count):
-                t = sampling_start + (interval_step * i)
+            for i in range(config.health_check_count):
+                t = sampling_start + interval_step * (i + 0.5)
                 selector.add_interval(
                     {
                         config.csv_time_seconds_column: t,
@@ -150,7 +152,7 @@ def main(drop_id):
     input_maxn = str(config.get_maxn_csv_path(drop_id, model_name))
     output_selections = str(config.get_selections_csv_path(drop_id))
 
-    process_zooniverse_clips(input_maxn, output_selections, drop_id, config)
+    process_zooniverse_clips(input_maxn, output_selections, drop_id)
 
 
 if __name__ == "__main__":

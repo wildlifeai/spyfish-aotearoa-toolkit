@@ -95,6 +95,16 @@ def select_clips_with_strategy(
 ) -> pd.DataFrame:
     """
     Core logic for selecting valuable clips from a detection DataFrame.
+
+    Parallel implementation: select_frames._select_frames_with_strategy() applies the
+    same MaxN/confusing/start strategy to individual frames rather than clip buckets.
+    Key intentional divergences:
+      - This function deduplicates by clip bucket (10s window); frames use float spacing.
+      - This function includes an "empty" bucket (false-negative check); frames do not
+        (raw CSV only contains detected frames, so "empty" is not applicable).
+      - Cap/priority logic differs to reflect clip vs frame use cases.
+    If you change the core strategy logic here, check whether select_frames.py needs
+    the same update.
     """
     selector = ClipSelector(drop_id, sampling_start, clip_length)
 
