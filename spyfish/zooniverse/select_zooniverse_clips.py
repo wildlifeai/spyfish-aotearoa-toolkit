@@ -33,8 +33,8 @@ def _select_all_clips(
         {
             config.drop_id_column: drop_id,
             config.csv_sampling_start_column: sampling_start,
-            config.csv_clip_start_column: float(s),
-            config.csv_clip_end_column: float(s) + clip_length,
+            config.csv_clip_start_column: float(s) - sampling_start,
+            config.csv_clip_end_column: float(s) - sampling_start + clip_length,
             config.csv_clip_max_time_column: float(s),
             config.csv_scientific_name_column: "All",
             "SelectionReason": "Full Video Sample",
