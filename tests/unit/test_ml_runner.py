@@ -26,4 +26,4 @@ def test_get_inference_targets(mock_s3_class, mock_db_class):
     targets = runner.get_inference_targets()
 
     assert len(targets) == 1
-    assert targets[0]["DropID"] == "KSF_20240124_BUV_KSF_085_01"
+    assert targets[0]["drop_id"] == "KSF_20240124_BUV_KSF_085_01"

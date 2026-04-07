@@ -19,6 +19,7 @@ import pandas as pd
 from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
+from spyfish.storage.s3_handler import S3Handler
 
 # ── Step 1: S3 upload ────────────────────────────────────────────────────────
 
@@ -39,11 +40,6 @@ def upload_frames_to_s3(
     Returns:
         List of uploaded filenames (basename only, as used in the Biigle volume file list).
     """
-    try:
-        from spyfish.storage.s3_handler import S3Handler
-    except ImportError:
-        raise ImportError("spyfish.storage.s3_handler is required for S3 uploads.")
-
     s3 = S3Handler()
     uploaded = []
 
@@ -157,25 +153,24 @@ def upload_coco_annotations_to_biigle(
 
     handler = BiigleHandler()
 
-    # 1. Fetch images from the new volume to map filenames to Biigle image IDs
+    # Fetch images from the new volume to map filenames to Biigle image IDs
     volume_images = handler.get_volume_images(volume_id)
-    # Map from filename to Biigle image ID
     filename_to_biigle_id = {img["filename"]: img["id"] for img in volume_images}
 
-    # 2. Map COCO image IDs to actual filenames
+    # Map COCO image IDs to actual filenames
     coco_img_id_to_filename = {
         img["id"]: img["file_name"] for img in coco_data.get("images", [])
     }
 
-    # 3. Map COCO category IDs to species names
+    # Map COCO category IDs to species names
     coco_cat_id_to_name = {
         cat["id"]: cat["name"] for cat in coco_data.get("categories", [])
     }
 
-    # 4. Load the user's mapping from config.yaml (Scientific Name -> Biigle Label ID)
+    # Load species → Biigle label ID mapping from config.yaml
     label_mapping = config.label_mapping or {}
 
-    # 5. Build the Biigle bulk payload
+    # Build the Biigle bulk payload
     biigle_annotations = []
 
     for ann in coco_data["annotations"]:
@@ -218,7 +213,6 @@ def upload_coco_annotations_to_biigle(
         logging.warning("No annotations resolved to valid Biigle images.")
         return {}
 
-    # 4. Upload
     result = handler.upload_image_annotations(volume_id, biigle_annotations)
     return result
 

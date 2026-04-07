@@ -186,8 +186,8 @@ class DatabaseManager:
                     error_message=excluded.error_message,
                     sampling_start=excluded.sampling_start,
                     sampling_end=excluded.sampling_end,
-                    ml_annotations=excluded.ml_annotations,
-                    citsci_annotations=excluded.citsci_annotations,
+                    -- ml_annotations and citsci_annotations are owned by sync_annotation_counts;
+                    -- ingestion must not overwrite them (ingestion always passes 0 for these).
                     expert_annotations=excluded.expert_annotations,
                     biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id)
             """,
