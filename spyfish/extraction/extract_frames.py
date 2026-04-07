@@ -2,7 +2,7 @@
 Extract frames at MaxN peak times from source videos using ffmpeg.
 
 Reads the selections CSV output from selection strategies and extracts one clean JPEG
-per row at the exact TimeOfMax moment (sampling_start + time_of_maxn_ms).
+per row at the exact TimeOfMax moment (absolute video timestamp in seconds).
 
 Also converts the corresponding YOLO bounding boxes from the raw ML CSV into
 COCO-format JSON alongside the frames — ready for upload (e.g., to Biigle).
@@ -215,7 +215,7 @@ def extract_frames_from_selections(
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
     and produce a COCO JSON with the corresponding YOLO bounding boxes.
 
-    The frame is grabbed at the absolute video timestamp stored in csv_clip_max_time_column.
+    The frame is grabbed at the absolute video timestamp in csv_clip_max_time_column (TimeOfMaxnSeconds).
     This is the exact frame that was the deciding factor in the MaxN calculation.
 
     Unlike draw_frames.py (which draws boxes ON the frame using cv2 for QA),
@@ -274,9 +274,8 @@ def extract_frames_from_selections(
     frame_paths = []
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # TimeOfMaxnMs is relative to SamplingStart — add it to get the absolute video position.
-        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
-        seek_seconds = sampling_start + float(row[config.csv_clip_max_time_column])
+        # TimeOfMaxnMs is an absolute video timestamp — use it directly.
+        seek_seconds = float(row[config.csv_clip_max_time_column])
         frame_index = None
 
         if not raw_df.empty:

@@ -103,7 +103,7 @@ def _run_steps2_and_3_ml() -> None:
         logging.info("No drops available for ML processing.")
         return
 
-    all_drop_ids = [t[config.drop_id_column] for t in targets]
+    all_drop_ids = [t["drop_id"] for t in targets]
     results = runner.run_inference_loop(targets)
     runner.finalize_batch_results(results, all_drop_ids=all_drop_ids)
 
@@ -158,7 +158,7 @@ def _step4_process_drop(drop_id: str) -> str:
 
     try:
         selections_df = process_zooniverse_clips(
-            paths["maxn_csv"], paths["selections_csv"], drop_id, config
+            paths["maxn_csv"], paths["selections_csv"], drop_id
         )
     except FileNotFoundError as e:
         logging.error(f"MaxN CSV missing for {drop_id}, cannot select clips: {e}")
@@ -207,7 +207,7 @@ def _step6_process_drop(drop_id: str) -> str:
     biigle_selections_path = config.get_biigle_selections_csv_path(drop_id)
 
     try:
-        select_frames(paths["maxn_csv"], str(biigle_selections_path), drop_id)
+        select_frames(paths["raw_csv"], str(biigle_selections_path), drop_id)
     except (FileNotFoundError, ValueError) as e:
         logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
         return None

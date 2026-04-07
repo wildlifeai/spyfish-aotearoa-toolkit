@@ -266,8 +266,7 @@ def upload_frames_to_zooniverse(
         if frame_path.name in already_uploaded:
             logging.info(f"  Already uploaded, skipping: {frame_path.name}")
             continue
-        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
-        upl_seconds = sampling_start + float(row[config.csv_clip_max_time_column])
+        upl_seconds = float(row[config.csv_clip_max_time_column])
 
         meta = {
             **_build_base_subject_meta(

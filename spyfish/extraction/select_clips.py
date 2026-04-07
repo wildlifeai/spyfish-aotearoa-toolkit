@@ -19,18 +19,21 @@ class ClipSelector:
         time_col = config.csv_time_seconds_column
 
         interval_start = row[time_col]
-        clip_start_sec = (interval_start // self.clip_length) * self.clip_length
+        # Bucket to the 10s clip window (absolute), then store RELATIVE to sampling_start.
+        # extract_clips.py and upload.py both do: seek = sampling_start + ClipStartRelative
+        clip_start_abs = (interval_start // self.clip_length) * self.clip_length
+        clip_start_rel = clip_start_abs - self.sampling_start
 
-        if clip_start_sec in self.selected_intervals:
+        if clip_start_rel in self.selected_intervals:
             return False
 
-        self.selected_intervals.add(clip_start_sec)
+        self.selected_intervals.add(clip_start_rel)
         self.selections_rows.append(
             {
                 config.drop_id_column: self.drop_id,
                 config.csv_sampling_start_column: self.sampling_start,
-                config.csv_clip_start_column: clip_start_sec,
-                config.csv_clip_end_column: clip_start_sec + self.clip_length,
+                config.csv_clip_start_column: clip_start_rel,
+                config.csv_clip_end_column: clip_start_rel + self.clip_length,
                 config.csv_clip_max_time_column: row[time_col],
                 config.csv_scientific_name_column: species,
                 "SelectionReason": reason,
@@ -45,10 +48,15 @@ class ClipSelector:
         return True
 
     def check_temporal_spacing(self, candidate_sec, spacing_seconds):
-        """Returns True if the candidate second is far enough from already selected clips."""
+        """Returns True if the candidate second is far enough from already selected clips.
+
+        candidate_sec is absolute; selected_intervals stores relative values — normalise before comparing.
+        """
         if spacing_seconds <= 0:
             return True
-        candidate_clip_start = (candidate_sec // self.clip_length) * self.clip_length
+        candidate_clip_start = (
+            candidate_sec // self.clip_length
+        ) * self.clip_length - self.sampling_start
         for s in self.selected_intervals:
             if abs(candidate_clip_start - s) < spacing_seconds:
                 return False
@@ -95,6 +103,16 @@ def select_clips_with_strategy(
 ) -> pd.DataFrame:
     """
     Core logic for selecting valuable clips from a detection DataFrame.
+
+    Parallel implementation: select_frames._select_frames_with_strategy() applies the
+    same MaxN/confusing/start strategy to individual frames rather than clip buckets.
+    Key intentional divergences:
+      - This function deduplicates by clip bucket (10s window); frames use float spacing.
+      - This function includes an "empty" bucket (false-negative check); frames do not
+        (raw CSV only contains detected frames, so "empty" is not applicable).
+      - Cap/priority logic differs to reflect clip vs frame use cases.
+    If you change the core strategy logic here, check whether select_frames.py needs
+    the same update.
     """
     selector = ClipSelector(drop_id, sampling_start, clip_length)
 

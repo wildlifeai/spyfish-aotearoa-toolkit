@@ -67,14 +67,12 @@ def test_health_check_times_are_relative_to_sampling_start(
         f"{config.drop_id_column},{config.csv_scientific_name_column},"
         f"{config.csv_maxn_time_column},{config.csv_max_interval_column},"
         f"{config.csv_annotated_by_column},{config.csv_interval_annotation_column},"
-        f"{config.csv_confidence_agreement_column},{config.csv_maxn_time_ms_column}\n"
+        f"{config.csv_confidence_agreement_column},{config.csv_maxn_time_seconds_column}\n"
     )
     selections_csv = tmp_path / "selections.csv"
     drop_id = "KSF_20240124_BUV_KSF_085_01"
 
-    result = process_zooniverse_clips(
-        str(maxn_csv), str(selections_csv), drop_id, mock_config
-    )
+    result = process_zooniverse_clips(str(maxn_csv), str(selections_csv), drop_id)
 
     assert not result.empty, "Expected health check clips to be generated"
 
