@@ -328,8 +328,8 @@ class PathsConfig(BaseConfig):
         return self._col("maxn_time_column")
 
     @property
-    def csv_maxn_time_ms_column(self) -> str:
-        return self._col("maxn_time_ms_column")
+    def csv_maxn_time_seconds_column(self) -> str:
+        return self._col("maxn_time_seconds_column")
 
     @property
     def csv_max_interval_column(self) -> str:

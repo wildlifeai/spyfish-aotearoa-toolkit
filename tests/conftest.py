@@ -71,7 +71,7 @@ csv_mapping:
   clip_start_column: "ClipStartRelative"
   clip_end_column: "ClipEndRelative"
   clip_max_time_column: "TimeOfMaxnMs"
-  maxn_time_ms_column: "time_of_maxn_ms"
+  maxn_time_seconds_column: "time_of_maxn_seconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -343,7 +343,7 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.875,  # (0.85 + 0.90) / 2
-                "time_of_maxn_ms": 4.0,
+                "time_of_maxn_seconds": 4.0,
             },
             {
                 "DropID": DROP_NORMAL,
@@ -353,11 +353,11 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.95,  # frame 25 wins tiebreak
-                "time_of_maxn_ms": 10.0,
+                "time_of_maxn_seconds": 10.0,
             },
         ]
     )
-    .sort_values("time_of_maxn_ms")
+    .sort_values("time_of_maxn_seconds")
     .reset_index(drop=True),
 }
 
@@ -372,7 +372,7 @@ _ML_COMPLETE_MAXN_ROWS = [
         "AnnotatedBy": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
-        "time_of_maxn_ms": 5.0,
+        "time_of_maxn_seconds": 5.0,
     },
 ]
 

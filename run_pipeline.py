@@ -207,7 +207,7 @@ def _step6_process_drop(drop_id: str) -> str:
     biigle_selections_path = config.get_biigle_selections_csv_path(drop_id)
 
     try:
-        select_frames(paths["maxn_csv"], str(biigle_selections_path), drop_id)
+        select_frames(paths["raw_csv"], str(biigle_selections_path), drop_id)
     except (FileNotFoundError, ValueError) as e:
         logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
         return None

@@ -2,7 +2,7 @@
 Extract frames at MaxN peak times from source videos using ffmpeg.
 
 Reads the selections CSV output from selection strategies and extracts one clean JPEG
-per row at the exact TimeOfMax moment (sampling_start + time_of_maxn_ms).
+per row at the exact TimeOfMax moment (sampling_start + time_of_maxn_seconds).
 
 Also converts the corresponding YOLO bounding boxes from the raw ML CSV into
 COCO-format JSON alongside the frames — ready for upload (e.g., to Biigle).
