@@ -49,10 +49,6 @@ class PathsConfig(BaseConfig):
         return _require(self.paths, "base_dir", "paths")
 
     @property
-    def s3_bucket(self) -> str:
-        return _require(self.paths, "bucket_name", "paths")
-
-    @property
     def orchestration_paths(self) -> dict:
         return _require(self.paths, "orchestration", "paths")
 
