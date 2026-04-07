@@ -25,11 +25,10 @@ Usage in tests:
         assert env.db.get_deployment(DROP_NORMAL)["status"] == PipelineStatus.READY_FOR_ML
 """
 
-import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -452,9 +451,7 @@ def pipeline_env(tmp_path, monkeypatch):
     (tmp_path / "media").mkdir()
     (tmp_path / "process_files" / "db").mkdir(parents=True)
     for drop_id in [DROP_NORMAL, DROP_STUCK, DROP_ML_COMPLETE]:
-        (tmp_path / "process_files" / "data_quality" / drop_id / "annotations").mkdir(
-            parents=True
-        )
+        config.get_drop_annotations_dir(drop_id).mkdir(parents=True)
 
     # ── 4. Create databases ───────────────────────────────────────────────
     # Paths now resolve inside tmp_path thanks to the monkeypatch above.

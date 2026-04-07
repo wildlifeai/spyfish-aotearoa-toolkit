@@ -146,7 +146,9 @@ def run_ingestion():
         sites_df = storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
         db.upsert_sites(sites_df)
     except Exception as e:
-        logging.warning(f"Failed to load sites CSV from S3: {e}. Site metadata will not be updated in DB.")
+        logging.warning(
+            f"Failed to load sites CSV from S3: {e}. Site metadata will not be updated in DB."
+        )
 
     _sync_deployments_to_db(
         deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
@@ -221,7 +223,11 @@ def _sync_deployments_to_db(
             # Don't advance source-problematic deployments through the pipeline.
             # Preserve existing stage if already in DB, otherwise default to PENDING_ARRIVAL.
             existing_record = existing_deployments.get(drop_id)
-            status = existing_record["status"] if existing_record else PipelineStatus.PENDING_ARRIVAL
+            status = (
+                existing_record["status"]
+                if existing_record
+                else PipelineStatus.PENDING_ARRIVAL
+            )
         else:
             existing_record = existing_deployments.get(drop_id)
             if existing_record and existing_record["status"] not in [
@@ -244,7 +250,9 @@ def _sync_deployments_to_db(
             video_path=video_path,
             is_bad_deployment=is_bad_deployment,
             error_message=(
-                "Found in structural errors" if source_status == SourceStatus.VALIDATION_ERROR else ""
+                "Found in structural errors"
+                if source_status == SourceStatus.VALIDATION_ERROR
+                else ""
             ),
             sampling_start=sampling_start,
             sampling_end=sampling_end,

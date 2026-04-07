@@ -384,9 +384,13 @@ def copy_split_files(
 
     for drop_id in drop_ids:
         # Find all label files that belong to this drop (stems start with drop_id)
-        drop_labels = [p for p in labels_dir.glob("*.txt") if p.stem.startswith(drop_id)]
+        drop_labels = [
+            p for p in labels_dir.glob("*.txt") if p.stem.startswith(drop_id)
+        ]
         if not drop_labels:
-            logging.warning(f"No label files found for {drop_id} in {labels_dir} — skipping.")
+            logging.warning(
+                f"No label files found for {drop_id} in {labels_dir} — skipping."
+            )
             continue
 
         for lbl_path in drop_labels:

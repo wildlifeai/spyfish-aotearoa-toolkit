@@ -30,8 +30,6 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-import pandas as pd
-
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.biigle.upload_frames import upload_frames_to_biigle
 from spyfish.config.base import PipelineStatus
@@ -39,18 +37,17 @@ from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.extract_clips import extract_clips_from_selections
 from spyfish.extraction.extract_frames import extract_frames_from_selections
+from spyfish.extraction.select_frames import select_frames
 from spyfish.log_config import log_header
 from spyfish.ml.process_ml_annotations import run_post_ml
 from spyfish.orchestrator.ingest import check_pending_arrivals, run_ingestion
 from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
 from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.retrain_runner import run_retraining
-from spyfish.extraction.select_frames import select_frames
 from spyfish.orchestrator.stage import DropStage, GlobalStage, StageRunner
 from spyfish.storage.db_sync import sync_pipeline_results
 from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
 from spyfish.zooniverse.upload import (
-    check_clip_sizes,
     upload_clips_to_zooniverse,
     upload_frames_to_zooniverse,
 )
@@ -177,7 +174,6 @@ def _step4_process_drop(drop_id: str) -> str:
         selections_csv_path=paths["selections_csv"],
         video_path=paths["video_path"],
     )
-    clips_df = check_clip_sizes(clips_df)
     logging.info(f"Uploading {len(clips_df)} clips for {drop_id} to Zooniverse.")
     upload_clips_to_zooniverse(clips_df)
     return PipelineStatus.CITSCI_CLIPS_COMPLETE
@@ -211,7 +207,7 @@ def _step6_process_drop(drop_id: str) -> str:
     if not selections_path.exists():
         # Biigle-direct path: generate frame selections from MaxN CSV via strategy
         try:
-            select_frames(paths["maxn_csv"], str(selections_path), drop_id, multiplier=config.frame_multiplier)
+            select_frames(paths["maxn_csv"], str(selections_path), drop_id)
         except (FileNotFoundError, ValueError) as e:
             logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
             return None

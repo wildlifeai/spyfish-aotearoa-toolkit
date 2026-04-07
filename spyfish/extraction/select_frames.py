@@ -2,8 +2,7 @@
 Strategy-based frame selection from a MaxN CSV.
 
 Applies the binary/multiclass export strategy with an optional multiplier
-to scale counts up and tighten temporal spacing for denser coverage.
-Can be used for any downstream platform (Biigle, Zooniverse, etc.).
+to scale counts up and tighten temporal spacing for denser frame coverage.
 """
 
 import logging
@@ -20,7 +19,6 @@ def select_frames(
     maxn_csv_path: str,
     output_selections_path: str,
     drop_id: str,
-    multiplier: float = 1.0,
 ) -> pd.DataFrame:
     """
     Select frames from a MaxN CSV using the export strategy.
@@ -29,13 +27,11 @@ def select_frames(
         maxn_csv_path: Path to the MaxN CSV produced by post-ML processing.
         output_selections_path: Path to write the selections CSV.
         drop_id: Deployment identifier.
-        multiplier: Scale factor — multiplies export counts and divides
-                    temporal_spacing. Use config.frame_multiplier for
-                    Biigle-direct, 1.0 for standard selection.
 
     Returns:
         DataFrame of selected frame moments.
     """
+    multiplier = config.frame_multiplier
     if not Path(maxn_csv_path).exists():
         raise FileNotFoundError(f"MaxN CSV not found: {maxn_csv_path}")
 
@@ -45,8 +41,10 @@ def select_frames(
             f"Empty MaxN CSV for {drop_id} — no detections available for frame selection."
         )
 
-    # Add TimeSeconds column expected by select_clips_with_strategy
-    maxn_df[config.csv_time_seconds_column] = maxn_df[config.csv_maxn_time_ms_column]
+    # Add TimeSeconds column expected by select_clips_with_strategy (convert ms → seconds)
+    maxn_df[config.csv_time_seconds_column] = (
+        maxn_df[config.csv_maxn_time_ms_column] / 1000.0
+    )
 
     # Get sampling_start from DB
     deployment = DatabaseManager().get_deployment(drop_id)
@@ -55,7 +53,9 @@ def select_frames(
     sampling_start = float(deployment["sampling_start"])
 
     if multiplier <= 0:
-        logging.error(f"multiplier is {multiplier} — must be positive. Temporal spacing will not be divided.")
+        logging.error(
+            f"multiplier is {multiplier} — must be positive. Defaulting to 1."
+        )
     safe_multiplier = multiplier if multiplier > 0 else 1
 
     unique_species = maxn_df[config.csv_scientific_name_column].unique()
@@ -64,20 +64,30 @@ def select_frames(
     if is_binary:
         base = config.binary_strategy
         scaled_strategy = {
-            "maxn_export": round(base["maxn_export"] * multiplier),
-            "confusing_export": round(base["confusing_export"] * multiplier),
-            "empty_export": round(base["empty_export"] * multiplier),
-            "start_export": round(base["start_export"] * multiplier),
-            "temporal_spacing_seconds": base["temporal_spacing_seconds"] / safe_multiplier,
+            "maxn_export": round(base["maxn_export"] * safe_multiplier),
+            "confusing_export": round(base["confusing_export"] * safe_multiplier),
+            "empty_export": round(base["empty_export"] * safe_multiplier),
+            "start_export": round(base["start_export"] * safe_multiplier),
+            "temporal_spacing_seconds": base["temporal_spacing_seconds"]
+            / safe_multiplier,
         }
     else:
         base = config.multiclass_strategy
         scaled_strategy = {
-            "per_species_maxn_export": round(base["per_species_maxn_export"] * multiplier),
-            "per_species_confusing_export": round(base["per_species_confusing_export"] * multiplier),
-            "per_video_empty_export": round(base["per_video_empty_export"] * multiplier),
-            "per_video_start_export": round(base["per_video_start_export"] * multiplier),
-            "temporal_spacing_seconds": base["temporal_spacing_seconds"] / safe_multiplier,
+            "per_species_maxn_export": round(
+                base["per_species_maxn_export"] * safe_multiplier
+            ),
+            "per_species_confusing_export": round(
+                base["per_species_confusing_export"] * safe_multiplier
+            ),
+            "per_video_empty_export": round(
+                base["per_video_empty_export"] * safe_multiplier
+            ),
+            "per_video_start_export": round(
+                base["per_video_start_export"] * safe_multiplier
+            ),
+            "temporal_spacing_seconds": base["temporal_spacing_seconds"]
+            / safe_multiplier,
         }
 
     selections_df = select_clips_with_strategy(
@@ -88,7 +98,7 @@ def select_frames(
         strategy_params=scaled_strategy,
         is_multiclass=not is_binary,
         video_start_threshold=config.video_start_threshold,
-        clip_cap=round(config.clip_cap * multiplier),
+        clip_cap=round(config.clip_cap * safe_multiplier),
     )
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)

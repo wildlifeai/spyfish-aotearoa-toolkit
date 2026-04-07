@@ -178,7 +178,6 @@ def run_evaluation_pipeline(
         Dict with evaluation results and promotion decision.
     """
     imgsz = config.training_imgsz
-    local_training_dir = config.local_training_dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Evaluate new model

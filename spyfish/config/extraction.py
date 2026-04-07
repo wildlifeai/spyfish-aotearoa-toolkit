@@ -18,7 +18,9 @@ class ExtractionConfig(BaseConfig):
     @property
     def video_start_threshold(self) -> int:
         return int(
-            get_required(self._extraction, "video_start_threshold_seconds", "extraction")
+            get_required(
+                self._extraction, "video_start_threshold_seconds", "extraction"
+            )
         )
 
     @property

@@ -16,7 +16,6 @@ Import these constants in integration tests that need the canonical drop IDs:
 
 import cv2
 import pandas as pd
-import pytest
 
 from spyfish.config.base import PipelineStatus
 from spyfish.config.wrapper import config

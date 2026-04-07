@@ -67,11 +67,17 @@ class MLRunner:
                     .tolist()
                 )
                 priority_order = {d: i for i, d in enumerate(priority_ids)}
-                df["_priority"] = df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                df["_priority"] = (
+                    df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                )
                 df = df.sort_values("_priority").drop(columns=["_priority"])
-                logging.debug(f"Priority order applied from {targets_csv}: {priority_ids}")
+                logging.debug(
+                    f"Priority order applied from {targets_csv}: {priority_ids}"
+                )
             except Exception as e:
-                logging.warning(f"Could not apply priority ordering from {targets_csv}: {e}")
+                logging.warning(
+                    f"Could not apply priority ordering from {targets_csv}: {e}"
+                )
 
         df = df.head(self.limit)
 
@@ -128,8 +134,6 @@ class MLRunner:
         if df.empty:
             logging.warning("No media was successfully downloaded. Exiting.")
             return []
-
-        df["VideoURL"] = local_filepaths
 
         df["VideoURL"] = local_filepaths
 
