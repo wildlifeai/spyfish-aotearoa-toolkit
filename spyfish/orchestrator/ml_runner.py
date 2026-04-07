@@ -28,9 +28,7 @@ class MLRunner:
         self.limit = get_required(
             config.ml_inference, "limit_processing", "ml_inference"
         )
-        self.frame_skip = get_required(
-            config.ml_inference, "frame_skip", "ml_inference"
-        )
+        self.ml_fps = config.ml_fps
         self.imgsz = int(config.imgsz)
         self.confidence = get_required(
             config.ml_inference, "confidence_threshold", "ml_inference"
@@ -180,7 +178,7 @@ class MLRunner:
                     "sampling_start": row[config.csv_sampling_start_column],
                     "sampling_end": row[config.csv_sampling_end_column],
                     "model_path": self.model,
-                    "frame_skip": self.frame_skip,
+                    "ml_fps": self.ml_fps,
                     "imgsz": self.imgsz,
                     "confidence_threshold": self.confidence,
                     "output_csv": os.path.join(

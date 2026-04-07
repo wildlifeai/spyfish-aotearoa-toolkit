@@ -119,7 +119,7 @@ paths:
 ml_inference:
   limit_processing: 1
   log_interval_frames: 10
-  frame_skip: 15
+  ml_fps: 3
   imgsz: 640
   confidence_threshold: 0.25
   maxn_confidence_threshold: 0.50
@@ -129,25 +129,32 @@ ml_inference:
     interval_seconds: 10
     annotated_by_prefix: "ml"
 
-zooniverse_extraction:
-  project_id: 99999
-  health_check_count: 6
-  video_start_threshold_seconds: 120
+extraction:
+  clip_length: 10.0
   clip_cap: 50
+  video_start_threshold_seconds: 120
   force_binary_strategy: false
-  temporal_spacing_seconds: 0
+  sample_all_clips: false
+  biigle_multiplier: 2
   binary_strategy:
-    maxn_clips: 10
-    confusing_clips: 20
-    empty_clips: 5
-    start_clips: 2
+    maxn_export: 10
+    confusing_export: 20
+    empty_export: 5
+    start_export: 2
     temporal_spacing_seconds: 10
   multiclass_strategy:
-    per_species_maxn_clips: 5
-    per_species_confusing_clips: 10
-    per_video_empty_clips: 3
-    per_video_start_clips: 2
+    per_species_maxn_export: 5
+    per_species_confusing_export: 10
+    per_video_empty_export: 3
+    per_video_start_export: 2
     temporal_spacing_seconds: 10
+
+zooniverse:
+  project_id: 99999
+  size_limit_mb: 12.0
+  health_check_count: 6
+  min_votes: 3
+  max_frames_per_run: 3
 
 orchestrator:
   is_test_run: true

@@ -45,6 +45,7 @@ from spyfish.orchestrator.ingest import check_pending_arrivals, run_ingestion
 from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
 from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.retrain_runner import run_retraining
+from spyfish.extraction.select_biigle_frames import select_frames_for_biigle
 from spyfish.orchestrator.stage import DropStage, GlobalStage, StageRunner
 from spyfish.storage.db_sync import sync_pipeline_results
 from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
@@ -208,30 +209,12 @@ def _step6_process_drop(drop_id: str) -> str:
     selections_path = Path(paths["selections_csv"])
 
     if not selections_path.exists():
-        # Biigle-direct path: generate frame selections from MaxN CSV
-        maxn_path = Path(paths["maxn_csv"])
-        if not maxn_path.exists():
-            logging.error(
-                f"Missing MaxN CSV at {maxn_path} for {drop_id}. Cannot generate frame selections."
-            )
+        # Biigle-direct path: generate frame selections from MaxN CSV via strategy
+        try:
+            select_frames_for_biigle(paths["maxn_csv"], str(selections_path), drop_id)
+        except (FileNotFoundError, ValueError) as e:
+            logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
             return None
-
-        maxn_df = pd.read_csv(maxn_path)
-        if maxn_df.empty:
-            logging.error(
-                f"Empty MaxN CSV for {drop_id} — expected frames from strategy but none available."
-            )
-            return None
-
-        maxn_df = maxn_df.rename(
-            columns={config.csv_maxn_time_ms_column: config.csv_clip_max_time_column}
-        )
-        maxn_df["SelectionReason"] = "MaxN Peak"
-        selections_path.parent.mkdir(parents=True, exist_ok=True)
-        maxn_df.to_csv(selections_path, index=False)
-        logging.info(
-            f"Generated {len(maxn_df)} frame selections from MaxN CSV for {drop_id} (biigle-direct path)."
-        )
 
     frames_df = extract_frames_from_selections(
         selections_csv_path=paths["selections_csv"],
@@ -239,6 +222,8 @@ def _step6_process_drop(drop_id: str) -> str:
         raw_csv_path=paths["raw_csv"],
     )
     volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
+    if volume_info is None:
+        return None
     logging.info(f"Biigle volume created for {drop_id}: id={volume_info.get('id')}")
     return PipelineStatus.AWAITING_EXPERT_REVIEW
 

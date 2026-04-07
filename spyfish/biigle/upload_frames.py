@@ -260,6 +260,16 @@ def upload_frames_to_biigle(
             "Run frame extraction before Biigle upload."
         )
 
+    import json
+    with open(coco_json_path) as f:
+        coco = json.load(f)
+    if not coco.get("annotations"):
+        logging.error(
+            f"COCO annotations for {drop_id} have 0 annotations — "
+            "no ML detections to review. Skipping Biigle upload."
+        )
+        return None
+
     # Step 1: Upload frames to S3
     file_names = upload_frames_to_s3(frames_df, s3_prefix)
 
