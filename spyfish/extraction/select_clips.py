@@ -104,10 +104,10 @@ def select_clips_with_strategy(
 
     if not is_multiclass:
         # Binary Strategy
-        n_maxn = strategy_params.get("maxn_clips")
-        n_confusing = strategy_params.get("confusing_clips")
-        n_empty = strategy_params.get("empty_clips")
-        n_start = strategy_params.get("start_clips")
+        n_maxn = strategy_params.get("maxn_export")
+        n_confusing = strategy_params.get("confusing_export")
+        n_empty = strategy_params.get("empty_export")
+        n_start = strategy_params.get("start_export")
         spacing = strategy_params.get("temporal_spacing_seconds")
 
         # 1. Absolute MaxN — oversample to account for spacing/dedup rejects
@@ -163,10 +163,10 @@ def select_clips_with_strategy(
                 )
     else:
         # Multi-class Strategy
-        n_maxn_per_sp = strategy_params.get("per_species_maxn_clips")
-        n_confusing_per_sp = strategy_params.get("per_species_confusing_clips")
-        n_empty = strategy_params.get("per_video_empty_clips")
-        n_start = strategy_params.get("per_video_start_clips")
+        n_maxn_per_sp = strategy_params.get("per_species_maxn_export")
+        n_confusing_per_sp = strategy_params.get("per_species_confusing_export")
+        n_empty = strategy_params.get("per_video_empty_export")
+        n_start = strategy_params.get("per_video_start_export")
         spacing = strategy_params.get("temporal_spacing_seconds")
 
         unique_species = df[config.csv_scientific_name_column].unique()
