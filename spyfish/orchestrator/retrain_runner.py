@@ -10,8 +10,6 @@ This module coordinates the full flow:
 
 import logging
 import shutil
-from pathlib import Path
-from typing import Optional
 
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
 from spyfish.config.wrapper import config
@@ -93,7 +91,8 @@ def run_retraining(
     for drop_id in balanced_df["DropID"].unique():
         has_labels = any(labels_dir.glob(f"{drop_id}*.txt"))
         has_images = any(
-            p for p in images_dir.rglob(f"{drop_id}*")
+            p
+            for p in images_dir.rglob(f"{drop_id}*")
             if p.suffix.lower() in _image_exts
         )
         if has_labels and has_images:
@@ -116,7 +115,9 @@ def run_retraining(
             "Ensure frame extraction (step 3) and Biigle Rectangle annotation export have both run."
         )
         return {}
-    logging.info(f"  {len(_trainable_drops)} drops ready for training: {_trainable_drops}")
+    logging.info(
+        f"  {len(_trainable_drops)} drops ready for training: {_trainable_drops}"
+    )
 
     # 4. Split
     logging.info("Step 4: Splitting data into train/val/test...")

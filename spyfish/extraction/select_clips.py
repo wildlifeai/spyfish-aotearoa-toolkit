@@ -54,25 +54,33 @@ class ClipSelector:
                 return False
         return True
 
+    @property
+    def _columns(self):
+        return [
+            config.drop_id_column,
+            config.csv_sampling_start_column,
+            config.csv_clip_start_column,
+            config.csv_clip_end_column,
+            config.csv_clip_max_time_column,
+            config.csv_scientific_name_column,
+            "SelectionReason",
+            config.csv_max_interval_column,
+            config.csv_confidence_agreement_column,
+        ]
+
     def finalize_df(self):
         """Returns a sorted DataFrame of all selected clips."""
         if not self.selections_rows:
-            cols = [
-                config.drop_id_column,
-                config.csv_sampling_start_column,
-                config.csv_clip_start_column,
-                config.csv_clip_end_column,
-                config.csv_clip_max_time_column,
-                config.csv_scientific_name_column,
-                "SelectionReason",
-                config.csv_max_interval_column,
-                config.csv_confidence_agreement_column,
-            ]
-            return pd.DataFrame(columns=cols)
+            return pd.DataFrame(columns=self._columns)
 
         df = pd.DataFrame(self.selections_rows)
         df = df.sort_values(config.csv_clip_start_column)
         return df
+
+
+def _sample(df_or_series, n, random_state=42):
+    """Sample up to n rows, capped at the available length."""
+    return df_or_series.sample(min(n, len(df_or_series)), random_state=random_state)
 
 
 def select_clips_with_strategy(
@@ -104,10 +112,10 @@ def select_clips_with_strategy(
 
     if not is_multiclass:
         # Binary Strategy
-        n_maxn = strategy_params.get("maxn_clips")
-        n_confusing = strategy_params.get("confusing_clips")
-        n_empty = strategy_params.get("empty_clips")
-        n_start = strategy_params.get("start_clips")
+        n_maxn = strategy_params.get("maxn_export")
+        n_confusing = strategy_params.get("confusing_export")
+        n_empty = strategy_params.get("empty_export")
+        n_start = strategy_params.get("start_export")
         spacing = strategy_params.get("temporal_spacing_seconds")
 
         # 1. Absolute MaxN — oversample to account for spacing/dedup rejects
@@ -116,7 +124,9 @@ def select_clips_with_strategy(
         for _, row in top_maxn.iterrows():
             if added_maxn >= n_maxn:
                 break
-            if selector.check_temporal_spacing(row[config.csv_time_seconds_column], spacing):
+            if selector.check_temporal_spacing(
+                row[config.csv_time_seconds_column], spacing
+            ):
                 if selector.add_interval(
                     row,
                     reason="Absolute MaxN",
@@ -145,7 +155,7 @@ def select_clips_with_strategy(
         # 3. Empty (0 fish)
         empty_df = df[df[config.csv_max_interval_column] == 0]
         if not empty_df.empty:
-            for _, row in empty_df.sample(min(n_empty, len(empty_df))).iterrows():  # type: ignore
+            for _, row in _sample(empty_df, n_empty).iterrows():  # type: ignore
                 selector.add_interval(
                     row,
                     reason="Empty (False Negative Check)",
@@ -155,7 +165,7 @@ def select_clips_with_strategy(
         # 4. Start
         start_df = df[df[config.csv_time_seconds_column] < video_start_threshold]
         if not start_df.empty:
-            for _, row in start_df.sample(min(n_start, len(start_df))).iterrows():  # type: ignore
+            for _, row in _sample(start_df, n_start).iterrows():  # type: ignore
                 selector.add_interval(
                     row,
                     reason="Video Start",
@@ -163,10 +173,10 @@ def select_clips_with_strategy(
                 )
     else:
         # Multi-class Strategy
-        n_maxn_per_sp = strategy_params.get("per_species_maxn_clips")
-        n_confusing_per_sp = strategy_params.get("per_species_confusing_clips")
-        n_empty = strategy_params.get("per_video_empty_clips")
-        n_start = strategy_params.get("per_video_start_clips")
+        n_maxn_per_sp = strategy_params.get("per_species_maxn_export")
+        n_confusing_per_sp = strategy_params.get("per_species_confusing_export")
+        n_empty = strategy_params.get("per_video_empty_export")
+        n_start = strategy_params.get("per_video_start_export")
         spacing = strategy_params.get("temporal_spacing_seconds")
 
         unique_species = df[config.csv_scientific_name_column].unique()
@@ -205,7 +215,7 @@ def select_clips_with_strategy(
             config.csv_time_seconds_column
         ]
         if not true_empty_times.empty:
-            for t in true_empty_times.sample(min(n_empty, len(true_empty_times))):  # type: ignore
+            for t in _sample(true_empty_times, n_empty):  # type: ignore
                 selector.add_interval(
                     {
                         config.csv_time_seconds_column: t,
@@ -221,7 +231,7 @@ def select_clips_with_strategy(
         start_times = [t for t in all_times if t < video_start_threshold]
         if start_times:
             start_times_series = pd.Series(start_times)
-            for t in start_times_series.sample(min(n_start, len(start_times_series))):  # type: ignore
+            for t in _sample(start_times_series, n_start):  # type: ignore
                 selector.add_interval(
                     {
                         config.csv_time_seconds_column: t,
@@ -253,7 +263,7 @@ def select_clips_with_strategy(
             return priority_df.iloc[:clip_cap]
         else:
             n_needed = min(clip_cap - len(priority_df), len(other_df))
-            sampled_others = other_df.sample(n_needed)
+            sampled_others = other_df.sample(n_needed, random_state=42)
             return pd.concat([priority_df, sampled_others]).sort_values(
                 config.csv_clip_start_column
             )

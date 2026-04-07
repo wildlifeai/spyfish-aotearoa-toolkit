@@ -248,7 +248,9 @@ def biigle_to_yolo(
     all_dfs = []
 
     # Strictly use the per-drop expert raw CSVs
-    for csv_path in sorted(data_quality_dir.glob("**/annotations/*_biigle_expert_raw.csv")):
+    for csv_path in sorted(
+        data_quality_dir.glob("**/annotations/*_biigle_expert_raw.csv")
+    ):
         logging.debug(f"  Found expert CSV: {csv_path}")
         csv_paths.append(csv_path)
         all_dfs.append(pd.read_csv(csv_path))
@@ -266,7 +268,9 @@ def biigle_to_yolo(
     # Write YOLO .txt labels into each drop's annotations/ folder
     for csv_path, drop_df in zip(csv_paths, all_dfs):
         convert_annotations_to_yolo(drop_df, class_map, csv_path.parent)
-        logging.info(f"  Wrote labels for {csv_path.parent.parent.name} → {csv_path.parent}")
+        logging.info(
+            f"  Wrote labels for {csv_path.parent.parent.name} → {csv_path.parent}"
+        )
 
     return class_map
 

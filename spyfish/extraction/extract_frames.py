@@ -286,7 +286,9 @@ def extract_frames_from_selections(
         out_path = out_dir / out_filename
 
         if out_path.exists():
-            logging.debug(f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}")
+            logging.debug(
+                f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}"
+            )
             frame_paths.append(str(out_path))
             continue
 
@@ -337,7 +339,5 @@ def extract_frames_from_selections(
     )
 
     successful = df["FramePath"].notna().sum()
-    logging.info(
-        f"Extracted {successful}/{len(df)} frames for {drop_id} → {out_dir}"
-    )
+    logging.info(f"Extracted {successful}/{len(df)} frames for {drop_id} → {out_dir}")
     return df

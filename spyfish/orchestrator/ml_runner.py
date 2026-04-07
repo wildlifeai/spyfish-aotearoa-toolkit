@@ -28,9 +28,7 @@ class MLRunner:
         self.limit = get_required(
             config.ml_inference, "limit_processing", "ml_inference"
         )
-        self.frame_skip = get_required(
-            config.ml_inference, "frame_skip", "ml_inference"
-        )
+        self.ml_fps = config.ml_fps
         self.imgsz = int(config.imgsz)
         self.confidence = get_required(
             config.ml_inference, "confidence_threshold", "ml_inference"
@@ -69,11 +67,17 @@ class MLRunner:
                     .tolist()
                 )
                 priority_order = {d: i for i, d in enumerate(priority_ids)}
-                df["_priority"] = df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                df["_priority"] = (
+                    df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                )
                 df = df.sort_values("_priority").drop(columns=["_priority"])
-                logging.debug(f"Priority order applied from {targets_csv}: {priority_ids}")
+                logging.debug(
+                    f"Priority order applied from {targets_csv}: {priority_ids}"
+                )
             except Exception as e:
-                logging.warning(f"Could not apply priority ordering from {targets_csv}: {e}")
+                logging.warning(
+                    f"Could not apply priority ordering from {targets_csv}: {e}"
+                )
 
         df = df.head(self.limit)
 
@@ -133,8 +137,6 @@ class MLRunner:
 
         df["VideoURL"] = local_filepaths
 
-        df["VideoURL"] = local_filepaths
-
         # Return list of records for inference
         return df.to_dict("records")
 
@@ -180,7 +182,7 @@ class MLRunner:
                     "sampling_start": row[config.csv_sampling_start_column],
                     "sampling_end": row[config.csv_sampling_end_column],
                     "model_path": self.model,
-                    "frame_skip": self.frame_skip,
+                    "ml_fps": self.ml_fps,
                     "imgsz": self.imgsz,
                     "confidence_threshold": self.confidence,
                     "output_csv": os.path.join(

@@ -179,7 +179,9 @@ def sync_biigle_annotations():
             drop_ann_dir.mkdir(parents=True, exist_ok=True)
             raw_path = drop_ann_dir / f"{drop_id}_biigle_expert_raw.csv"
             fish_annotations_df.to_csv(raw_path, index=False)
-            logging.info(f"  Exported expert raw annotations for ML retraining: {raw_path}")
+            logging.info(
+                f"  Exported expert raw annotations for ML retraining: {raw_path}"
+            )
 
             # 4. Process and aggregate annotations
             annotations_to_add = _aggregate_annotations(fish_annotations_df, drop_id)
@@ -215,7 +217,9 @@ def sync_biigle_annotations():
             )
             maxn_path = drop_ann_dir / f"{drop_id}_biigle_expert_maxn.csv"
             maxn_df.to_csv(maxn_path, index=False)
-            logging.info(f"  Exported expert MaxN annotations for ML retraining: {maxn_path}")
+            logging.info(
+                f"  Exported expert MaxN annotations for ML retraining: {maxn_path}"
+            )
 
             processed_drops.append(drop_id)
             logging.info(

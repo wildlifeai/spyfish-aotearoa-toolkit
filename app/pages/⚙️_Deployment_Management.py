@@ -49,7 +49,9 @@ def load_deployment_status():
 
         # Video presence column
         df["VideoStatus"] = "Absent"
-        df.loc[df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES), "VideoStatus"] = "Present"
+        df.loc[
+            df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES), "VideoStatus"
+        ] = "Present"
         df.loc[df["IsBadDeployment"], "VideoStatus"] = "No video (bad dep.)"
 
         # Determine NeedsAction based strictly on db flags and presence
@@ -97,7 +99,14 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
             "Show Annotation Columns", key=f"show_ann_{title}", value=False
         )
 
-    display_cols = ["DropID", "SurveyID", "SamplingStart", "Status", "VideoStatus", "Complete"]
+    display_cols = [
+        "DropID",
+        "SurveyID",
+        "SamplingStart",
+        "Status",
+        "VideoStatus",
+        "Complete",
+    ]
     if show_annotations:
         display_cols.extend(["MlAnnotations", "CitSciAnnotations", "ExpertAnnotations"])
 

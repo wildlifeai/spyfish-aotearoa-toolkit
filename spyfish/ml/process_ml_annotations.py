@@ -10,7 +10,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -201,7 +200,10 @@ def _run_qa_visualizations(
     if t_max > t_min:
         boundaries = np.linspace(t_min, t_max, 6)  # 5 equal bands
         for i in range(5):
-            band = raw_df[(raw_df["time_seconds"] >= boundaries[i]) & (raw_df["time_seconds"] < boundaries[i + 1])]
+            band = raw_df[
+                (raw_df["time_seconds"] >= boundaries[i])
+                & (raw_df["time_seconds"] < boundaries[i + 1])
+            ]
             if not band.empty:
                 frame_indices.append(int(band.sample(1)["frame"].iloc[0]))
 

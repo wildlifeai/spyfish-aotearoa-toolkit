@@ -240,5 +240,3 @@ def validate_model_path(model_path: str | Path) -> Path:
         )
 
     return path
-
-
