@@ -17,7 +17,7 @@ csv_mapping:
   clip_start_column: "ClipStartRelative"
   clip_end_column: "ClipEndRelative"
   clip_max_time_column: "TimeOfMaxnMs"
-  maxn_time_ms_column: "time_of_maxn_ms"
+  maxn_time_seconds_column: "time_of_maxn_seconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -124,7 +124,7 @@ ffmpeg:
 
 biigle:
   project_id:  4081        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
-  disk_id: 98             #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
