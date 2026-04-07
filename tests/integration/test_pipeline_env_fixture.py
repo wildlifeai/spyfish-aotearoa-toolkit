@@ -38,12 +38,11 @@ def test_config_yaml_written_to_disk(pipeline_env):
     assert pipeline_env.config_path.exists()
     loaded = yaml.safe_load(pipeline_env.config_path.read_text())
     assert loaded["orchestrator"]["is_test_run"] is True
-    assert loaded["paths"]["bucket_name"] == "marine-buv-test"
 
 
 def test_config_singleton_uses_test_config(pipeline_env):
     """config.* properties must reflect the test config, not the production one."""
-    # bucket_name is "marine-buv-test" in the test config, "marine-buv-kalindi" in prod
+    # S3_BUCKET is set to "marine-buv-test" by the pipeline_env fixture via monkeypatch.setenv
     assert config.s3_bucket == "marine-buv-test"
 
 
