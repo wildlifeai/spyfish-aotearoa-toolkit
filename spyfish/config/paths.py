@@ -421,7 +421,7 @@ class PathsConfig(BaseConfig):
     def get_site_id_from_drop(self, drop_id: str) -> str:
         """Derive SiteID from a validated DropID.
 
-        DropID format is ^[A-Z]{3}_\d{8}_BUV_[A-Z]{3}_\d{3}_\d{2}$
+        DropID format is ^[A-Z]{3}_\\d{8}_BUV_[A-Z]{3}_\\d{3}_\\d{2}$
         SiteID is always parts[3:5] — positional, not regex, because the
         site_id pattern also matches parts of the survey prefix.
         """

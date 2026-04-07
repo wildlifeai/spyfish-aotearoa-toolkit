@@ -21,7 +21,9 @@ def _select_all_clips(
     """Generate every non-overlapping clip across the full sampling window."""
     starts = np.arange(sampling_start, sampling_end - clip_length + 0.001, clip_length)
     if len(starts) == 0:
-        logging.warning(f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id} — no clips generated.")
+        logging.warning(
+            f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id} — no clips generated."
+        )
         return pd.DataFrame()
     if clip_cap and len(starts) > clip_cap:
         # Evenly space the selected clips across the full window rather than front-loading
@@ -74,7 +76,9 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
 
     # Full-video sampling — bypasses ML strategy and MaxN CSV entirely
     if config.sample_all_clips:
-        logging.info(f"sample_all_clips=true: selecting every clip in sampling window for {drop_id}.")
+        logging.info(
+            f"sample_all_clips=true: selecting every clip in sampling window for {drop_id}."
+        )
         selections_df = _select_all_clips(
             drop_id, sampling_start, sampling_end, config.clip_length, config.clip_cap
         )

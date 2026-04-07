@@ -20,7 +20,6 @@ from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 
-
 # ── Step 1: S3 upload ────────────────────────────────────────────────────────
 
 
@@ -141,8 +140,6 @@ def upload_coco_annotations_to_biigle(
     Returns:
         The API response dict from the bulk upload endpoint.
     """
-
-
     if not coco_data.get("annotations"):
         logging.info("No annotations found in COCO JSON.")
         return {}

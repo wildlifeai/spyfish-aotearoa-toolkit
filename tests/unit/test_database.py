@@ -1,5 +1,3 @@
-import pytest
-
 from spyfish.config.base import PipelineStatus
 
 

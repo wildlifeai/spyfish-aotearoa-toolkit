@@ -80,8 +80,8 @@ class SourceStatus:
     it sits in the processing workflow.
     """
 
-    OK = "OK"                           # No known source issues
-    EXCLUDED = "EXCLUDED"               # is_bad_deployment = True in CSV
+    OK = "OK"  # No known source issues
+    EXCLUDED = "EXCLUDED"  # is_bad_deployment = True in CSV
     MISSING_METADATA = "MISSING_METADATA"  # sampling_start/end absent or unparseable
     VALIDATION_ERROR = "VALIDATION_ERROR"  # Failed cross-dataset structural checks
     REMOVED_FROM_SOURCE = "REMOVED_FROM_SOURCE"  # In DB but no longer in the CSV

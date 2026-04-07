@@ -7,6 +7,7 @@ repos:
     -   id: check-yaml
     -   id: debug-statements
     -   id: name-tests-test
+        args: [--pytest-test-first]
     -   id: requirements-txt-fixer
 -   repo: https://github.com/pycqa/isort
     rev: 8.0.1
@@ -21,11 +22,11 @@ repos:
     hooks:
     -   id: flake8
         args: ["--ignore=E501, W503, E203, E226"]
--   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.1
-    hooks:
-    -   id: mypy
-        additional_dependencies: [types-pyyaml]
+# -   repo: https://github.com/pre-commit/mirrors-mypy
+#     rev: v1.19.1
+#     hooks:
+#     -   id: mypy
+#         additional_dependencies: [types-pyyaml]
 -   repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:

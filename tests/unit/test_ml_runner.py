@@ -1,8 +1,5 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
-
-from spyfish.config.base import PipelineStatus
 from spyfish.orchestrator.ml_runner import MLRunner
 
 

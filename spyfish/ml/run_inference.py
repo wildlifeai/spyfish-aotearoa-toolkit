@@ -173,7 +173,9 @@ def main(args):
 
     true_fps = get_video_fps(video_url)
     vid_stride = max(1, round(true_fps / ml_fps))
-    logging.info(f"Video FPS: {true_fps:.2f}, target ML FPS: {ml_fps}, stride: {vid_stride}, Confidence: {conf}")
+    logging.info(
+        f"Video FPS: {true_fps:.2f}, target ML FPS: {ml_fps}, stride: {vid_stride}, Confidence: {conf}"
+    )
 
     # Launch modularized inference logic
     run_yolo_inference(
@@ -188,5 +190,3 @@ def main(args):
         sampling_start,
         sampling_end,
     )
-
-
