@@ -135,7 +135,7 @@ extraction:
   video_start_threshold_seconds: 120
   force_binary_strategy: false
   sample_all_clips: false
-  biigle_multiplier: 2
+  frame_multiplier: 2
   binary_strategy:
     maxn_export: 10
     confusing_export: 20

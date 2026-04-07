@@ -45,7 +45,7 @@ from spyfish.orchestrator.ingest import check_pending_arrivals, run_ingestion
 from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
 from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.retrain_runner import run_retraining
-from spyfish.extraction.select_biigle_frames import select_frames_for_biigle
+from spyfish.extraction.select_frames import select_frames
 from spyfish.orchestrator.stage import DropStage, GlobalStage, StageRunner
 from spyfish.storage.db_sync import sync_pipeline_results
 from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
@@ -211,7 +211,7 @@ def _step6_process_drop(drop_id: str) -> str:
     if not selections_path.exists():
         # Biigle-direct path: generate frame selections from MaxN CSV via strategy
         try:
-            select_frames_for_biigle(paths["maxn_csv"], str(selections_path), drop_id)
+            select_frames(paths["maxn_csv"], str(selections_path), drop_id, multiplier=config.frame_multiplier)
         except (FileNotFoundError, ValueError) as e:
             logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
             return None

@@ -93,7 +93,7 @@ extraction:
   video_start_threshold_seconds: 120 # Seconds from video start used for start-of-video health check clips
   force_binary_strategy: false       # If true, use binary strategy regardless of species count
   sample_all_clips: false            # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
-  biigle_multiplier: 2               # Multiplies export counts and divides temporal_spacing for Biigle-direct path
+  frame_multiplier: 2                # Multiplies export counts and divides temporal_spacing for denser frame coverage
   binary_strategy:
     maxn_export: 30          # Clips at highest fish-count moments
     confusing_export: 60     # Clips with high count but low confidence (uncertain detections)
