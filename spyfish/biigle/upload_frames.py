@@ -52,6 +52,7 @@ def upload_frames_to_s3(
         logging.warning("No frame paths to upload (all extractions may have failed).")
         return []
 
+    skipped = 0
     for local_path in frame_paths:
         p = Path(local_path)
         if not p.exists():
@@ -59,12 +60,19 @@ def upload_frames_to_s3(
             continue
 
         s3_key = s3_frames_prefix.rstrip("/") + "/" + p.name
+        if s3.get_object_last_modified(s3_key) is not None:
+            logging.debug(f"  Already on S3, skipping: {p.name}")
+            uploaded.append(p.name)
+            skipped += 1
+            continue
         s3.upload_file_to_s3(str(p), key=s3_key, content_type="image/jpeg")
         uploaded.append(p.name)
         logging.info(f"  Uploaded {p.name} → s3://{s3_key}")
 
+    newly_uploaded = len(uploaded) - skipped
     logging.info(
-        f"Uploaded {len(uploaded)}/{len(frame_paths)} frames to S3 prefix '{s3_frames_prefix}'"
+        f"Uploaded {newly_uploaded} new frame(s), {skipped} already on S3 "
+        f"(total {len(uploaded)}/{len(frame_paths)}) → '{s3_frames_prefix}'"
     )
     return uploaded
 
