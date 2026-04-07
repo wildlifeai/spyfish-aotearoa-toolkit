@@ -70,7 +70,7 @@ csv_mapping:
   sampling_end_column: "SamplingEnd"
   clip_start_column: "ClipStartRelative"
   clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnMs"
+  clip_max_time_column: "TimeOfMaxnSeconds"
   maxn_time_seconds_column: "time_of_maxn_seconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
