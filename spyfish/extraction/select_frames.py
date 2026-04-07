@@ -64,19 +64,19 @@ def select_frames(
     if is_binary:
         base = config.binary_strategy
         scaled_strategy = {
-            "maxn_export": int(base["maxn_export"] * multiplier),
-            "confusing_export": int(base["confusing_export"] * multiplier),
-            "empty_export": int(base["empty_export"] * multiplier),
-            "start_export": int(base["start_export"] * multiplier),
+            "maxn_export": round(base["maxn_export"] * multiplier),
+            "confusing_export": round(base["confusing_export"] * multiplier),
+            "empty_export": round(base["empty_export"] * multiplier),
+            "start_export": round(base["start_export"] * multiplier),
             "temporal_spacing_seconds": base["temporal_spacing_seconds"] / safe_multiplier,
         }
     else:
         base = config.multiclass_strategy
         scaled_strategy = {
-            "per_species_maxn_export": int(base["per_species_maxn_export"] * multiplier),
-            "per_species_confusing_export": int(base["per_species_confusing_export"] * multiplier),
-            "per_video_empty_export": int(base["per_video_empty_export"] * multiplier),
-            "per_video_start_export": int(base["per_video_start_export"] * multiplier),
+            "per_species_maxn_export": round(base["per_species_maxn_export"] * multiplier),
+            "per_species_confusing_export": round(base["per_species_confusing_export"] * multiplier),
+            "per_video_empty_export": round(base["per_video_empty_export"] * multiplier),
+            "per_video_start_export": round(base["per_video_start_export"] * multiplier),
             "temporal_spacing_seconds": base["temporal_spacing_seconds"] / safe_multiplier,
         }
 
@@ -88,7 +88,7 @@ def select_frames(
         strategy_params=scaled_strategy,
         is_multiclass=not is_binary,
         video_start_threshold=config.video_start_threshold,
-        clip_cap=int(config.clip_cap * multiplier),
+        clip_cap=round(config.clip_cap * multiplier),
     )
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)

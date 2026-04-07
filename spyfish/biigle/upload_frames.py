@@ -125,7 +125,7 @@ def create_biigle_volume(
 
 def upload_coco_annotations_to_biigle(
     volume_id: int,
-    coco: dict,
+    coco_data: dict,
     label_id: int = config.default_fish_label_id,
 ) -> dict:
     """
@@ -135,13 +135,13 @@ def upload_coco_annotations_to_biigle(
 
     Args:
         volume_id: Biigle volume ID.
-        coco: COCO annotations dict (from extract_frames_from_selections).
+        coco_data: COCO annotations dict (from extract_frames_from_selections).
         label_id: The Biigle label ID to apply to all annotations. Defaults to config value.
 
     Returns:
         The API response dict from the bulk upload endpoint.
     """
-    coco_data = coco
+
 
     if not coco_data.get("annotations"):
         logging.info("No annotations found in COCO JSON.")
@@ -252,7 +252,6 @@ def upload_frames_to_biigle(
             "Run frame extraction before Biigle upload."
         )
 
-    import json
     with open(coco_json_path) as f:
         coco = json.load(f)
     if not coco.get("annotations"):
