@@ -32,8 +32,8 @@ class ExtractionConfig(BaseConfig):
         return bool(get_required(self._extraction, "sample_all_clips", "extraction"))
 
     @property
-    def biigle_multiplier(self) -> float:
-        return float(get_required(self._extraction, "biigle_multiplier", "extraction"))
+    def frame_multiplier(self) -> float:
+        return float(get_required(self._extraction, "frame_multiplier", "extraction"))
 
     @property
     def binary_strategy(self) -> dict:
