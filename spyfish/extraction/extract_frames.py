@@ -253,11 +253,17 @@ def extract_frames_from_selections(
         pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
     )
 
-    # Read video dimensions once from metadata
+    # Read video dimensions and rotation once from metadata.
+    # extract_frame() applies rotation to pixel data, so swap w/h for 90°/270° videos
+    # so that COCO image dimensions match the actual saved frame orientation.
     cap = cv2.VideoCapture(str(video_path))
     vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    rotation = _read_video_rotation(cap)
     cap.release()
+
+    if rotation in (90, 270):
+        vid_w, vid_h = vid_h, vid_w
 
     if vid_w == 0 or vid_h == 0:
         logging.warning(
@@ -322,7 +328,22 @@ def extract_frames_from_selections(
         logging.warning(
             f"Skipping {skipped} frame(s) from COCO JSON for {drop_id} due to extraction failure"
         )
-    coco = build_coco_from_raw_csv(raw_csv_path, successful_records)
+
+    # Deduplicate by file_name: multiple selections rows can share the same timestamp
+    # (e.g. different species at the same MaxN peak), producing identical frames.
+    # Keep the first occurrence so each physical file appears exactly once in the COCO JSON.
+    seen: set[str] = set()
+    deduped_records = []
+    for rec in successful_records:
+        if rec["file_name"] not in seen:
+            seen.add(rec["file_name"])
+            deduped_records.append(rec)
+    if len(deduped_records) < len(successful_records):
+        logging.debug(
+            f"Deduplicated {len(successful_records) - len(deduped_records)} duplicate frame record(s) for {drop_id}"
+        )
+
+    coco = build_coco_from_raw_csv(raw_csv_path, deduped_records)
 
     # Save the COCO annotations to the drop's annotations directory
     annotations_dir = config.get_drop_annotations_dir(drop_id)
