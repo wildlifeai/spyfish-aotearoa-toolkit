@@ -62,6 +62,10 @@ def cmd_upsert(db: DatabaseManager, args):
             fields["sampling_end"] = args.sampling_end
         if args.video_path is not None:
             fields["video_path"] = args.video_path
+        if args.video_presence is not None:
+            fields["video_presence"] = args.video_presence
+        if args.priority is not None:
+            fields["priority"] = args.priority
         db.update_deployment_fields(args.drop_id, **fields)
         logging.info(f"Updated '{args.drop_id}': {fields}")
     else:
@@ -97,6 +101,18 @@ def main():
     parser.add_argument("--sampling-start", type=int, default=None)
     parser.add_argument("--sampling-end", type=int, default=None)
     parser.add_argument("--video-path", default=None)
+    parser.add_argument(
+        "--video-presence",
+        default=None,
+        choices=["present", "absent", "no_video_bad_dep"],
+        help="Override the video presence value.",
+    )
+    parser.add_argument(
+        "--priority",
+        type=int,
+        default=None,
+        help="Processing priority (higher = processed first). Default 0.",
+    )
     parser.add_argument(
         "--create",
         action="store_true",

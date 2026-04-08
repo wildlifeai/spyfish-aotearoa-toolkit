@@ -3,7 +3,7 @@ from typing import Optional, Set
 
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus, SourceStatus
+from spyfish.config.base import PipelineStatus, SourceStatus, VideoPresence
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
@@ -46,6 +46,7 @@ def check_pending_arrivals(known_files: Optional[Set[str]] = None):
             logging.info(
                 f"✅ Video confirmed for {drop_id}. Updating status to {PipelineStatus.READY_FOR_ML}."
             )
+            db.update_deployment_fields(drop_id, video_presence=VideoPresence.PRESENT)
             db.advance_status(drop_id, PipelineStatus.READY_FOR_ML)
             updated_count += 1
 
@@ -176,11 +177,8 @@ def _sync_deployments_to_db(
         try:
             raw_drop_id = str(row.get(drop_col, "")).strip()
             drop_id = config.validate_drop_id(raw_drop_id)
-        except ValueError as e:
-            logging.error(
-                f"Skipping malicious or invalid DropID in CSV: {row.get(drop_col)}. Error: {e}"
-            )
-            continue
+        except ValueError:
+            continue  # invalid DropID format — error surfaced by DataValidator
 
         video_path = str(row.get(video_col, "")).strip()
 
@@ -209,6 +207,14 @@ def _sync_deployments_to_db(
             source_status = SourceStatus.VALIDATION_ERROR
         else:
             source_status = SourceStatus.OK
+
+        # Determine video_presence from current S3 state (updated every ingest run)
+        if is_bad_deployment:
+            video_presence = VideoPresence.NO_VIDEO_BAD_DEP
+        elif video_path and video_path in known_files:
+            video_presence = VideoPresence.PRESENT
+        else:
+            video_presence = VideoPresence.ABSENT
 
         # Determine pipeline status
         if expert_anns > 0:
@@ -246,6 +252,7 @@ def _sync_deployments_to_db(
             status=status,
             source_status=source_status,
             video_path=video_path,
+            video_presence=video_presence,
             is_bad_deployment=is_bad_deployment,
             error_message=(
                 "Found in structural errors"

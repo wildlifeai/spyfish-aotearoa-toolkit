@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 from utils import check_password, render_sidebar_refresh, sync_db_if_needed
 
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import PipelineStatus, VideoPresence
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
 from spyfish.utils import extract_survey_id, get_survey_summary
@@ -26,6 +26,7 @@ def load_deployment_status():
                 "drop_id": "DropID",
                 "status": "Status",
                 "source_status": "SourceStatus",
+                "video_presence": "VideoPresence",
                 "expert_annotations": "ExpertAnnotations",
                 "ml_annotations": "MlAnnotations",
                 "citsci_annotations": "CitSciAnnotations",
@@ -47,12 +48,13 @@ def load_deployment_status():
             df["ExpertAnnotations"] + df["MlAnnotations"] + df["CitSciAnnotations"]
         )
 
-        # Video presence column
-        df["VideoStatus"] = "Absent"
-        df.loc[
-            df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES), "VideoStatus"
-        ] = "Present"
-        df.loc[df["IsBadDeployment"], "VideoStatus"] = "No video (bad dep.)"
+        # Video presence — read directly from DB column set by ingest
+        _presence_display = {
+            VideoPresence.PRESENT: "Present",
+            VideoPresence.ABSENT: "Absent",
+            VideoPresence.NO_VIDEO_BAD_DEP: "No video (bad dep.)",
+        }
+        df["VideoStatus"] = df["VideoPresence"].map(_presence_display).fillna("Unknown")
 
         # Determine NeedsAction based strictly on db flags and presence
         # Deployments that are complete or bad do not need action
@@ -79,8 +81,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
     with col2:
         st.metric("Action Req.", (~df["Complete"]).sum())
     with col3:
-        # User request: get this info from status (READY_FOR_ML, PIPELINE_COMPLETE, etc) rather than mocked VideoStatus
-        videos_present = df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()
+        videos_present = (df["VideoPresence"] == VideoPresence.PRESENT).sum()
         st.metric("Videos Present", videos_present)
 
     with col4:
@@ -129,9 +130,7 @@ def render_overview(deployment_df: pd.DataFrame):
     st.caption("Complete deployment status overview")
 
     total = len(deployment_df)
-    videos_present = (
-        deployment_df["Status"].isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum()
-    )
+    videos_present = (deployment_df["VideoPresence"] == VideoPresence.PRESENT).sum()
 
     # Mini metrics overview
     m1, m2, m3, m4, m5, m6, m7 = st.columns(7)

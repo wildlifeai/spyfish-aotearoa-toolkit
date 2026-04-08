@@ -62,14 +62,23 @@ class BaseConfig:
     def project_root(self) -> Path:
         return self._project_root
 
-    @property
-    def is_test_run(self):
-        orchestrator = self.get_section("orchestrator")
-        return bool(get_required(orchestrator, "is_test_run", "orchestrator"))
-
 
 class InvalidTransitionError(Exception):
     """Raised when a pipeline status transition is not permitted."""
+
+
+class VideoPresence:
+    """Tracks whether a deployment's video is present in S3.
+
+    Stored in the video_presence column. Updated on every ingest run to reflect
+    current S3 state — if the video disappears from S3, it reverts to ABSENT.
+    """
+
+    PRESENT = "present"  # Video found in S3 on most recent ingest
+    ABSENT = "absent"  # Video not found in S3
+    NO_VIDEO_BAD_DEP = "no_video_bad_dep"  # Bad deployment — no video expected
+    # METADATA_ERROR = "metadata_error"   # future: source data quality issue
+    # PROCESS_ERROR = "process_error"     # future: pipeline ERROR status
 
 
 class SourceStatus:
@@ -154,7 +163,9 @@ class PipelineStatus:
         READY_FOR_ML,
         PROCESSING_ML,
         ML_COMPLETE,
+        AWAITING_CITSCI_CLIPS,
         CITSCI_CLIPS_COMPLETE,
+        AWAITING_CITSCI_FRAMES,
         CITSCI_COMPLETE,
         AWAITING_EXPERT_REVIEW,
         PIPELINE_COMPLETE,

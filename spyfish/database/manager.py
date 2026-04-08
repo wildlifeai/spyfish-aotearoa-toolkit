@@ -4,7 +4,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from spyfish.config.base import InvalidTransitionError, PipelineStatus, SourceStatus
+from spyfish.config.base import (
+    InvalidTransitionError,
+    PipelineStatus,
+    SourceStatus,
+    VideoPresence,
+)
 from spyfish.config.wrapper import config
 
 
@@ -37,6 +42,8 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS deployments (
                     drop_id TEXT PRIMARY KEY,
                     video_path TEXT,
+                    video_presence TEXT NOT NULL DEFAULT 'absent',
+                    priority INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     source_status TEXT NOT NULL DEFAULT 'OK',
                     is_bad_deployment BOOLEAN NOT NULL DEFAULT 0,
@@ -90,16 +97,6 @@ class DatabaseManager:
                 END;
             """
             )
-
-            # TODO: delete this migration block once all envs have run it at least once
-            # (source_status added 2026-04-05; safe to remove after next full deploy)
-            cursor.execute("PRAGMA table_info(deployments)")
-            existing_cols = {row[1] for row in cursor.fetchall()}
-            if "source_status" not in existing_cols:
-                cursor.execute(
-                    "ALTER TABLE deployments ADD COLUMN source_status TEXT NOT NULL DEFAULT 'OK'"
-                )
-                logging.info("Migrated deployments table: added source_status column.")
 
             conn.commit()
 
@@ -162,6 +159,7 @@ class DatabaseManager:
         status: str,
         source_status: str = SourceStatus.OK,
         video_path: str = "",
+        video_presence: str = VideoPresence.ABSENT,
         is_bad_deployment: bool = False,
         error_message: str = "",
         sampling_start: Optional[int] = None,
@@ -176,10 +174,11 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO deployments (drop_id, video_path, status, source_status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO deployments (drop_id, video_path, video_presence, status, source_status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
+                    video_presence=excluded.video_presence,
                     status=excluded.status,
                     source_status=excluded.source_status,
                     is_bad_deployment=excluded.is_bad_deployment,
@@ -194,6 +193,7 @@ class DatabaseManager:
                 (
                     drop_id,
                     video_path,
+                    video_presence,
                     status,
                     source_status,
                     is_bad_deployment,
@@ -270,9 +270,11 @@ class DatabaseManager:
         allowed = {
             "status",
             "source_status",
+            "video_path",
+            "video_presence",
+            "priority",
             "sampling_start",
             "sampling_end",
-            "video_path",
             "is_bad_deployment",
             "error_message",
             "biigle_volume_id",
@@ -320,6 +322,13 @@ class DatabaseManager:
                 f"SELECT * FROM deployments WHERE status IN ({placeholders})", statuses
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_max_priority(self) -> int:
+        """Returns the current maximum priority value across all deployments (0 if none set)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(priority), 0) FROM deployments")
+            return cursor.fetchone()[0]
 
     def get_deployment(self, drop_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific deployment by drop_id."""

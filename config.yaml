@@ -14,10 +14,10 @@ csv_mapping:
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
   # Selection CSV columns
-  clip_start_column: "ClipStartRelative"
-  clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnSeconds"
-  maxn_time_seconds_column: "time_of_maxn_seconds"
+  clip_start_column: "ClipStartDeploySeconds"
+  clip_end_column: "ClipEndDeploySeconds"
+  clip_max_time_column: "TimeOfMaxAbsSeconds"
+  maxn_time_seconds_column: "TimeOfMaxAbsSeconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -25,7 +25,7 @@ csv_mapping:
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
-  time_seconds_column: "TimeSeconds"
+  time_seconds_column: "TimeAbsSeconds"
 
 # Centralized path and storage configuration
 paths:
@@ -106,14 +106,16 @@ extraction:
     temporal_spacing_seconds: 10     # Minimum seconds between selected clips
 
 zooniverse:
-  project_id: 14054    # spyfish 14054  # test: 32041
+  project_id: 14054          # Upload target — single project only
+  source_project_ids:        # All projects to fetch classifications FROM
+    - 14054                  # spyfish-aotearoa main
+    - 30327                  # spyfish-aotearoa-ey (EY clone workflow)
   size_limit_mb: 12.0  # Zooniverse upload limit — CRF is calibrated to stay under this
   health_check_count: 6  # Number of evenly-spaced health check clips when MaxN CSV is empty
   min_votes: 3           # Min classifiers agreeing on a species to count as a valid detection
   max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
 
 orchestrator:
-  is_test_run: true
   log_output: "console"
 
 ffmpeg:

@@ -19,7 +19,14 @@ class ZooniverseConfig(BaseConfig):
 
     @property
     def zooniverse_project_id(self) -> int:
+        """Upload target — single project."""
         return int(get_required(self._zooniverse, "project_id", "zooniverse"))
+
+    @property
+    def zooniverse_source_project_ids(self) -> list[int]:
+        """All projects to fetch classifications from (can be multiple)."""
+        ids = get_required(self._zooniverse, "source_project_ids", "zooniverse")
+        return [int(i) for i in ids]
 
     @property
     def size_limit_mb(self) -> float:

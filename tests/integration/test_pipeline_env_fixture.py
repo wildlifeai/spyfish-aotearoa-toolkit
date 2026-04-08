@@ -172,13 +172,11 @@ def test_process_maxn_matches_ground_truth(pipeline_env):
     )
 
     expected = env.expected_maxn[DROP_NORMAL]
-    result = result.sort_values("time_of_maxn_seconds").reset_index(drop=True)
+    result = result.sort_values("TimeOfMaxAbsSeconds").reset_index(drop=True)
 
     assert len(result) == len(expected)
     assert list(result["MaxInterval"]) == list(expected["MaxInterval"])
-    assert list(result["time_of_maxn_seconds"]) == list(
-        expected["time_of_maxn_seconds"]
-    )
+    assert list(result["TimeOfMaxAbsSeconds"]) == list(expected["TimeOfMaxAbsSeconds"])
     assert list(result["ConfidenceAgreement"]) == list(expected["ConfidenceAgreement"])
     assert list(result["TimeOfMax"]) == list(expected["TimeOfMax"])
 
@@ -205,4 +203,4 @@ def test_process_maxn_respects_confidence_threshold(pipeline_env):
 
     assert len(result) == 1
     assert result.iloc[0]["MaxInterval"] == 1
-    assert result.iloc[0]["time_of_maxn_seconds"] == 10.0
+    assert result.iloc[0]["TimeOfMaxAbsSeconds"] == 10.0

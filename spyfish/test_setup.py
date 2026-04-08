@@ -20,10 +20,14 @@ def process_csv_targets(
     Reads a CSV file containing Drop IDs and their target pipeline stage,
     and updates the local database accordingly.
 
-    Expected CSV format (headers optional, but recommended if using stage column):
+    Expected CSV format:
     DropID,PipelineStatus
     KSF_20240124_BUV_KSF_085_01,READY_FOR_ML
     KSF_20240124_BUV_KSF_085_02,AWAITING_EXPERT_REVIEW
+
+    Row order implies priority — first row is processed first. Priorities are
+    assigned as descending integers (N, N-1, ..., 1) so all CSV entries rank
+    above unset deployments (default priority 0).
     """
     if not os.path.exists(csv_path):
         logging.error(f"CSV file not found: {csv_path}")
@@ -97,8 +101,13 @@ def process_csv_targets(
 
     success_count = 0
     missing_count = 0
+    n = len(updates)
+    # TODO: priority values grow with each set-targets run (base + n per call).
+    # In practice this is fine since only relative order matters, but if it ever
+    # becomes unwieldy consider a periodic normalisation pass.
+    base_priority = db.get_max_priority()  # new entries always land above existing ones
 
-    for drop_id, stage in updates:
+    for i, (drop_id, stage) in enumerate(updates):
         if drop_id not in existing_records:
             logging.warning(
                 f"DropID '{drop_id}' not found in the local database. Skipping."
@@ -107,9 +116,11 @@ def process_csv_targets(
             continue
 
         try:
+            priority = base_priority + n - i  # first row gets highest priority
             db.update_status(drop_id, stage)
+            db.update_deployment_fields(drop_id, priority=priority)
             success_count += 1
-            logging.info(f"Updated '{drop_id}' to '{stage}'")
+            logging.info(f"Updated '{drop_id}' → status='{stage}', priority={priority}")
         except Exception as e:
             logging.error(f"Failed to update '{drop_id}': {e}")
 

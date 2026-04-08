@@ -34,7 +34,7 @@ def plot_maxn_timeline(
 
     Args:
         raw_df: Raw YOLO detections DataFrame (columns: time_seconds, confidence).
-        maxn_df: MaxN results DataFrame (columns: time_of_maxn_seconds, MaxInterval, ConfidenceAgreement).
+        maxn_df: MaxN results DataFrame (columns: TimeOfMaxAbsSeconds, MaxInterval, ConfidenceAgreement).
         drop_id: Deployment identifier used for the title and output filename.
         output_dir: Directory to save the PNG into (created if absent).
         base_conf: Base inference confidence threshold (shown as light grey line).
@@ -155,7 +155,7 @@ def plot_maxn_timeline(
         )
 
     # Styling
-    ax.set_xlabel("Time (seconds from SamplingStart)", fontsize=12)
+    ax.set_xlabel("Time (seconds from video start)", fontsize=12)
     ax.set_ylabel("Fish Count per Frame", fontsize=12)
     ax.set_title(f"MaxN Timeline — {drop_id}", fontsize=14, fontweight="bold")
     ax.set_xlim(0, max_time + 1)

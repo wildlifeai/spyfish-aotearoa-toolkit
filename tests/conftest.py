@@ -68,10 +68,10 @@ csv_mapping:
   video_file_link_column: "LinkToVideoFile"
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
-  clip_start_column: "ClipStartRelative"
-  clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnSeconds"
-  maxn_time_seconds_column: "time_of_maxn_seconds"
+  clip_start_column: "ClipStartDeploySeconds"
+  clip_end_column: "ClipEndDeploySeconds"
+  clip_max_time_column: "TimeOfMaxAbsSeconds"
+  maxn_time_seconds_column: "TimeOfMaxAbsSeconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -79,7 +79,7 @@ csv_mapping:
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
-  time_seconds_column: "TimeSeconds"
+  time_seconds_column: "TimeAbsSeconds"
 
 paths:
   base_dir: "process_files"
@@ -343,7 +343,7 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.875,  # (0.85 + 0.90) / 2
-                "time_of_maxn_seconds": 4.0,
+                "TimeOfMaxAbsSeconds": 4.0,
             },
             {
                 "DropID": DROP_NORMAL,
@@ -353,11 +353,11 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.95,  # frame 25 wins tiebreak
-                "time_of_maxn_seconds": 10.0,
+                "TimeOfMaxAbsSeconds": 10.0,
             },
         ]
     )
-    .sort_values("time_of_maxn_seconds")
+    .sort_values("TimeOfMaxAbsSeconds")
     .reset_index(drop=True),
 }
 
@@ -372,7 +372,7 @@ _ML_COMPLETE_MAXN_ROWS = [
         "AnnotatedBy": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
-        "time_of_maxn_seconds": 5.0,
+        "TimeOfMaxAbsSeconds": 5.0,
     },
 ]
 
@@ -430,7 +430,7 @@ def pipeline_env(tmp_path, monkeypatch):
                     KSF_20240124_BUV_KSF_085_01_yolov8n_raw.csv
                 KSF_20240124_BUV_KSF_085_02/annotations/   (empty — crash before inference)
                 KSF_20240124_BUV_KSF_085_03/annotations/
-                    KSF_20240124_BUV_KSF_085_03_yolov8n_maxn.csv
+                    KSF_20240124_BUV_KSF_085_03_ml_yolov8n_maxn.csv
 
     Skips the test if ffmpeg is not installed.
     """

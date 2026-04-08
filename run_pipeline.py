@@ -117,25 +117,37 @@ def _run_steps2_and_3_ml() -> None:
 def _step_zooniverse_sync_drop(drop_id: str) -> str | None:
     """Zooniverse volunteer annotation sync-back.
 
-    Checks whether volunteer classification is complete for the subject set
-    associated with this drop, then downloads and stores results.
+    Checks whether a Zooniverse MaxN CSV has been generated for this drop
+    (by running parse_zooniverse_classifications.py). If found, ingests
+    annotations into spyfish_annotations.db and advances status to CITSCI_COMPLETE.
 
-    TODO: Implement Zooniverse API check via panoptes_client:
-      - Query subject set classification counts for the drop's subject set.
-      - Define "done" threshold (e.g. minimum N classifications per subject,
-        or Caesar reduction pipeline completion, or manual sign-off flag).
-      - On completion: download classification export, parse volunteer
-        annotations, store them for downstream use.
-      - Until done: return None so the runner leaves the drop at
-        AWAITING_CITSCI_FRAMES and tries again on the next pipeline run.
+    The heavy API work (fetching classifications, aggregating votes, completion
+    gate) lives in parse_zooniverse_classifications.py and should be run
+    separately (manually or via cron) before this step is invoked.
 
-    Returns None (not ready) until the Zooniverse API check is implemented.
+    Returns:
+        PipelineStatus.CITSCI_COMPLETE if annotations were ingested.
+        None if the MaxN CSV is not yet present (try again on next run).
+
+    TODO: integrate Caesar completion check directly so this step can
+    auto-detect when all subjects are retired without requiring the
+    operator to run parse_zooniverse_classifications.py separately.
     """
+    from spyfish.zooniverse.parse_classifications import ingest_zooniverse_annotations
+
+    count = ingest_zooniverse_annotations(drop_id)
+    if count == 0:
+        logging.info(
+            f"zooniverse-sync: No MaxN CSV found for {drop_id}. "
+            "Run parse_zooniverse_classifications.py once volunteers are done. "
+            "Leaving at AWAITING_CITSCI_FRAMES."
+        )
+        return None
+
     logging.info(
-        f"zooniverse-sync: Zooniverse API check not yet implemented for {drop_id}. "
-        "Leaving at AWAITING_CITSCI_FRAMES until volunteer annotations are confirmed complete."
+        f"zooniverse-sync: Ingested {count} citsci annotations for {drop_id} → CITSCI_COMPLETE"
     )
-    return None
+    return PipelineStatus.CITSCI_COMPLETE
 
 
 def _run_step7_biigle_sync() -> None:
@@ -336,7 +348,7 @@ def main() -> None:
         log_header("PING: CONFIG CHECK")
         logging.info(f"S3 bucket: {config.s3_bucket}")
         logging.info(f"Base dir:  {config.base_dir}")
-        logging.info(f"Test run:  {config.is_test_run}")
+
         return
 
     # Bind no_upload to set-targets (only stage whose behaviour depends on it)
@@ -357,9 +369,6 @@ def main() -> None:
     if args.no_upload:
         logging.info("No-upload set: skipping final S3 sync.")
         log_header("PIPELINE COMPLETE (LOCAL ONLY)", character="═")
-    elif config.is_test_run:
-        logging.debug("Test run: skipping final S3 sync of annotations directory.")
-        log_header("PIPELINE COMPLETE (TEST RUN)", character="═")
     else:
         logging.info("Syncing final results to S3...")
         if sync_pipeline_results():

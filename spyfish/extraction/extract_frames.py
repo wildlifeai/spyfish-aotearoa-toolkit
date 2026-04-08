@@ -142,7 +142,7 @@ def build_coco_from_raw_csv(
 
     for rec in frame_records:
         img_id = rec["image_id"]
-        time_of_max = rec["time_of_max"]  # seconds relative to sampling_start
+        time_of_max = rec["time_of_max"]  # absolute seconds from video start
 
         images.append(
             {
@@ -274,7 +274,7 @@ def extract_frames_from_selections(
     frame_paths = []
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # TimeOfMaxnMs is an absolute video timestamp — use it directly.
+        # TimeOfMaxAbsSeconds is an absolute video timestamp — use it directly.
         seek_seconds = float(row[config.csv_clip_max_time_column])
         frame_index = None
 

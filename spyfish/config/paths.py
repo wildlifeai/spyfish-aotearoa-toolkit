@@ -448,7 +448,7 @@ class PathsConfig(BaseConfig):
     def get_maxn_csv_path(self, drop_id: str, model_name: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
-            / f"{self.validate_drop_id(drop_id)}_{model_name}_maxn.csv"
+            / f"{self.validate_drop_id(drop_id)}_ml_{model_name}_maxn.csv"
         )
 
     def get_selections_csv_path(self, drop_id: str) -> Path:

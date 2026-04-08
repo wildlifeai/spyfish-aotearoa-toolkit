@@ -51,9 +51,6 @@ def upload_db() -> bool:
     """
     Uploads the pipeline database to S3.
     """
-    if config.is_test_run:
-        logging.info("Skipping database upload in test run.")
-        return True
     s3 = S3Handler()
     local_path = config.db_path
     s3_key = config.s3_db_key
@@ -192,10 +189,9 @@ def sync_pipeline_results() -> bool:
         success = False
 
     # 2. Annotations & Selections
-    if not config.is_test_run:
-        if not sync_annotations():
-            logging.error("Failed to sync annotations directory.")
-            success = False
+    if not sync_annotations():
+        logging.error("Failed to sync annotations directory.")
+        success = False
 
     if success:
         logging.info("Consolidated S3 sync completed successfully.")

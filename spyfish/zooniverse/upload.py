@@ -167,13 +167,13 @@ def upload_clips_to_zooniverse(
             continue
 
         sampling_start = float(row.get(config.csv_sampling_start_column, 0))
-        upl_seconds = sampling_start + float(row[config.csv_clip_start_column])
+        upl_abs_seconds = sampling_start + float(row[config.csv_clip_start_column])
 
         meta = {
             **_build_base_subject_meta(
                 row, drop_id, video_filename, site_id, site_reserve_meta
             ),
-            "UplSeconds": int(upl_seconds),
+            "UplAbsSeconds": int(upl_abs_seconds),
         }
 
         subject = Subject()
@@ -266,13 +266,13 @@ def upload_frames_to_zooniverse(
         if frame_path.name in already_uploaded:
             logging.info(f"  Already uploaded, skipping: {frame_path.name}")
             continue
-        upl_seconds = float(row[config.csv_clip_max_time_column])
+        upl_abs_seconds = float(row[config.csv_clip_max_time_column])
 
         meta = {
             **_build_base_subject_meta(
                 row, drop_id, video_filename, site_id, site_reserve_meta
             ),
-            "UplSeconds": upl_seconds,
+            "UplAbsSeconds": upl_abs_seconds,
         }
 
         subject = Subject()
