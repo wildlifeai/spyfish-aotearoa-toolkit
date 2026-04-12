@@ -42,8 +42,8 @@ def test_health_check_times_are_relative_to_sampling_start(
     mock_config.health_check_count = health_check_count
     mock_config.csv_time_seconds_column = config.csv_time_seconds_column
     mock_config.csv_clip_max_time_column = config.csv_clip_max_time_column
-    mock_config.csv_clip_start_column = config.csv_clip_start_column
-    mock_config.csv_clip_end_column = config.csv_clip_end_column
+    mock_config.csv_clip_start_absolute_column = config.csv_clip_start_absolute_column
+    mock_config.csv_clip_end_absolute_column = config.csv_clip_end_absolute_column
     mock_config.csv_sampling_start_column = config.csv_sampling_start_column
     mock_config.csv_scientific_name_column = config.csv_scientific_name_column
     mock_config.csv_max_interval_column = config.csv_max_interval_column

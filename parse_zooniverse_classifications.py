@@ -1,5 +1,5 @@
 """
-Parse Zooniverse volunteer classifications → MaxN CSVs.
+Parse live Zooniverse volunteer classifications → MaxN CSVs.
 
 Fetches retired classifications via the Panoptes API, aggregates by species,
 and writes a per-drop MaxN CSV in the same format as ML MaxN CSVs so that
@@ -11,6 +11,11 @@ they will be picked up on the next run once volunteers finish.
 
 Frame extraction is a separate step — run it independently after this script.
 
+This script handles **live data only**. Historical backfill from downloaded
+CSVs is handled by ``run_pipeline.py --legacy``, which owns legacy filename
+resolution, legacy subject completion, and expert annotation ingestion. See
+``spyfish/zooniverse/legacy_extract.py`` for the one-shot backfill module.
+
 Usage:
     # Full backfill (first run, or --since all)
     python parse_zooniverse_classifications.py
@@ -21,14 +26,11 @@ Usage:
     # Auto-detect: use the most recent created_at seen in previous runs
     python parse_zooniverse_classifications.py --since auto
 
-    # CSV backfill with completion check (pass subjects export alongside)
-    python parse_zooniverse_classifications.py --from-csv --subjects-csv path/to/subjects.csv
-
 Phases:
-    0  Fetch from Panoptes API (or load from CSV backfill)
-    1  Parse & resolve drop_ids
+    0  Fetch from Panoptes API
+    1  Parse & resolve drop_ids (strict: new-format only)
     2  Aggregate by (subject_id, species), apply min_votes
-    2b Check subject-set completion — skip drops that are not fully retired
+    2b Check subject-set completion via Panoptes API — skip partial drops
     3  NOTHINGHERE sampling
     4  Export Zooniverse MaxN CSV per drop_id (fully-complete drops only)
 """
@@ -36,9 +38,7 @@ Phases:
 import argparse
 import json
 import logging
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 
@@ -48,19 +48,14 @@ from spyfish.zooniverse.parse_classifications import (
     aggregate_by_subject_species,
     connect_to_zooniverse,
     fetch_classifications,
-    get_all_db_drop_ids,
-    load_classifications_from_csv,
     parse_classifications,
     sample_nothing_here_clips,
     subject_completion_from_api,
-    subject_completion_from_csv,
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _ZOONIVERSE_DIR = config.data_quality_dir.parent / "zooniverse"
-_LEGACY_CSV_DIR = _ZOONIVERSE_DIR / "legacy_classifications"
-_LEGACY_SUBJECTS_DIR = _ZOONIVERSE_DIR / "legacy_subjects"
 _LAST_RUN_FILE = _ZOONIVERSE_DIR / "last_run.json"
 _REVIEW_CSV = _ZOONIVERSE_DIR / "zooniverse_review.csv"
 
@@ -175,9 +170,8 @@ def export_maxn_csvs(aggregated_df: pd.DataFrame) -> None:
                 }
             )
 
-        out_dir = config.get_drop_annotations_dir(drop_id)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{drop_id}_zooniverse_maxn.csv"
+        out_path = config.get_zooniverse_maxn_csv_path(drop_id)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         (
             pd.DataFrame(rows)
             .sort_values(config.csv_maxn_time_column)
@@ -191,7 +185,7 @@ def export_maxn_csvs(aggregated_df: pd.DataFrame) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Parse Zooniverse classifications into per-drop MaxN CSVs."
+        description="Parse live Zooniverse classifications into per-drop MaxN CSVs."
     )
     parser.add_argument(
         "--since",
@@ -200,7 +194,7 @@ def main() -> None:
         help=(
             "ISO 8601 date to fetch classifications since (e.g. 2024-06-01), "
             "'auto' to use last_run.json, or 'all' for a full backfill. "
-            "Defaults to 'auto'. Ignored when --from-csv is set."
+            "Defaults to 'auto'."
         ),
     )
     parser.add_argument(
@@ -210,93 +204,16 @@ def main() -> None:
         metavar="N",
         help="Process only the last N classifications (for testing).",
     )
-    parser.add_argument(
-        "--from-csv",
-        nargs="*",
-        metavar="CSV_PATH",
-        help=(
-            "Load from downloaded Zooniverse export CSV(s) instead of the API. "
-            "Pass one or more paths, or no paths to use all CSVs in "
-            f"{_LEGACY_CSV_DIR}."
-        ),
-    )
-    parser.add_argument(
-        "--subjects-csv",
-        nargs="*",
-        metavar="SUBJECTS_CSV_PATH",
-        help=(
-            "Zooniverse subjects export CSV(s) used for the completion gate when "
-            "--from-csv is set. Pass one or more paths, or no paths to use all "
-            f"CSVs in {_LEGACY_SUBJECTS_DIR}. "
-            "If omitted and no files are found in the default dir, the completion "
-            "gate is skipped for CSV backfills."
-        ),
-    )
     args = parser.parse_args()
 
     run_started_at = datetime.now(timezone.utc).isoformat()
 
-    # ── Phase 0: Fetch ────────────────────────────────────────────────────────
-    completion_df = None  # resolved in phase 0, applied in phase 2b
-
-    if args.from_csv is not None:
-        # --from-csv with no paths → default to legacy_classifications dir
-        if args.from_csv:
-            csv_paths = [Path(p) for p in args.from_csv]
-        else:
-            csv_paths = sorted(_LEGACY_CSV_DIR.glob("*.csv"))
-            if not csv_paths:
-                logging.error(
-                    f"No CSVs found in {_LEGACY_CSV_DIR}. Pass paths explicitly."
-                )
-                sys.exit(1)
-        logging.info(
-            f"Loading from {len(csv_paths)} CSV(s): {[p.name for p in csv_paths]}"
-        )
-        raw = load_classifications_from_csv([str(p) for p in csv_paths])
-
-        # Resolve subjects CSVs for completion gate
-        if args.subjects_csv is not None:
-            subjects_paths = (
-                [Path(p) for p in args.subjects_csv]
-                if args.subjects_csv
-                else sorted(_LEGACY_SUBJECTS_DIR.glob("*.csv"))
-            )
-            if subjects_paths:
-                logging.info(
-                    f"Loading subjects from {len(subjects_paths)} file(s) for completion gate."
-                )
-                completion_df = subject_completion_from_csv(
-                    [str(p) for p in subjects_paths]
-                )
-            else:
-                logging.warning(
-                    f"--subjects-csv given but no files found in {_LEGACY_SUBJECTS_DIR}. "
-                    "Completion gate skipped — all matched drop_ids will be exported."
-                )
-        else:
-            # Check default dir without --subjects-csv flag
-            default_subjects = sorted(_LEGACY_SUBJECTS_DIR.glob("*.csv"))
-            if default_subjects:
-                logging.info(
-                    f"Found {len(default_subjects)} subjects CSV(s) in {_LEGACY_SUBJECTS_DIR} — "
-                    "using for completion gate."
-                )
-                completion_df = subject_completion_from_csv(
-                    [str(p) for p in default_subjects]
-                )
-            else:
-                logging.warning(
-                    f"No subjects CSVs found in {_LEGACY_SUBJECTS_DIR}. "
-                    "Completion gate skipped for CSV backfill — all matched drop_ids will be exported. "
-                    f"To enable the gate, place a Zooniverse subjects export in {_LEGACY_SUBJECTS_DIR}."
-                )
-    else:
-        since = _resolve_since(args.since)
-        connect_to_zooniverse()
-        raw = fetch_classifications(since=since)
-        logging.info("Fetching subject set completion from API...")
-        completion_df = subject_completion_from_api()
+    # ── Phase 0: Fetch from Panoptes API ──────────────────────────────────────
+    since = _resolve_since(args.since)
+    connect_to_zooniverse()
+    raw = fetch_classifications(since=since)
+    logging.info("Fetching subject set completion from API...")
+    completion_df = subject_completion_from_api()
 
     if not raw:
         logging.info("No classifications found. Nothing to do.")
@@ -307,9 +224,8 @@ def main() -> None:
         raw = raw[-args.limit :]
         logging.info(f"--limit {args.limit}: using last {len(raw)} classifications.")
 
-    # ── Phase 1: Parse ────────────────────────────────────────────────────────
-    db_drop_ids = get_all_db_drop_ids()
-    parsed_df = parse_classifications(raw, db_drop_ids)
+    # ── Phase 1: Parse (strict new-format only) ───────────────────────────────
+    parsed_df = parse_classifications(raw)
 
     # ── Phase 2: Aggregate ────────────────────────────────────────────────────
     aggregated_df = aggregate_by_subject_species(parsed_df)

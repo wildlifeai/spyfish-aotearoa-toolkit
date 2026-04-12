@@ -14,26 +14,22 @@ class ClipSelector:
         self.selections_rows = []
 
     def add_interval(self, row, reason, species="All"):
-        """Adds an interval to the selection list if it's not already covered by a clip."""
-        # Use the specific column names from config
+        """Adds an interval to the selection list if not already covered."""
         time_col = config.csv_time_seconds_column
-
         interval_start = row[time_col]
-        # Bucket to the 10s clip window (absolute), then store RELATIVE to sampling_start.
-        # extract_clips.py and upload.py both do: seek = sampling_start + ClipStartRelative
-        clip_start_abs = (interval_start // self.clip_length) * self.clip_length
-        clip_start_rel = clip_start_abs - self.sampling_start
+        clip_start_absolute = (interval_start // self.clip_length) * self.clip_length
 
-        if clip_start_rel in self.selected_intervals:
+        if clip_start_absolute in self.selected_intervals:
             return False
 
-        self.selected_intervals.add(clip_start_rel)
+        self.selected_intervals.add(clip_start_absolute)
         self.selections_rows.append(
             {
                 config.drop_id_column: self.drop_id,
                 config.csv_sampling_start_column: self.sampling_start,
-                config.csv_clip_start_column: clip_start_rel,
-                config.csv_clip_end_column: clip_start_rel + self.clip_length,
+                config.csv_clip_start_absolute_column: clip_start_absolute,
+                config.csv_clip_end_absolute_column: clip_start_absolute
+                + self.clip_length,
                 config.csv_clip_max_time_column: row[time_col],
                 config.csv_scientific_name_column: species,
                 "SelectionReason": reason,
@@ -48,15 +44,10 @@ class ClipSelector:
         return True
 
     def check_temporal_spacing(self, candidate_sec, spacing_seconds):
-        """Returns True if the candidate second is far enough from already selected clips.
-
-        candidate_sec is absolute; selected_intervals stores relative values — normalise before comparing.
-        """
+        """True if the candidate is far enough from every already-selected clip."""
         if spacing_seconds <= 0:
             return True
-        candidate_clip_start = (
-            candidate_sec // self.clip_length
-        ) * self.clip_length - self.sampling_start
+        candidate_clip_start = (candidate_sec // self.clip_length) * self.clip_length
         for s in self.selected_intervals:
             if abs(candidate_clip_start - s) < spacing_seconds:
                 return False
@@ -67,8 +58,8 @@ class ClipSelector:
         return [
             config.drop_id_column,
             config.csv_sampling_start_column,
-            config.csv_clip_start_column,
-            config.csv_clip_end_column,
+            config.csv_clip_start_absolute_column,
+            config.csv_clip_end_absolute_column,
             config.csv_clip_max_time_column,
             config.csv_scientific_name_column,
             "SelectionReason",
@@ -77,12 +68,10 @@ class ClipSelector:
         ]
 
     def finalize_df(self):
-        """Returns a sorted DataFrame of all selected clips."""
         if not self.selections_rows:
             return pd.DataFrame(columns=self._columns)
-
         df = pd.DataFrame(self.selections_rows)
-        df = df.sort_values(config.csv_clip_start_column)
+        df = df.sort_values(config.csv_clip_start_absolute_column)
         return df
 
 
@@ -283,7 +272,7 @@ def select_clips_with_strategy(
             n_needed = min(clip_cap - len(priority_df), len(other_df))
             sampled_others = other_df.sample(n_needed, random_state=42)
             return pd.concat([priority_df, sampled_others]).sort_values(
-                config.csv_clip_start_column
+                config.csv_clip_start_absolute_column
             )
 
     return selections_df

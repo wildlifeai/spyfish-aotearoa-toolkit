@@ -1,26 +1,30 @@
 """
 Spyfish Aotearoa — Single-command pipeline runner.
 
+Happy path (no flags runs this sequence end-to-end):
+
+    ingest → ml → zooniverse-clips → zooniverse-images → zooniverse-sync
+           → biigle-upload → biigle-sync → retrain
+
 Usage:
-    python run_pipeline.py                   # Run all steps (default)
-    python run_pipeline.py --ingest          # Only run Step 1 (metadata ingestion)
-    python run_pipeline.py --ml              # Only run Steps 2+3 (ML inference + post-processing)
-    python run_pipeline.py --zooniverse-clips# Only run Step 4 (Zooniverse clip extraction)
-    python run_pipeline.py --zooniverse-images# Only run Step 5 (Zooniverse image extraction)
-    python run_pipeline.py --zooniverse-sync # Only run Step 5b (Zooniverse volunteer sync-back)
-    python run_pipeline.py --biigle-upload   # Only run Step 6 (Biigle frame extraction + upload)
-    python run_pipeline.py --biigle-sync     # Only run Step 7 (Biigle annotation sync)
-    python run_pipeline.py --retrain         # Only run Step 8 (model retraining)
-    python run_pipeline.py --test-run        # Run in test mode with mock data
+    python run_pipeline.py                    # Run the happy-path sequence (default)
+    python run_pipeline.py --ingest           # Metadata ingestion
+    python run_pipeline.py --ml               # ML inference + post-processing
+    python run_pipeline.py --zooniverse-clips # Zooniverse clip extraction + upload
+    python run_pipeline.py --zooniverse-images# Zooniverse frame extraction + upload
+    python run_pipeline.py --zooniverse-sync  # Zooniverse volunteer sync-back
+    python run_pipeline.py --biigle-upload    # Biigle frame extraction + upload
+    python run_pipeline.py --biigle-sync      # Biigle annotation sync
+    python run_pipeline.py --retrain          # Model retraining
+    python run_pipeline.py --check-arrivals   # Poll S3 for newly arrived videos (off happy path)
+    python run_pipeline.py --set-targets      # Bulk-set pipeline stages from CSV  (off happy path)
+    python run_pipeline.py --legacy           # Historical backfill                (off happy path)
 
-Steps can be combined: python run_pipeline.py --ingest --biigle-sync
-If no step flags are given, ALL steps run.
+Flags can be combined: python run_pipeline.py --ingest --biigle-sync
+If no flags are given, the full happy-path sequence runs.
 
-Adding a new pipeline stage
-----------------------------
-1. Write the step function below (GlobalStage: () -> None, DropStage: (drop_id) -> str).
-2. Add one entry to STAGES.
-Argparse, eligibility, status transitions, and logging are automatic.
+Adding a new stage: write the function, add one entry to STAGES. Argparse,
+eligibility, status transitions, and logging are wired up automatically.
 """
 
 import argparse
@@ -32,7 +36,7 @@ from pathlib import Path
 
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.biigle.upload_frames import upload_frames_to_biigle
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import BiigleStatus, CitSciStatus, MlStatus
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.extract_clips import extract_clips_from_selections
@@ -41,7 +45,7 @@ from spyfish.extraction.select_frames import select_frames
 from spyfish.log_config import log_header
 from spyfish.ml.process_ml_annotations import run_post_ml
 from spyfish.orchestrator.ingest import check_pending_arrivals, run_ingestion
-from spyfish.orchestrator.ingest_legacy import ingest_legacy_expert_annotations
+from spyfish.orchestrator.legacy_extract import ingest_legacy_expert_annotations
 from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.retrain_runner import run_retraining
 from spyfish.orchestrator.stage import DropStage, GlobalStage, StageRunner
@@ -74,9 +78,16 @@ def _get_common_paths(drop_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _run_step1_ingest() -> None:
+def _run_ingest() -> None:
     run_ingestion()
+
+
+def _run_legacy() -> None:
+    """Historical backfill: expert annotation CSV + legacy Zooniverse CSV ingestion."""
+    from spyfish.zooniverse.legacy_extract import run_legacy_zooniverse_backfill
+
     ingest_legacy_expert_annotations()
+    run_legacy_zooniverse_backfill()
 
 
 def _run_arrival_check() -> None:
@@ -95,7 +106,7 @@ def _run_set_targets(push_s3: bool = True) -> None:
     process_csv_targets(csv_path, push_s3=push_s3)
 
 
-def _run_steps2_and_3_ml() -> None:
+def _run_ml() -> None:
     runner = MLRunner()
     targets = runner.get_inference_targets()
 
@@ -114,58 +125,27 @@ def _run_steps2_and_3_ml() -> None:
         )
 
 
-def _step_zooniverse_sync_drop(drop_id: str) -> str | None:
-    """Zooniverse volunteer annotation sync-back.
+def _run_zooniverse_sync_drop(drop_id: str) -> str | None:
+    from spyfish.zooniverse.parse_classifications import sync_zooniverse_drop
 
-    Checks whether a Zooniverse MaxN CSV has been generated for this drop
-    (by running parse_zooniverse_classifications.py). If found, ingests
-    annotations into spyfish_annotations.db and advances status to CITSCI_COMPLETE.
-
-    The heavy API work (fetching classifications, aggregating votes, completion
-    gate) lives in parse_zooniverse_classifications.py and should be run
-    separately (manually or via cron) before this step is invoked.
-
-    Returns:
-        PipelineStatus.CITSCI_COMPLETE if annotations were ingested.
-        None if the MaxN CSV is not yet present (try again on next run).
-
-    TODO: integrate Caesar completion check directly so this step can
-    auto-detect when all subjects are retired without requiring the
-    operator to run parse_zooniverse_classifications.py separately.
-    """
-    from spyfish.zooniverse.parse_classifications import ingest_zooniverse_annotations
-
-    count = ingest_zooniverse_annotations(drop_id)
-    if count == 0:
-        logging.info(
-            f"zooniverse-sync: No MaxN CSV found for {drop_id}. "
-            "Run parse_zooniverse_classifications.py once volunteers are done. "
-            "Leaving at AWAITING_CITSCI_FRAMES."
-        )
-        return None
-
-    logging.info(
-        f"zooniverse-sync: Ingested {count} citsci annotations for {drop_id} → CITSCI_COMPLETE"
-    )
-    return PipelineStatus.CITSCI_COMPLETE
+    return sync_zooniverse_drop(drop_id)
 
 
-def _run_step7_biigle_sync() -> None:
+def _run_biigle_sync() -> None:
     sync_biigle_annotations()
 
 
-def _run_step8_retrain() -> None:
+def _run_retrain() -> None:
     run_retraining(auto_promote=True)
 
 
 # ---------------------------------------------------------------------------
-# Per-drop step functions — (drop_id: str) -> target PipelineStatus str
-# The runner handles the loop, db.advance_status(), and error propagation.
+# Per-drop stage functions — (drop_id: str) -> target section status str | None
 # ---------------------------------------------------------------------------
 
 
-def _step4_process_drop(drop_id: str) -> str:
-    """Step 4: Zooniverse clip selection + extraction."""
+def _run_zooniverse_clips_drop(drop_id: str) -> str | None:
+    """Zooniverse clip selection + extraction + upload."""
     paths = _get_common_paths(drop_id)
 
     try:
@@ -188,16 +168,16 @@ def _step4_process_drop(drop_id: str) -> str:
     )
     logging.info(f"Uploading {len(clips_df)} clips for {drop_id} to Zooniverse.")
     upload_clips_to_zooniverse(clips_df)
-    return PipelineStatus.CITSCI_CLIPS_COMPLETE
+    return CitSciStatus.CLIPS_UPLOADED
 
 
-def _step5_process_drop(drop_id: str) -> str:
-    """Step 5: Zooniverse frame extraction + upload."""
+def _run_zooniverse_images_drop(drop_id: str) -> str | None:
+    """Zooniverse frame extraction + upload."""
     paths = _get_common_paths(drop_id)
 
     if not Path(paths["selections_csv"]).exists():
         logging.error(
-            f"Missing selections CSV for {drop_id} — step 4 should have written it."
+            f"Missing selections CSV for {drop_id} — zooniverse-clips should have written it."
         )
         return None
 
@@ -208,14 +188,12 @@ def _step5_process_drop(drop_id: str) -> str:
     )
     logging.info(f"Uploading {len(frames_df)} frames for {drop_id} to Zooniverse.")
     upload_frames_to_zooniverse(frames_df)
-    return PipelineStatus.AWAITING_CITSCI_FRAMES
+    return CitSciStatus.FRAMES_UPLOADED
 
 
-def _step6_process_drop(drop_id: str) -> str:
-    """Step 6: Biigle frame extraction + volume upload."""
+def _run_biigle_upload_drop(drop_id: str) -> str | None:
+    """Biigle frame extraction + volume upload."""
     paths = _get_common_paths(drop_id)
-    # Biigle uses its own selections CSV (multiplier applied) separate from the
-    # Zooniverse one so step 4 and step 6 don't overwrite each other's output.
     biigle_selections_path = config.get_biigle_selections_csv_path(drop_id)
 
     try:
@@ -233,22 +211,20 @@ def _step6_process_drop(drop_id: str) -> str:
     if volume_info is None:
         return None
     logging.info(f"Biigle volume created for {drop_id}: id={volume_info.get('id')}")
-    return PipelineStatus.AWAITING_EXPERT_REVIEW
+    return BiigleStatus.UPLOADED
 
 
 # ---------------------------------------------------------------------------
-# Dynamic input statuses — Biigle-direct path also picks up ML_COMPLETE
-# when Zooniverse steps are not running.
+# Dynamic prerequisites for biigle-upload
 # ---------------------------------------------------------------------------
 
 
-def _biigle_input_statuses(args: argparse.Namespace, run_all: bool) -> list[str]:
-    """Returns the statuses Step 6 should query based on which stages are active.
+def _biigle_prerequisites(args: argparse.Namespace, run_all: bool) -> dict[str, str]:
+    """Returns the prerequisite section condition for biigle-upload.
 
-    Zooniverse path:   only CITSCI_COMPLETE (drops have passed through Zooniverse)
-    Biigle-direct:     CITSCI_COMPLETE + ML_COMPLETE (skip Zooniverse entirely)
+    Zooniverse path (default):   wait for citsci_status=complete
+    Biigle-direct (skip zooniverse): wait for ml_status=complete
     """
-    statuses = [PipelineStatus.CITSCI_COMPLETE]
     skip_zooniverse = not (
         run_all
         or getattr(args, "zooniverse_clips", False)
@@ -256,8 +232,8 @@ def _biigle_input_statuses(args: argparse.Namespace, run_all: bool) -> list[str]
         or getattr(args, "zooniverse_sync", False)
     )
     if skip_zooniverse:
-        statuses.append(PipelineStatus.ML_COMPLETE)
-    return statuses
+        return {"ml_status": MlStatus.COMPLETE}
+    return {"citsci_status": CitSciStatus.COMPLETE}
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +241,7 @@ def _biigle_input_statuses(args: argparse.Namespace, run_all: bool) -> list[str]
 # ---------------------------------------------------------------------------
 
 STAGES: list = [
-    GlobalStage("ingest", "Step 1: metadata ingestion", _run_step1_ingest),
+    GlobalStage("ingest", "Metadata ingestion", _run_ingest),
     GlobalStage(
         "check-arrivals",
         "Check S3 for video arrivals",
@@ -279,40 +255,47 @@ STAGES: list = [
         run_in_all=False,
     ),
     GlobalStage(
-        "ml", "Steps 2+3: ML inference + post-processing", _run_steps2_and_3_ml
+        "legacy",
+        "Historical backfill: expert annotations + legacy Zooniverse CSVs",
+        _run_legacy,
+        run_in_all=False,
     ),
+    GlobalStage("ml", "ML inference + post-processing", _run_ml),
     DropStage(
         "zooniverse-clips",
-        "Step 4: Zooniverse clip extraction",
-        _step4_process_drop,
-        [PipelineStatus.ML_COMPLETE, PipelineStatus.AWAITING_CITSCI_CLIPS],
-        queue_status=PipelineStatus.AWAITING_CITSCI_CLIPS,
+        "Zooniverse clip extraction",
+        _run_zooniverse_clips_drop,
+        section="citsci_status",
+        input_statuses=[CitSciStatus.PENDING],
+        prerequisites={"ml_status": MlStatus.COMPLETE},
     ),
     DropStage(
         "zooniverse-images",
-        "Step 5: Zooniverse image extraction",
-        _step5_process_drop,
-        [PipelineStatus.CITSCI_CLIPS_COMPLETE],
+        "Zooniverse image extraction",
+        _run_zooniverse_images_drop,
+        section="citsci_status",
+        input_statuses=[CitSciStatus.CLIPS_UPLOADED],
     ),
     DropStage(
         "zooniverse-sync",
-        "Step 5b: Zooniverse volunteer sync-back",
-        _step_zooniverse_sync_drop,
-        [PipelineStatus.AWAITING_CITSCI_FRAMES],
+        "Zooniverse volunteer sync-back",
+        _run_zooniverse_sync_drop,
+        section="citsci_status",
+        input_statuses=[CitSciStatus.FRAMES_UPLOADED],
     ),
     DropStage(
         "biigle-upload",
-        "Step 6: Biigle frame extraction + upload",
-        _step6_process_drop,
-        _biigle_input_statuses,
+        "Biigle frame extraction + upload",
+        _run_biigle_upload_drop,
+        section="biigle_status",
+        input_statuses=[BiigleStatus.PENDING],
+        prerequisites=_biigle_prerequisites,
     ),
-    GlobalStage(
-        "biigle-sync", "Step 7: Biigle annotation sync", _run_step7_biigle_sync
-    ),
+    GlobalStage("biigle-sync", "Biigle annotation sync", _run_biigle_sync),
     GlobalStage(
         "retrain",
-        "Step 8: Retraining pipeline (run --biigle-sync first)",
-        _run_step8_retrain,
+        "Model retraining (run --biigle-sync first)",
+        _run_retrain,
     ),
 ]
 
@@ -348,10 +331,8 @@ def main() -> None:
         log_header("PING: CONFIG CHECK")
         logging.info(f"S3 bucket: {config.s3_bucket}")
         logging.info(f"Base dir:  {config.base_dir}")
-
         return
 
-    # Bind no_upload to set-targets (only stage whose behaviour depends on it)
     patched_stages = [
         (
             replace(
@@ -365,7 +346,8 @@ def main() -> None:
     runner = StageRunner(patched_stages, db)
     runner.run(args)
 
-    # Push final state (DBs + ML CSVs) to S3
+    # Always run the S3 sync — we want the partial results of whatever did
+    # succeed to be persisted, even if some stage failed.
     if args.no_upload:
         logging.info("No-upload set: skipping final S3 sync.")
         log_header("PIPELINE COMPLETE (LOCAL ONLY)", character="═")
@@ -379,6 +361,15 @@ def main() -> None:
             )
             log_header("PIPELINE FAILED (SYNC ERROR)", character="═")
             sys.exit(1)
+
+    # Exit non-zero if any global stage raised — this way CI / cron can tell
+    # the run wasn't fully clean even though the pipeline kept going.
+    if runner.failed_stages:
+        logging.critical(
+            f"Pipeline exiting with non-zero status due to failed stages: "
+            f"{', '.join(runner.failed_stages)}"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

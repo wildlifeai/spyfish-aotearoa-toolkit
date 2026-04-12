@@ -10,6 +10,7 @@ This module coordinates the full flow:
 
 import logging
 import shutil
+from pathlib import Path
 
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
 from spyfish.config.wrapper import config
@@ -22,15 +23,75 @@ from spyfish.ml.training.split_data import split_data
 from spyfish.ml.training.train import run_training_pipeline
 
 
+def _archive_pipeline_model_dir() -> None:
+    """Move any .pt files currently in `pipeline_model_dir` to `archived_models_dir`.
+
+    Called before writing new weights on promotion so the outgoing production
+    model is preserved for rollback. Filenames are kept as-is. If a file with
+    the same name already exists in the archive (unlikely but possible when
+    re-promoting an identical model), the older archived copy is overwritten
+    — the currently-deployed model is always more recent and more relevant.
+    """
+    src_dir = config.pipeline_model_dir
+    if not src_dir.exists():
+        return
+    pt_files = list(src_dir.glob("*.pt"))
+    if not pt_files:
+        return
+
+    archive_dir = config.archived_models_dir
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    for pt in pt_files:
+        dest = archive_dir / pt.name
+        logging.info(f"Archiving previous production model: {pt} -> {dest}")
+        shutil.move(str(pt), str(dest))
+
+
+def _derive_promoted_filename(model_path: str, model_type: str) -> str:
+    """Derive the promoted filename from the training run directory.
+
+    `train.py` writes best.pt to `runs/{timestamp}_{model_type}/weights/best.pt`,
+    so `best.pt.parent.parent.name` is `{timestamp}_{model_type}` — a unique,
+    human-readable identifier that already encodes when the model was trained.
+
+    We reuse that directly as the promoted filename so:
+      - every promotion produces a distinct file name
+      - archive collisions are effectively impossible
+      - you can cross-reference `results.csv` in the training run dir for metrics
+
+    If the path doesn't match the expected structure (e.g. a caller passes a
+    hand-constructed path), fall back to `promoted_{model_type}.pt` and log.
+    """
+    try:
+        run_dir_name = Path(model_path).parent.parent.name  # {timestamp}_{model_type}
+        if run_dir_name and model_type in run_dir_name:
+            return f"{run_dir_name}.pt"
+    except Exception:
+        pass
+    logging.warning(
+        f"Could not derive training run name from {model_path!r}; "
+        f"using fallback filename 'promoted_{model_type}.pt' — "
+        "note this will overwrite any prior fallback-named promotion."
+    )
+    return f"promoted_{model_type}.pt"
+
+
 def _promote_model_locally(model_path: str, model_type: str):
-    """Promote a model by copying it to the pipeline_model directory."""
+    """Promote a model by copying it to the pipeline_model directory.
+
+    The current contents of `pipeline_model_dir` are moved to
+    `archived_models_dir` first so the outgoing model stays recoverable.
+    """
+    _archive_pipeline_model_dir()
+
     dest_dir = config.pipeline_model_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / f"promoted_{model_type}.pt"
+    dest_path = dest_dir / _derive_promoted_filename(model_path, model_type)
 
     logging.info(f"Promoting {model_type} model locally: {model_path} -> {dest_path}")
     shutil.copy2(model_path, dest_path)
-    logging.info(f"✅ {model_type.upper()} model promoted locally.")
+    logging.info(f"✅ {model_type.upper()} model promoted locally as {dest_path.name}.")
     return dest_path
 
 

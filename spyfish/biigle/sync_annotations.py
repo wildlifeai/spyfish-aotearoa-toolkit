@@ -6,7 +6,7 @@ import pandas as pd
 
 from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.biigle.biigle_parser import BiigleParser
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import BiigleStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -117,18 +117,8 @@ def sync_biigle_annotations():
     ann_db = AnnotationDatabaseManager()
     handler = BiigleHandler()
 
-    # 1. Get deployments with biigle_volume_id that are NOT yet complete
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""
-            SELECT drop_id, biigle_volume_id
-            FROM deployments
-            WHERE biigle_volume_id IS NOT NULL
-              AND status = '{PipelineStatus.AWAITING_EXPERT_REVIEW}'
-        """
-        )
-        deployments = cursor.fetchall()
+    # 1. Get deployments with biigle_volume_id that are in biigle_status=uploaded
+    deployments = db.get_biigle_volumes_awaiting_sync(BiigleStatus.UPLOADED)
 
     if not deployments:
         logging.info("No active deployments with Biigle volumes found to check.")
@@ -171,7 +161,7 @@ def sync_biigle_annotations():
                 logging.debug(
                     f"  No annotations found for {drop_id} (volume may be done but have no annotations)."
                 )
-                db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
+                db.advance_status(drop_id, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
                 continue
 
             # Save the raw Biigle report for YOLO retraining (bounding boxes)
@@ -193,7 +183,7 @@ def sync_biigle_annotations():
                     f"  No fish annotations after aggregation for {drop_id} "
                     "(only non-fish labels present). Advancing to PIPELINE_COMPLETE."
                 )
-                db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
+                db.advance_status(drop_id, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
                 continue
 
             # Replace only Biigle-sourced expert annotations (external_id IS NOT NULL).
@@ -226,9 +216,10 @@ def sync_biigle_annotations():
                 f"  Ingested {len(annotations_to_add)} annotations for {drop_id}"
             )
 
-            # Advance status to PIPELINE_COMPLETE
-            db.advance_status(drop_id, PipelineStatus.PIPELINE_COMPLETE)
-            logging.info(f"  Advanced {drop_id} to {PipelineStatus.PIPELINE_COMPLETE}")
+            db.advance_status(drop_id, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
+            logging.info(
+                f"  Advanced {drop_id} to biigle_status={BiigleStatus.COMPLETE!r}"
+            )
 
         except Exception as e:
             logging.error(

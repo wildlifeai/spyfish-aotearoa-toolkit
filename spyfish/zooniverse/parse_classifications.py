@@ -1,14 +1,9 @@
 """
-Reusable Zooniverse classification parsing logic.
+Zooniverse classification parsing — strict new-format drop_id resolution only.
 
-Covers Phases 0-3 of the Zooniverse Classifications → Frame Extraction plan:
-  Phase 0 — Fetch from Panoptes API
-  Phase 1 — Parse API response (annotation type detection, drop_id resolution)
-  Phase 2 — Aggregate by (subject_id, species), apply min_votes filter
-  Phase 3 — NOTHINGHERE sampling
-
-The top-level runner (parse_zooniverse_classifications.py) handles Phases 4-6
-(MaxN CSV export, deduplication, frame extraction).
+Non-canonical video filenames log a warning and surface as ``drop_id=None``.
+Historical backfill lives in ``spyfish.zooniverse.legacy_extract``; core
+must not import from it.
 """
 
 import logging
@@ -21,6 +16,7 @@ from panoptes_client import Classification, Panoptes
 
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
+from spyfish.zooniverse.subject_keys import SubjectKeys
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -39,11 +35,6 @@ _COUNT_BUCKETS: dict[str, int] = {
     "2030": 25,
     "3040": 35,
 }
-
-# Legacy filename: {RESERVE}_{SITE}_{DD}_{MM}_{YYYY}  e.g. AHE_062_25_04_2022
-_LEGACY_DMY_PATTERN = re.compile(r"^([A-Z]{2,4})_(\d{3})_(\d{2})_(\d{2})_(\d{4})$")
-# Legacy filename: {RESERVE}_{SITE}_{YYYY}_{MM}_{DD}  e.g. KPT_012_2021_06_03
-_LEGACY_YMD_PATTERN = re.compile(r"^([A-Z]{2,4})_(\d{3})_(\d{4})_(\d{2})_(\d{2})$")
 
 
 # ── Phase 0 — Fetch from API ─────────────────────────────────────────────────
@@ -100,7 +91,7 @@ def fetch_classifications(since: Optional[str] = None) -> list[dict]:
             subject_data = raw.get("subject_data", {}).get(subject_id, {})
             metadata = subject_data.get("metadata", {})
             locations = subject_data.get("locations", [])
-            subject_set_ids = subject_data.get("links", {}).get("subject_sets", [None])
+            subject_set_ids = subject_data.get("links", {}).get("subject_sets", [])
 
             classifications.append(
                 {
@@ -130,69 +121,28 @@ def fetch_classifications(since: Optional[str] = None) -> list[dict]:
 # ── Phase 1 — Parse ──────────────────────────────────────────────────────────
 
 
-def _resolve_legacy_drop_id(stem: str, db_drop_ids: list[str]) -> Optional[str]:
+def _resolve_drop_id(video_filename: str) -> Optional[str]:
     """
-    Try to resolve a legacy-format filename stem to a drop_id using date patterns.
-
-    Handles two formats:
-      {RESERVE}_{SITE}_{DD}_{MM}_{YYYY}  e.g. AHE_062_25_04_2022
-      {RESERVE}_{SITE}_{YYYY}_{MM}_{DD}  e.g. KPT_012_2021_06_03
-
-    Constructs the drop_id prefix {RESERVE}_{YYYYMMDD}_BUV_{RESERVE}_{SITE}
-    and finds the highest replicate in the DB with that prefix.
-    """
-    m = _LEGACY_DMY_PATTERN.match(stem)
-    if m:
-        reserve, site, dd, mm, yyyy = m.groups()
-        date_str = f"{yyyy}{mm}{dd}"
-    else:
-        m = _LEGACY_YMD_PATTERN.match(stem)
-        if m:
-            reserve, site, yyyy, mm, dd = m.groups()
-            date_str = f"{yyyy}{mm}{dd}"
-        else:
-            return None
-
-    prefix = f"{reserve}_{date_str}_BUV_{reserve}_{site}_"
-    matches = sorted([d for d in db_drop_ids if d.startswith(prefix)])
-    if not matches:
-        return None
-
-    # Use the highest replicate (last alphabetically = highest _NN suffix)
-    return matches[-1]
-
-
-def _resolve_drop_id(
-    video_filename: str, db_drop_ids: list[str]
-) -> tuple[Optional[str], bool, str]:
-    """
-    Resolve a video filename to a drop_id.
-
-    Returns:
-        (drop_id, video_exists, match_path) where match_path is one of:
-          "matched" | "unmatched_downloaded" | "unmatched_no_media"
+    Strict filename → drop_id. Returns ``None`` for empty inputs and for
+    non-canonical stems (with a warning log in the latter case).
     """
     if not video_filename:
-        return None, False, "unmatched_no_media"
+        return None
 
     stem = Path(video_filename).stem
 
-    # New-format drop IDs: structurally predictable, validate and check video on disk
     if _NEW_FORMAT_PATTERN.match(stem):
         try:
             config.validate_drop_id(stem)
-            video_path = config.get_video_path(stem)
-            return stem, video_path.exists(), "matched"
+            return stem
         except Exception:
             pass
 
-    # Legacy date-pattern filenames: reconstruct drop_id from parsed date + site
-    legacy_drop_id = _resolve_legacy_drop_id(stem, db_drop_ids)
-    if legacy_drop_id:
-        video_path = config.media_dir / video_filename
-        return legacy_drop_id, video_path.exists(), "matched"
-
-    return None, False, "unmatched_downloaded"
+    logging.warning(
+        f"Non-canonical Zooniverse video_filename: {video_filename!r} — "
+        "flag upstream, do not silently remap."
+    )
+    return None
 
 
 def _parse_annotation(ann: dict) -> list[dict]:
@@ -272,138 +222,148 @@ def _parse_annotation(ann: dict) -> list[dict]:
     return rows
 
 
-def parse_classifications(
-    raw_classifications: list[dict],
-    db_drop_ids: list[str],
-) -> pd.DataFrame:
+# Placeholder used when a classification has no parseable annotations — keeps
+# the row in the output so "everyone said NOTHINGHERE" is countable later.
+_NOTHING_HERE_PLACEHOLDER = {
+    "annotation_type": "classification",
+    "species": None,
+    "count": 0,
+    "annotation_seconds": None,
+    "is_nothing_here": True,
+    "x1": None,
+    "y1": None,
+    "x2": None,
+    "y2": None,
+}
+
+
+def _parse_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_subject_metadata(meta: dict) -> dict:
+    """Read Zooniverse subject metadata using only the keys upload.py writes.
+
+    Strict — no legacy fallbacks. Pre-normalise legacy metadata via
+    `legacy_extract._normalize_legacy_metadata` before passing to this parser.
     """
-    Parse raw Panoptes classification dicts into a flat DataFrame.
+    return {
+        "video_filename": meta.get(SubjectKeys.VIDEO_FILENAME, ""),
+        "upl_seconds": _parse_float(meta.get(SubjectKeys.UPL_SECONDS)),
+        "subject_type": meta.get(SubjectKeys.SUBJECT_TYPE, "clip"),
+        "time_of_max_seconds": _parse_float(meta.get(SubjectKeys.TIME_OF_MAX)),
+        "site_name": meta.get(SubjectKeys.SITE_NAME, ""),
+        "link_to_reserve": meta.get(SubjectKeys.LINK_TO_RESERVE, ""),
+        "event_date": meta.get(SubjectKeys.EVENT_DATE, ""),
+    }
 
-    Args:
-        raw_classifications: Output of fetch_classifications().
-        db_drop_ids: All known drop_ids from the DB, for legacy filename matching.
 
-    Returns:
-        DataFrame with one row per (classification, species annotation).
+def _missing_required_keys(meta: dict) -> list[str]:
+    """Return any required SubjectKeys that are absent or empty in `meta`."""
+    return [k for k in SubjectKeys.REQUIRED if not meta.get(k)]
+
+
+def _absolute_seconds(
+    subject_type: str,
+    time_of_max_seconds: Optional[float],
+    upl_seconds: Optional[float],
+    annotation_seconds: Optional[float],
+) -> Optional[float]:
+    """Compute the absolute video timestamp for an annotation.
+
+    Frame subjects use the pre-baked TimeOfMax. Clip subjects offset the
+    annotation_seconds (which is relative to clip start) by upl_seconds.
+    """
+    if subject_type == "frame" and time_of_max_seconds is not None:
+        return time_of_max_seconds
+    if upl_seconds is not None and annotation_seconds is not None:
+        return upl_seconds + annotation_seconds
+    return annotation_seconds
+
+
+def _build_classification_record(
+    classification: dict,
+    annotation: dict,
+    meta_fields: dict,
+    drop_id: Optional[str],
+) -> dict:
+    """Compose one output row for a single (classification, annotation) pair."""
+    return {
+        "classification_id": classification["classification_id"],
+        "created_at": classification["created_at"],
+        "user_name": classification["user_name"],
+        "user_id": classification["user_id"],
+        "subject_id": classification["subject_id"],
+        "subject_set_id": classification["subject_set_id"],
+        "workflow_id": classification["workflow_id"],
+        "video_filename": meta_fields["video_filename"],
+        "drop_id": drop_id,
+        "subject_type": meta_fields["subject_type"],
+        "upl_seconds": meta_fields["upl_seconds"],
+        "species": annotation["species"],
+        "count": annotation["count"],
+        "annotation_seconds": annotation["annotation_seconds"],
+        "absolute_seconds": _absolute_seconds(
+            meta_fields["subject_type"],
+            meta_fields["time_of_max_seconds"],
+            meta_fields["upl_seconds"],
+            annotation["annotation_seconds"],
+        ),
+        "annotation_type": annotation["annotation_type"],
+        "bbox_x1": annotation["x1"],
+        "bbox_y1": annotation["y1"],
+        "bbox_x2": annotation["x2"],
+        "bbox_y2": annotation["y2"],
+        "site_name": meta_fields["site_name"],
+        "link_to_reserve": meta_fields["link_to_reserve"],
+        "event_date": meta_fields["event_date"],
+        "is_nothing_here": annotation["is_nothing_here"],
+        "is_retired": True,  # hard-filtered to retired-only in fetch step
+        "subject_locations": classification["subject_locations"],
+    }
+
+
+def parse_classifications(raw_classifications: list[dict]) -> pd.DataFrame:
+    """
+    Parse raw Panoptes classification dicts into one row per
+    (classification, species annotation). Subjects with non-current
+    metadata keys are counted and surface as a single warning at the
+    end — they should be passed through legacy_extract first.
     """
     records = []
+    subjects_missing_keys: dict[str, int] = {}
 
     for c in raw_classifications:
         meta = c["subject_metadata"]
+        for missing in _missing_required_keys(meta):
+            subjects_missing_keys[missing] = subjects_missing_keys.get(missing, 0) + 1
 
-        video_filename = (
-            meta.get("video_filename")
-            or meta.get("#video_filename")
-            or meta.get("#VideoFilename")  # CSV export uses capital V/F
-            or ""
-        )
-        upl_seconds = None
-        # Read new key first, fall back to old "upl_seconds" for subjects uploaded before rename
-        raw_upl = (
-            meta.get("UplAbsSeconds")
-            or meta.get("#UplAbsSeconds")
-            or meta.get("upl_seconds")
-            or meta.get("#upl_seconds")
-        )
-        if raw_upl is not None:
-            try:
-                upl_seconds = float(raw_upl)
-            except (ValueError, TypeError):
-                pass
+        meta_fields = _extract_subject_metadata(meta)
+        drop_id = _resolve_drop_id(meta_fields["video_filename"])
 
-        subject_type = (
-            meta.get("subject_type")
-            or meta.get("#subject_type")
-            or meta.get("Subject_type", "clip")
-        )
-        time_of_max_seconds = None
-        raw_tom = meta.get("#TimeOfMaxAbsSeconds") or meta.get("TimeOfMaxAbsSeconds")
-        if raw_tom is not None:
-            try:
-                time_of_max_seconds = float(raw_tom)
-            except (ValueError, TypeError):
-                pass
-
-        site_name = (
-            meta.get("#siteName") or meta.get("#SiteID") or meta.get("site_name", "")
-        )
-        link_to_reserve = meta.get("!LinkToMarineReserve") or meta.get(
-            "link_to_reserve", ""
-        )
-        event_date = meta.get("#EventDate") or meta.get("event_date", "")
-
-        drop_id, video_exists, match_path = _resolve_drop_id(
-            video_filename, db_drop_ids
-        )
-
-        ann_rows = []
-        for ann in c["annotations"]:
-            ann_rows.extend(_parse_annotation(ann))
-
+        ann_rows = [row for ann in c["annotations"] for row in _parse_annotation(ann)]
         if not ann_rows:
-            # Preserve classifications with no parseable annotations (e.g. pure NOTHINGHERE)
-            ann_rows = [
-                {
-                    "annotation_type": "classification",
-                    "species": None,
-                    "count": 0,
-                    "annotation_seconds": None,
-                    "is_nothing_here": True,
-                    "x1": None,
-                    "y1": None,
-                    "x2": None,
-                    "y2": None,
-                }
-            ]
+            ann_rows = [_NOTHING_HERE_PLACEHOLDER]
 
         for ann in ann_rows:
-            annotation_seconds = ann["annotation_seconds"]
-
-            # Absolute seconds in original video
-            if subject_type == "frame" and time_of_max_seconds is not None:
-                absolute_seconds = time_of_max_seconds
-            elif upl_seconds is not None and annotation_seconds is not None:
-                absolute_seconds = upl_seconds + annotation_seconds
-            else:
-                absolute_seconds = annotation_seconds
-
-            records.append(
-                {
-                    "classification_id": c["classification_id"],
-                    "created_at": c["created_at"],
-                    "user_name": c["user_name"],
-                    "user_id": c["user_id"],
-                    "subject_id": c["subject_id"],
-                    "subject_set_id": c["subject_set_id"],
-                    "workflow_id": c["workflow_id"],
-                    "video_filename": video_filename,
-                    "drop_id": drop_id,
-                    "video_exists": video_exists,
-                    "match_path": match_path,
-                    "subject_type": subject_type,
-                    "upl_seconds": upl_seconds,
-                    "species": ann["species"],
-                    "count": ann["count"],
-                    "annotation_seconds": ann["annotation_seconds"],
-                    "absolute_seconds": absolute_seconds,
-                    "annotation_type": ann["annotation_type"],
-                    "bbox_x1": ann["x1"],
-                    "bbox_y1": ann["y1"],
-                    "bbox_x2": ann["x2"],
-                    "bbox_y2": ann["y2"],
-                    "site_name": site_name,
-                    "link_to_reserve": link_to_reserve,
-                    "event_date": event_date,
-                    "is_nothing_here": ann["is_nothing_here"],
-                    "is_retired": True,  # hard-filtered to retired only in fetch step
-                    "subject_locations": c["subject_locations"],
-                }
-            )
+            records.append(_build_classification_record(c, ann, meta_fields, drop_id))
 
     df = pd.DataFrame(records)
     logging.info(
         f"Parsed {len(df)} annotation rows from {len(raw_classifications)} classifications."
     )
+    if subjects_missing_keys:
+        logging.warning(
+            "Some classifications were missing current subject metadata keys: "
+            f"{subjects_missing_keys}. These were probably uploaded by an older "
+            "version of upload.py — pass them through "
+            "spyfish.zooniverse.legacy_extract._normalize_legacy_metadata first."
+        )
     return df
 
 
@@ -465,7 +425,6 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
             subject_set_id=("subject_set_id", "first"),
             workflow_id=("workflow_id", "first"),
             subject_locations=("subject_locations", "first"),
-            video_exists=("video_exists", "first"),
         )
         .reset_index()
     )
@@ -547,136 +506,17 @@ def sample_nothing_here_clips(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-# ── CSV loader ───────────────────────────────────────────────────────────────
-
-
-def load_classifications_from_csv(csv_paths: list[str]) -> list[dict]:
-    """
-    Load Zooniverse export CSVs and normalise rows into the same dict format
-    as fetch_classifications(), so parse_classifications() works unchanged.
-
-    CSV subject_data fields are flat (no nested 'metadata' key) and use
-    different capitalisation to the API (e.g. '#VideoFilename' vs 'video_filename').
-    These are passed through as-is; parse_classifications() handles all variants.
-
-    Args:
-        csv_paths: Paths to one or more Zooniverse classification export CSVs.
-
-    Returns:
-        List of classification dicts in the same format as fetch_classifications().
-    """
-    import json
-
-    records = []
-    for path in csv_paths:
-        logging.info(f"Loading classifications from {path}")
-        df = pd.read_csv(path, dtype=str)
-        logging.info(f"  {len(df)} rows")
-
-        for _, row in df.iterrows():
-            raw_sd = row.get("subject_data", "")
-            try:
-                subject_data_map = json.loads(raw_sd) if pd.notna(raw_sd) else {}
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-            raw_ids = row.get("subject_ids", "")
-            subject_ids = (
-                [s.strip() for s in str(raw_ids).split(";")]
-                if pd.notna(raw_ids)
-                else []
-            )
-            if not subject_ids:
-                continue
-
-            subject_id = subject_ids[0]
-            # CSV subject_data: fields are at top level (not nested under 'metadata')
-            subject_entry = subject_data_map.get(subject_id, {})
-
-            raw_anns = row.get("annotations", "")
-            try:
-                annotations = json.loads(raw_anns) if pd.notna(raw_anns) else []
-            except (json.JSONDecodeError, TypeError):
-                annotations = []
-
-            records.append(
-                {
-                    "classification_id": row.get("classification_id"),
-                    "created_at": row.get("created_at"),
-                    "user_name": row.get("user_name"),
-                    "user_id": row.get("user_id"),
-                    "annotations": annotations,
-                    "subject_id": subject_id,
-                    "subject_set_id": None,  # not in CSV export
-                    "workflow_id": row.get("workflow_id"),
-                    "subject_metadata": subject_entry,
-                    "subject_locations": [],  # not in CSV export
-                }
-            )
-
-    logging.info(f"Loaded {len(records)} classifications from {len(csv_paths)} CSV(s).")
-    return records
-
-
 # ── Subject completion ────────────────────────────────────────────────────────
-
-
-def subject_completion_from_csv(subjects_csv_paths: list[str]) -> pd.DataFrame:
-    """
-    Load Zooniverse subjects export CSV(s) and return retirement completion per drop_id.
-
-    A drop_id is "fully complete" when every one of its uploaded subjects is retired.
-    Partially retired drop_ids are flagged so they are not treated as done.
-
-    Returns:
-        DataFrame with columns: drop_id, total, retired, pct_retired, fully_complete
-    """
-    import json as _json
-
-    frames = []
-    for path in subjects_csv_paths:
-        df = pd.read_csv(path, dtype=str)
-
-        def _get_video_filename(meta_str):
-            try:
-                m = _json.loads(meta_str)
-                return (
-                    m.get("#VideoFilename")
-                    or m.get("video_filename")
-                    or m.get("#video_filename")
-                    or ""
-                )
-            except Exception:
-                return ""
-
-        df["video_filename"] = df["metadata"].apply(_get_video_filename)
-        df["drop_id"] = (
-            df["video_filename"].str.replace(r"\.mp4$", "", regex=True).str.strip()
-        )
-        df["is_retired"] = df["retired_at"].notna()
-        frames.append(df[["subject_id", "drop_id", "is_retired", "subject_set_id"]])
-
-    combined = pd.concat(frames, ignore_index=True)
-
-    summary = (
-        combined.groupby("drop_id")
-        .agg(total=("subject_id", "count"), retired=("is_retired", "sum"))
-        .reset_index()
-    )
-    summary["pct_retired"] = (summary["retired"] / summary["total"] * 100).round(1)
-    summary["fully_complete"] = summary["retired"] == summary["total"]
-
-    return summary.sort_values("pct_retired", ascending=False).reset_index(drop=True)
 
 
 def subject_completion_from_api() -> pd.DataFrame:
     """
-    Fetch live subject retirement counts from the Panoptes API per subject set,
-    resolve each subject set to a drop_id via its subject metadata, and return
-    the same completion summary as subject_completion_from_csv().
-
+    Per drop_id retirement completion from live Panoptes SubjectSet counts.
     Requires an active Panoptes connection (call connect_to_zooniverse() first).
-    Slower than the CSV approach — use for live status checks, not bulk backfill.
+
+    Returns:
+        DataFrame with columns: project_id, subject_set_id, drop_id, total,
+        retired, pct_retired, fully_complete.
     """
     from panoptes_client import Subject, SubjectSet
 
@@ -685,7 +525,6 @@ def subject_completion_from_api() -> pd.DataFrame:
         logging.info(f"  Fetching subject sets for project {project_id}...")
         for ss in SubjectSet.where(project_id=project_id):
             ss_id = ss.id
-            # Sample the first subject to resolve drop_id from its metadata
             drop_id = None
             for subj in Subject.where(subject_set_id=ss_id):
                 raw = subj.raw
@@ -696,7 +535,7 @@ def subject_completion_from_api() -> pd.DataFrame:
                     or meta.get("#video_filename")
                     or ""
                 )
-                drop_id = vf.replace(".mp4", "").strip() or None
+                drop_id = _resolve_drop_id(vf)
                 break  # only need one subject to identify the drop
 
             counts = ss.raw.get("set_member_subjects_count", 0)
@@ -746,9 +585,7 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
     from spyfish.database.annotation_manager import AnnotationDatabaseManager
     from spyfish.database.manager import DatabaseManager as PipelineDB
 
-    maxn_csv = (
-        config.get_drop_annotations_dir(drop_id) / f"{drop_id}_zooniverse_maxn.csv"
-    )
+    maxn_csv = config.get_zooniverse_maxn_csv_path(drop_id)
     if not maxn_csv.exists():
         logging.info(
             f"ingest_zooniverse: No MaxN CSV found for {drop_id} at {maxn_csv}"
@@ -789,3 +626,32 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
     pipeline_db.sync_annotation_counts([drop_id])
 
     return len(annotations)
+
+
+def sync_zooniverse_drop(drop_id: str) -> str | None:
+    """
+    Pipeline entry point for zooniverse-sync (citsci_status: frames_uploaded → complete).
+
+    Checks whether parse_zooniverse_classifications.py has written a MaxN CSV
+    for this drop. If found, ingests it into the annotations DB and signals
+    the pipeline to advance. Returns None if the CSV isn't ready yet.
+
+    TODO: Integrate Caesar completion check so this step auto-detects subject
+    retirement without requiring parse_zooniverse_classifications.py to be
+    run separately first.
+    """
+    from spyfish.config.base import CitSciStatus
+
+    count = ingest_zooniverse_annotations(drop_id)
+    if count == 0:
+        logging.info(
+            f"zooniverse-sync: No MaxN CSV ready for {drop_id}. "
+            "Run parse_zooniverse_classifications.py once volunteers are done. "
+            "Leaving at frames_uploaded."
+        )
+        return None
+
+    logging.info(
+        f"zooniverse-sync: Ingested {count} citsci annotations for {drop_id} → citsci_status=complete"
+    )
+    return CitSciStatus.COMPLETE

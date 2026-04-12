@@ -101,7 +101,6 @@ def main() -> None:
     parser = BiigleParser(
         email=args.email,
         token=args.token,
-        cache_dir=str(output_dir / "cache"),
     )
 
     logging.info("Downloading image annotation report from Biigle…")

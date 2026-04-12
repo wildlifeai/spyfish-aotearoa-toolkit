@@ -20,13 +20,6 @@ def load_error_data():
         return pd.DataFrame()
 
 
-# --- Load file differences (Mocked for now since state machine handles this) ---
-@st.cache_data(ttl=1)
-def load_file_differences():
-    """Returns empty lists since File Presence is handled via pipeline Status."""
-    return [], []
-
-
 # --- Display functions ---
 def display_error_summary(errors_df: pd.DataFrame):
     if errors_df.empty:
@@ -87,7 +80,6 @@ def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None)
         hide_index=True,
         column_config={
             "ErrorMessage": st.column_config.TextColumn("Message", width="large"),
-            "status": st.column_config.TextColumn("Deployment Status"),
         },
     )
 
@@ -116,22 +108,14 @@ def main():
     # Move filters up so they affect all subsequent charts
     st.header("📈 Overview")
 
-    fcol1, fcol2 = st.columns(2)
-    with fcol1:
-        show_sampling_errors = st.checkbox("Show Sampling Errors", value=False)
-    with fcol2:
-        show_complete = st.checkbox("Show Complete", value=False)
+    show_sampling_errors = st.checkbox("Show Sampling Errors", value=False)
 
-    # Apply global filters
     errors_df = raw_errors_df.copy()
     if not show_sampling_errors and "ColumnName" in errors_df.columns:
         errors_df = errors_df[
             ~errors_df["ColumnName"].isin(["SamplingStart", "SamplingEnd"])
         ]
-    if not show_complete and "status" in errors_df.columns:
-        errors_df = errors_df[errors_df["status"] != "PIPELINE_COMPLETE"]
 
-    # Now display metrics based on filtered data
     display_error_summary(errors_df)
     st.divider()
 

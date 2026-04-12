@@ -1,6 +1,6 @@
 import pytest
 
-from spyfish.config.paths import config
+from spyfish.config.wrapper import config
 
 
 def test_validate_drop_id_valid():

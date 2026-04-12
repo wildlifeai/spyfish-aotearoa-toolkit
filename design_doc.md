@@ -11,67 +11,69 @@
 ## Table of Contents
 
 1. [Background & Context](#1-background--context)
-   - [Mission](#mission)
-   - [The problem](#the-problem)
-   - [Physical setup](#physical-setup)
-   - [Domain concepts](#domain-concepts)
-   - [Scale](#scale)
+  - [Mission](#mission)
+  - [The problem](#the-problem)
+  - [Physical setup](#physical-setup)
+  - [Domain concepts](#domain-concepts)
+  - [Scale](#scale)
 2. [Goals & Success Criteria](#2-goals--success-criteria)
-   - [Objectives](#objectives)
-   - [Success criteria](#success-criteria)
+  - [Objectives](#objectives)
+  - [Success criteria](#success-criteria)
 3. [System Context](#3-system-context)
-   - [Data flow](#data-flow-1)
-   - [Who uses what](#who-uses-what)
-   - [Actors](#actors)
-   - [Two dashboards, two audiences](#two-dashboards-two-audiences)
+  - [Data flow](#data-flow-1)
+  - [Who uses what](#who-uses-what)
+  - [Actors](#actors)
+  - [Two dashboards, two audiences](#two-dashboards-two-audiences)
 4. [Technical Architecture](#4-technical-architecture)
-   - [Technology stack](#technology-stack)
-   - [ML model strategy](#ml-model-strategy)
-   - [Config and orchestration](#config-and-orchestration)
-   - [Processing modules](#processing-modules)
+  - [Technology stack](#technology-stack)
+  - [ML model strategy](#ml-model-strategy)
+  - [Config and orchestration](#config-and-orchestration)
+  - [Processing modules](#processing-modules)
 5. [Data Flow](#5-data-flow)
-   - [Pre-pipeline: how videos reach S3](#pre-pipeline-how-videos-reach-s3)
-   - [End-to-end pipeline data flow](#end-to-end-pipeline-data-flow)
-   - [Annotation sources and trust](#annotation-sources-and-trust)
-   - [File artifacts per deployment](#file-artifacts-per-deployment)
+  - [Pre-pipeline: how videos reach S3](#pre-pipeline-how-videos-reach-s3)
+  - [End-to-end pipeline data flow](#end-to-end-pipeline-data-flow)
+  - [Annotation sources and trust](#annotation-sources-and-trust)
+  - [File artifacts per deployment](#file-artifacts-per-deployment)
 6. [Data Modeling](#6-data-modeling)
-   - [Entity relationships](#entity-relationships)
-   - [Two-database design](#two-database-design)
-   - [Two orthogonal status dimensions](#two-orthogonal-status-dimensions)
+  - [Entity relationships](#entity-relationships)
+  - [Two-database design](#two-database-design)
+  - [Multi-section pipeline status model](#multi-section-pipeline-status-model)
 7. [Pipeline State Machine](#7-pipeline-state-machine)
-   - [Error and hold recovery](#error-and-hold-recovery)
-   - [Transition rules](#transition-rules)
+  - [Section overview](#section-overview)
+  - [Section state machines](#section-state-machines)
+  - [Cross-section prerequisites](#cross-section-prerequisites)
+  - [Transition rules](#transition-rules)
 8. [Component Design](#8-component-design)
-   - [Declarative stage framework](#declarative-stage-framework)
-   - [Configuration design](#configuration-design)
-   - [Clip selection strategy](#clip-selection-strategy)
+  - [Declarative stage framework](#declarative-stage-framework)
+  - [Configuration design](#configuration-design)
+  - [Clip selection strategy](#clip-selection-strategy)
 9. [Security & Sensitive Data](#9-security--sensitive-data)
-   - [Sensitive data categories](#sensitive-data-categories)
-   - [Credential management](#credential-management)
-   - [S3 access](#s3-access)
-   - [Path safety](#path-safety)
+  - [Sensitive data categories](#sensitive-data-categories)
+  - [Credential management](#credential-management)
+  - [S3 access](#s3-access)
+  - [Path safety](#path-safety)
 10. [Alternatives Considered](#10-alternatives-considered)
-    - [Database: SQLite vs cloud database](#database-sqlite-vs-cloud-database)
+  - [Database: SQLite vs cloud database](#database-sqlite-vs-cloud-database)
     - [Architecture: monolithic vs microservices](#architecture-monolithic-pipeline-vs-microservices)
     - [ML compute: local vs cloud GPU vs HPC](#ml-compute-local-vs-cloud-gpu-vs-hpc)
     - [Clip selection: random vs ML-guided](#clip-selection-random-sampling-vs-ml-guided)
     - [Reporting: Streamlit vs PowerBI](#reporting-dashboard-streamlit-vs-powerbi)
 11. [Milestones](#11-milestones)
-    - [Phase 1 — Core Pipeline](#phase-1--core-pipeline--near-complete)
+  - [Phase 1 — Core Pipeline](#phase-1--core-pipeline--near-complete)
     - [Phase 2 — Annotation Platforms](#phase-2--annotation-platforms--in-progress)
     - [Phase 3 — Model Improvement Loop](#phase-3--model-improvement-loop)
     - [Phase 4 — User Interaction & Admin](#phase-4--user-interaction--admin)
     - [Phase 5 — Production Hardening](#phase-5--production-hardening)
     - [Phase 6 — DOC Reporting](#phase-6--doc-reporting)
 12. [Known Gaps & Future Work](#12-known-gaps--future-work)
-    - [Zooniverse volunteer sync (step 5b)](#zooniverse-volunteer-sync--step-5b-pipeline-wiring)
+  - [Zooniverse volunteer sync (step 5b)](#zooniverse-volunteer-sync--step-5b-pipeline-wiring)
     - [PowerBI annotation data feed](#powerbi--annotation-data-feed-is-manual)
     - [User interaction with database and pipeline](#user-interaction-with-the-database-and-pipeline)
     - [SharePoint → S3 metadata download](#sharepoint--s3-metadata-download)
     - [GoPro video concatenation](#gopro-video-concatenation--upstream-of-this-pipeline)
     - [BIIGLE future scope](#biigle-future-scope-substrate-and-size-review)
     - [NeSI crontab scheduling](#nesi-crontab-scheduling--hardening-in-progress)
-13. [Setup & Prerequisites](#13-setup--prerequisites)
+13. [Setup & Prerequisiteshold](#13-setup--prerequisites)
 14. [Running the Pipeline](#14-running-the-pipeline)
 15. [Admin & Debugging](#15-admin--debugging)
 16. [Configuration Reference](#16-configuration-reference)
@@ -126,18 +128,21 @@ BUV cameras are GoPros mounted on a triangular metal frame with a bait at the bo
 
 ### Timestamp convention
 
-All time values in CSVs, databases, and code follow two reference frames:
+All time values in CSVs, databases, and code are absolute seconds from frame 0
+of the source video file. There is no relative-to-sampling-window convention
+anywhere in the pipeline.
 
-| Suffix | Meaning | Example columns |
-|---|---|---|
-| **AbsSeconds** | Seconds from the start of the video file | `TimeOfMaxAbsSeconds`, `TimeAbsSeconds`, `SamplingStart`, `SamplingEnd` |
-| **DeploySeconds** | Seconds relative to `SamplingStart` (the deployment window) | `ClipStartDeploySeconds`, `ClipEndDeploySeconds` |
+| Column                      | Meaning                                     |
+| --------------------------- | ------------------------------------------- |
+| `ClipStartAbsoluteSeconds`  | Where an extracted clip starts in the video |
+| `ClipEndAbsoluteSeconds`    | Where an extracted clip ends                |
+| `TimeOfMaxAbsoluteSeconds`  | Timestamp of a MaxN peak                    |
+| `TimeAbsoluteSeconds`       | Raw ML detection timestamp                  |
+| `SamplingStart`             | First usable frame (set by rangers)         |
+| `SamplingEnd`               | Last usable frame                           |
 
-**Rule:** `seek_position = SamplingStart + ClipStartDeploySeconds` always gives an absolute video timestamp.
-`TimeOfMaxAbsSeconds` is always used directly as a seek position without adding `SamplingStart`.
-
-`SamplingStart` and `SamplingEnd` are stored in the database as absolute seconds from video start.
-The raw ML CSV (`time_seconds` column) and MaxN CSV (`TimeOfMaxAbsSeconds`) are both absolute.
+**Rule:** any time column can be passed directly to ffmpeg as a seek position.
+No arithmetic needed at call sites.
 
 ---
 
@@ -376,29 +381,29 @@ flowchart TB
 flowchart TD
     A["S3: Videos + Metadata CSVs available"]
 
-    A --> D["Step 1: Ingest<br/>Download CSVs from S3<br/>Validate structure and formats<br/>Populate deployments DB<br/>Status: PENDING_ARRIVAL"]
+    A --> D["Step 1: Ingest<br/>Download CSVs from S3<br/>Validate structure and formats<br/>Populate deployments DB<br/>ingest_status: ok / excluded / validation_error<br/>ml_status: ml_ready (video present) or ml_pending"]
 
-    D --> E["Check Arrivals<br/>Poll S3 for video files<br/>Status: READY_FOR_ML"]
+    D --> E["Check Arrivals<br/>Poll S3 for video files<br/>ml_status: ml_pending → ml_ready"]
 
-    E --> F["Step 2: ML Inference<br/>Download video from S3<br/>YOLO at 3 FPS → raw detections CSV<br/>Status: PROCESSING_ML → ML_COMPLETE"]
+    E --> F["Step 2: ML Inference<br/>Download video from S3<br/>YOLO at 3 FPS → raw detections CSV<br/>ml_status: ml_ready → ml_running → ml_complete"]
 
     F --> G["Step 3: Post-processing<br/>Aggregate into 10s intervals<br/>Apply confidence threshold 0.50<br/>Compute MaxN per interval × species<br/>Store in annotations DB<br/>annotated_by = model_name"]
 
     G --> H{"Annotation<br/>path"}
 
-    H -->|"Zooniverse path"| I["Step 4: Zooniverse Clips<br/>Select representative 10s clips<br/>MaxN peaks, confusing, empty, start<br/>Extract MP4 clips via FFmpeg<br/>Upload to Zooniverse subject sets<br/>Status: CITSCI_CLIPS_COMPLETE"]
+    H -->|"Zooniverse path"| I["Step 4: Zooniverse Clips<br/>Select representative 10s clips<br/>MaxN peaks, confusing, empty, start<br/>Extract MP4 clips via FFmpeg<br/>Upload to Zooniverse subject sets<br/>citsci_status: citsci_pending → citsci_clips_uploaded"]
 
-    I --> J["Step 5: Zooniverse Frames<br/>Extract JPEG frames at MaxN timestamps<br/>Generate COCO JSON with boxes<br/>Upload to Zooniverse<br/>Status: AWAITING_CITSCI_FRAMES"]
+    I --> J["Step 5: Zooniverse Frames<br/>Extract JPEG frames at MaxN timestamps<br/>Generate COCO JSON with boxes<br/>Upload to Zooniverse<br/>citsci_status: citsci_clips_uploaded → citsci_frames_uploaded"]
 
-    J --> K["Step 5b: Volunteer Sync<br/>Caesar checks classification counts<br/>When threshold met: download and parse<br/>annotated_by = citsci<br/>Status: CITSCI_COMPLETE"]
+    J --> K["Step 5b: Volunteer Sync<br/>Caesar checks classification counts<br/>When threshold met: download and parse<br/>annotated_by = citsci<br/>citsci_status: citsci_frames_uploaded → citsci_complete"]
 
     H -->|"Biigle-direct path<br/>(skip Zooniverse)"| L
 
-    K --> L["Step 6: BIIGLE Upload<br/>Select frames (denser, frame_multiplier=2)<br/>Extract JPEGs + COCO JSON<br/>Upload frames to S3<br/>Create BIIGLE image volume<br/>Status: AWAITING_EXPERT_REVIEW"]
+    K --> L["Step 6: BIIGLE Upload<br/>Select frames (denser, frame_multiplier=2)<br/>Extract JPEGs + COCO JSON<br/>Upload frames to S3<br/>Create BIIGLE image volume<br/>biigle_status: expert_pending → expert_uploaded"]
 
     L --> M["Expert annotates in BIIGLE<br/>Draws bounding boxes<br/>Marks volume Done"]
 
-    M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>Status: PIPELINE_COMPLETE"]
+    M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>biigle_status: expert_uploaded → expert_complete"]
 
     N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Balance classes (ceiling 40%, floor 2%)<br/>Split 70/15/15 train/val/test<br/>Train YOLOv12<br/>Evaluate vs base model<br/>Promote if mAP improvement ≥ 2%"]
 
@@ -471,7 +476,7 @@ annotations/{DropID}/
     (TimeOfMaxAbsSeconds = absolute seconds from video start)
 
   Selections CSV schema (clips and frames):
-    DropID, SamplingStart, ClipStartDeploySeconds, ClipEndDeploySeconds,
+    DropID, SamplingStart, ClipStartAbsoluteSeconds, ClipEndAbsoluteSeconds,
     TimeOfMaxAbsSeconds, ScientificName, SelectionReason, MaxInterval, ConfidenceAgreement
     (ClipStart/End = relative to SamplingStart; TimeOfMaxAbsSeconds = absolute)
 
@@ -507,13 +512,18 @@ S3: biigle_images/{SurveyID}/{DropID}/   JPEG frames served to BIIGLE (disk 134)
 erDiagram
     DEPLOYMENTS {
         text drop_id PK
-        text status
-        text source_status
+        text ingest_status
+        text ml_status
+        text citsci_status
+        text biigle_status
+        text reporting_status
+        text video_presence
         text video_path
+        text video_storage_class
         int sampling_start
         int sampling_end
         bool is_bad_deployment
-        text error_message
+        int priority
         int ml_annotations
         int citsci_annotations
         int expert_annotations
@@ -562,38 +572,47 @@ erDiagram
 
 #### `deployments` table columns (`spyfish_pipeline.db`)
 
-| Column | Type | Description |
-|---|---|---|
-| `drop_id` | TEXT PK | Unique deployment identifier (`{Reserve}_{YYYYMMDD}_BUV_{Reserve}_{Site}_{Rep}`) |
-| `status` | TEXT | Current pipeline stage (see state machine) |
-| `source_status` | TEXT | Data quality flag: `OK`, `EXCLUDED`, `MISSING_METADATA`, `VALIDATION_ERROR`, `REMOVED_FROM_SOURCE` |
-| `video_path` | TEXT | Local path to the downloaded video file |
-| `sampling_start` | INTEGER | Start of valid sampling window (seconds) — set from PowerApps metadata |
-| `sampling_end` | INTEGER | End of valid sampling window (seconds) |
-| `is_bad_deployment` | BOOLEAN | Flagged as problematic in the source CSV |
-| `error_message` | TEXT | Last pipeline error message for this drop |
-| `ml_annotations` | INTEGER | Count of ML annotations — **owned by `sync_annotation_counts()`, never set by ingestion** |
-| `citsci_annotations` | INTEGER | Count of volunteer annotations — same ownership rule |
-| `expert_annotations` | INTEGER | Count of expert annotations |
-| `biigle_volume_id` | TEXT | BIIGLE volume ID, set when the volume is created in step 6 |
-| `created_at` | TIMESTAMP | Record creation time |
-| `updated_at` | TIMESTAMP | Last update time |
+
+| Column                | Type      | Description                                                                            |
+| --------------------- | --------- | -------------------------------------------------------------------------------------- |
+| `drop_id`             | TEXT PK   | Unique deployment identifier (`{Reserve}_{YYYYMMDD}_BUV_{Reserve}_{Site}_{Rep}`)       |
+| `ingest_status`       | TEXT      | Data quality: `ok`, `excluded`, `metadata_error`, `validation_error`, `removed`. Only `ok` advances through stages. |
+| `ml_status`           | TEXT      | ML section: `ml_pending`, `ml_ready`, `ml_running`, `ml_complete`, `ml_error`          |
+| `citsci_status`       | TEXT      | Citizen science section: `citsci_pending`, `citsci_clips_uploaded`, `citsci_frames_uploaded`, `citsci_complete`, `citsci_error` |
+| `biigle_status`       | TEXT      | BIIGLE section: `expert_pending`, `expert_uploaded`, `expert_complete`, `expert_error`  |
+| `reporting_status`    | TEXT      | Reporting section: `reporting_pending`, `reporting_complete`, `reporting_error`         |
+| `video_presence`      | TEXT      | `present`, `absent`, `no_video_bad_dep`                                                |
+| `video_path`          | TEXT      | S3 key of the deployment video                                                         |
+| `video_storage_class` | TEXT      | AWS S3 storage class (`STANDARD`, `GLACIER`, `DEEP_ARCHIVE`, etc.)                    |
+| `sampling_start`      | INTEGER   | Start of valid sampling window (seconds) — from PowerApps metadata                    |
+| `sampling_end`        | INTEGER   | End of valid sampling window (seconds)                                                 |
+| `is_bad_deployment`   | BOOLEAN   | Flagged as problematic in source CSV; still tracked through pipeline                  |
+| `priority`            | INTEGER   | Processing priority. Higher = picked up first. Default 0.                              |
+| `ml_annotations`      | INTEGER   | Count of ML annotations — **owned by `sync_annotation_counts()`, never set by ingest** |
+| `citsci_annotations`  | INTEGER   | Count of volunteer annotations — same ownership rule                                  |
+| `expert_annotations`  | INTEGER   | Count of expert annotations                                                            |
+| `biigle_volume_id`    | TEXT      | BIIGLE volume ID, set when the volume is created                                       |
+| `created_at`          | TIMESTAMP | Record creation time                                                                   |
+| `updated_at`          | TIMESTAMP | Last update time                                                                       |
+
 
 #### `annotations` table columns (`spyfish_annotations.db`)
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PK | Auto-increment |
-| `drop_id` | TEXT FK | Links back to `deployments` |
-| `scientific_name` | TEXT | Species name |
-| `time_of_max` | TEXT | `HH:MM:SS` timestamp of the MaxN moment |
-| `max_interval` | INTEGER | Fish count at the MaxN moment |
-| `annotated_by` | TEXT | Source: model name (ML), `'citsci'` (Zooniverse), `'expert'` (BIIGLE) |
-| `confidence_agreement` | REAL | YOLO confidence (ML) or volunteer agreement % as decimal (citsci) |
-| `external_id` | TEXT | Model name for ML records; BIIGLE annotation ID for expert records |
-| `created_at` | TIMESTAMP | Record creation time |
 
-> **`external_id` dual role:** For ML annotations, `external_id` stores the model name (e.g. `cfd_binary_water_20260301`). For expert annotations, it stores the BIIGLE annotation ID. This allows model versioning to be traced per-record without a separate column.
+| Column                 | Type       | Description                                                           |
+| ---------------------- | ---------- | --------------------------------------------------------------------- |
+| `id`                   | INTEGER PK | Auto-increment                                                        |
+| `drop_id`              | TEXT FK    | Links back to `deployments`                                           |
+| `scientific_name`      | TEXT       | Species name                                                          |
+| `time_of_max`          | TEXT       | `HH:MM:SS` timestamp of the MaxN moment                               |
+| `max_interval`         | INTEGER    | Fish count at the MaxN moment                                         |
+| `annotated_by`         | TEXT       | Source: model name (ML), `'citsci'` (Zooniverse), `'expert'` (BIIGLE) |
+| `confidence_agreement` | REAL       | YOLO confidence (ML) or volunteer agreement % as decimal (citsci)     |
+| `external_id`          | TEXT       | Model name for ML records; BIIGLE annotation ID for expert records    |
+| `created_at`           | TIMESTAMP  | Record creation time                                                  |
+
+
+> `**external_id` dual role:** For ML annotations, `external_id` stores the model name (e.g. `cfd_binary_water_20260301`). For expert annotations, it stores the BIIGLE annotation ID. This allows model versioning to be traced per-record without a separate column.
 
 ### Two-database design
 
@@ -607,82 +626,145 @@ validation_errors (QA)
 
 **Why two databases?** The pipeline DB tracks *where a deployment is* in the workflow. The annotations DB tracks *what was observed*. Keeping them separate allows annotation data to be queried and exported without locking pipeline state.
 
-### Two orthogonal status dimensions
+### Multi-section pipeline status model
 
-Each deployment carries two independent status fields:
+Each deployment has **five independent section columns** that progress separately. This replaces the old single linear `status` field.
 
 ```
-source_status  (data quality)        status  (processing stage)
-──────────────────────────────       ──────────────────────────
-OK                                   PENDING_ARRIVAL
-EXCLUDED                             READY_FOR_ML
-MISSING_METADATA                     PROCESSING_ML
-VALIDATION_ERROR                     ML_COMPLETE
-REMOVED_FROM_SOURCE                  AWAITING_CITSCI_CLIPS
-                                     CITSCI_CLIPS_COMPLETE
-                                     AWAITING_CITSCI_FRAMES
-                                     CITSCI_COMPLETE
-                                     AWAITING_EXPERT_REVIEW
-                                     PIPELINE_COMPLETE
-                                     ON_HOLD
-                                     ERROR
+ingest_status     ml_status           citsci_status         biigle_status     reporting_status
+─────────────     ─────────           ─────────────         ─────────────     ────────────────
+ok                ml_pending → ml_ready   citsci_pending            expert_pending    reporting_pending
+excluded          ml_running              citsci_clips_uploaded     expert_uploaded   reporting_complete
+validation_error  ml_complete             citsci_frames_uploaded    expert_complete   reporting_error
+                  ml_error                citsci_complete
+                                          citsci_error
 ```
 
-A deployment can be `READY_FOR_ML` (pipeline) while simultaneously being `VALIDATION_ERROR` (source). A data quality flag records what we know about the *source data* and should not block the pipeline status from being meaningful.
+**Key design decisions:**
+
+- `ingest_status` is the data-quality gate. All `get_deployments_eligible()` queries always filter `ingest_status = 'ok'` — excluded and errored deployments are never picked up by processing stages.
+- All sections start at their respective `pending` value at ingest time — no `skipped` values are ever assigned. Whether a deployment needs a section is resolved at runtime by stage prerequisites, not at ingest.
+- `video_presence` tracks whether the video actually exists in S3: `present`, `absent`, `no_video_bad_dep`. The `ml_status` starts at `ml_ready` only when `video_presence = present` and `ingest_status = ok`.
+- Bad deployments (`is_bad_deployment = True`) are still tracked with all sections at their `pending` values so they remain visible in the dashboard.
+- Re-ingestion never resets section statuses. The `ON CONFLICT` upsert only updates metadata fields (video path, sampling window, storage class, etc.) — pipeline progress is always preserved.
+
+**Why this replaces the old single linear `status`:** Zooniverse and BIIGLE can run in parallel on the same deployment — the old linear state machine forced an artificial ordering. Errors were ambiguous (`ERROR` didn't say *which* section failed). Legacy deployments that skipped ML had no way to record that without lying about their progress. Splitting into independent sections fixes all three.
+
+**`ON_HOLD` removed.** The old state machine had an `ON_HOLD` state for manually pausing a deployment. It's gone — runtime pausing is now done by omitting a stage flag (`python run_pipeline.py --ml` with no `--biigle-upload`). If a persistent soft-pause flag is ever needed, an `is_paused BOOLEAN` column is less invasive than encoding it into every section's state machine.
+
+**Error storage.** The old `error_message` column on `deployments` is gone. Errors now live in the `validation_errors` table with section-specific `ErrorType` values: `ML_ERROR`, `CITSCI_ERROR`, `BIIGLE_ERROR`, `PIPELINE_ERROR` (reporting), `VALIDATION_ERROR` (ingest). Each section has a unique error value (`ml_error`, `citsci_error`, `expert_error`, `reporting_error`); `validation_errors` holds the details. `_SECTION_ERROR_TYPES` in `DatabaseManager` maps each section column to its error type so moving out of an error state clears only the matching rows.
+
+**Future cleanup pass:** once `reporting_status = reporting_complete`, any section that never reached its `complete` value (e.g. Zooniverse for a BIIGLE-direct deployment) can be rewritten to its `skipped` value so the dashboard doesn't show ambiguous `pending` states on already-done deployments. Not wired up yet.
+
+**`priority` column.** Integer, default 0, higher = picked first. `get_deployments_eligible()` always applies `ORDER BY priority DESC`. Set per-deployment via `set_status --priority N`, in bulk via the targets CSV + `--set-targets`, or (future) via the Streamlit Deployment Management page.
 
 ---
 
 ## 7. Pipeline State Machine
 
+### Section overview
+
+Each deployment progresses through five independent sections. Sections are not sequential stages in a single queue — they are separate state machines that can advance independently, with cross-section prerequisites where needed.
+
+```
+ingest   ──────────────────────────────────────────────────────── data quality gate (never advances through pipeline)
+ml       ml_pending → ml_ready → ml_running → ml_complete → ml_error
+citsci   citsci_pending → citsci_clips_uploaded → citsci_frames_uploaded → citsci_complete → citsci_error
+biigle   expert_pending → expert_uploaded → expert_complete → expert_error
+reporting reporting_pending → reporting_complete → reporting_error
+```
+
+A deployment is considered **complete** when `biigle_status = expert_complete` OR `reporting_status = reporting_complete`.
+
+### Section state machines
+
+**`ingest_status`** — set at ingestion, never modified by pipeline stages:
+
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING_ARRIVAL : Deployment added at ingestion
-
-    PENDING_ARRIVAL --> READY_FOR_ML : Video found in S3
-
-    READY_FOR_ML --> PROCESSING_ML : ML inference starts
-
-    PROCESSING_ML --> ML_COMPLETE : Inference + MaxN complete
-
-    ML_COMPLETE --> AWAITING_CITSCI_CLIPS : Zooniverse path
-    ML_COMPLETE --> AWAITING_EXPERT_REVIEW : Biigle-direct (skip Zooniverse)
-
-    AWAITING_CITSCI_CLIPS --> CITSCI_CLIPS_COMPLETE : Clips extracted and uploaded
-
-    CITSCI_CLIPS_COMPLETE --> AWAITING_CITSCI_FRAMES : Frames extracted and uploaded
-    CITSCI_CLIPS_COMPLETE --> CITSCI_COMPLETE : Skip frames path
-
-    AWAITING_CITSCI_FRAMES --> CITSCI_COMPLETE : Caesar confirms sufficient classifications
-
-    CITSCI_COMPLETE --> AWAITING_EXPERT_REVIEW : BIIGLE volume created
-
-    AWAITING_EXPERT_REVIEW --> PIPELINE_COMPLETE : BIIGLE volume marked Done and synced
+    [*] --> ok : Good metadata
+    [*] --> excluded : is_bad_deployment = True
+    [*] --> validation_error : CSV structural error
 ```
 
-> **ON_HOLD:** Any status can transition to `ON_HOLD` (manual pause) and resume to any status — not shown above to keep the diagram readable. See transition rules below.
-
-### Error and hold recovery
+**`ml_status`** — ML inference section:
 
 ```mermaid
-graph TB
-    ANY["Any pipeline status"]
-    HOLD["ON_HOLD<br/>(manual pause)"]
-    ERR["ERROR<br/>(inference failed)"]
-    RESUME["Any status<br/>(manual resume)"]
-    RETRY["READY_FOR_ML<br/>(retry after fix)"]
-
-    ANY -->|"manual pause"| HOLD
-    HOLD -->|"manual resume"| RESUME
-    ERR -->|"retry after fix"| RETRY
-    ERR -->|"manual pause"| HOLD
+stateDiagram-v2
+    [*] --> ml_pending : Added at ingestion (video absent or excluded)
+    ml_pending --> ml_ready : video_presence = present (set at ingest or by check-arrivals)
+    ml_ready --> ml_running : ML inference starts
+    ml_running --> ml_complete : Inference + MaxN complete
+    ml_running --> ml_error : Inference failed
+    ml_error --> ml_ready : Retry after fix
 ```
+
+**`citsci_status`** — Citizen science section:
+
+```mermaid
+stateDiagram-v2
+    [*] --> citsci_pending : Added at ingestion
+    citsci_pending --> citsci_clips_uploaded : zooniverse-clips: extract + upload clip subjects
+
+    citsci_clips_uploaded --> citsci_frames_uploaded : zooniverse-images: extract + upload frame subjects (bypass)
+    citsci_clips_uploaded --> citsci_clips_done : (future) Caesar retirement + parse
+    citsci_clips_done --> citsci_frames_uploaded : zooniverse-images after retirement gate
+    citsci_clips_done --> citsci_complete : skip-frames path
+
+    citsci_frames_uploaded --> citsci_complete : zooniverse-sync: ingest MaxN CSV (bypass)
+    citsci_frames_uploaded --> citsci_frames_done : (future) Caesar retirement + parse
+    citsci_frames_done --> citsci_complete
+
+    citsci_clips_uploaded --> citsci_error
+    citsci_frames_uploaded --> citsci_error
+    citsci_error --> citsci_clips_uploaded : Retry
+    citsci_error --> citsci_frames_uploaded : Retry
+```
+
+> **TODO — retirement gates:** `citsci_clips_done` and `citsci_frames_done` are defined but **not yet wired**. Today, the pipeline uses the two "bypass" edges (`citsci_clips_uploaded → citsci_frames_uploaded` and `citsci_frames_uploaded → citsci_complete`) because `sync_zooniverse_drop()` reads a single bundled `{drop_id}_zooniverse_maxn.csv` and does not distinguish clip-subject retirement from frame-subject retirement. When the Caesar retirement check is implemented, the sync should split by `subject_type` (already parsed — see `parse_classifications.py` ~line 314), advance `citsci_clips_uploaded → citsci_clips_done` and `citsci_frames_uploaded → citsci_frames_done`, and the two bypass edges in `CitSciStatus.VALID_TRANSITIONS` should be deleted. Full implementation notes in the TODO block on `CitSciStatus` in `spyfish/config/base.py`.
+
+**`biigle_status`** — BIIGLE expert annotation section:
+
+```mermaid
+stateDiagram-v2
+    [*] --> expert_pending : Added at ingestion
+    expert_pending --> expert_uploaded : Frames uploaded, BIIGLE volume created
+    expert_uploaded --> expert_complete : Volume marked Done, annotations synced
+    expert_uploaded --> expert_error
+    expert_error --> expert_pending : Retry
+```
+
+**`reporting_status`** — Reporting section (currently placeholder):
+
+```mermaid
+stateDiagram-v2
+    [*] --> reporting_pending : Added at ingestion
+    reporting_pending --> reporting_complete : Report generated
+    reporting_pending --> reporting_error
+    reporting_error --> reporting_pending : Retry
+```
+
+### Cross-section prerequisites
+
+Stage eligibility is resolved at query time via `get_deployments_eligible(section, statuses, prerequisites)`. The `prerequisites` dict (or callable) adds extra `AND` conditions to the query. All queries also always filter `ingest_status = 'ok'`.
+
+| Stage              | `section`        | `input_statuses`                   | `prerequisites`                                                                    |
+| ------------------ | ---------------- | ---------------------------------- | -----------------------------------------------------------------------------------|
+| `check-arrivals`   | `ml_status`      | `[ml_pending]`                     | `video_presence = absent`                                                          |
+| `ml`               | `ml_status`      | `[ml_ready]`                       | —                                                                                  |
+| `zooniverse-clips` | `citsci_status`  | `[citsci_pending]`                 | `ml_status = ml_complete`                                                          |
+| `zooniverse-images`| `citsci_status`  | `[citsci_clips_uploaded]`          | —                                                                                  |
+| `biigle-upload`    | `biigle_status`  | `[expert_pending]`                 | `ml_status = ml_complete` OR `citsci_status = citsci_complete` (callable, depends on flags) |
+| `biigle-sync`      | `biigle_status`  | `[expert_uploaded]`                | `biigle_volume_id IS NOT NULL`                                                     |
+
+**Biigle-direct path:** Running `--biigle-upload` without any `--zooniverse-*` flags sets the prerequisite to `ml_status = ml_complete`, bypassing the citizen science loop.
 
 ### Transition rules
 
-- Transitions are validated by `DatabaseManager.advance_status()`, which raises `InvalidTransitionError` for disallowed moves. The full valid transition map is in `PipelineStatus.VALID_TRANSITIONS` in `spyfish/config/base.py`.
-- `ON_HOLD` can transition to **any** status — safe for investigation without losing where the drop was.
-- `ERROR` can only return to `READY_FOR_ML` or `ON_HOLD`. Moving out of `ERROR` automatically clears `PIPELINE_ERROR` rows for that drop.
-- The `set_status` admin tool bypasses transition validation — for manual fixes and testing only.
+- Per-section advance methods (`advance_ml_status`, `advance_citsci_status`, etc.) validate against `VALID_TRANSITIONS` in `spyfish/config/base.py` and raise `InvalidTransitionError` for disallowed moves.
+- Moving out of `error` automatically clears only the relevant section's error rows from `validation_errors` (using `_SECTION_ERROR_TYPES` in `manager.py`) — other sections' errors are not affected.
+- The `set_status` admin tool calls `update_section_status()` directly, bypassing transition validation — surgical admin use only.
+- Error recovery: set the section back to its `pending` or `ready` value using `set_status`. The next pipeline run picks it up automatically.
 
 ---
 
@@ -690,23 +772,31 @@ graph TB
 
 ### Declarative stage framework
 
-Every pipeline stage is declared in a single `STAGES` list in `run_pipeline.py`. The `StageRunner` auto-generates CLI flags, queries eligible drops, advances status, and captures errors. Adding a new stage requires one list entry and a step function.
+Every pipeline stage is declared in a single `STAGES` list in `run_pipeline.py`. The `StageRunner` auto-generates CLI flags, queries eligible drops, advances section status, and captures errors. Adding a new stage requires one list entry and a step function.
 
 ```python
 # Global stage — runs once, manages own iteration
 GlobalStage("ingest", "Step 1: metadata ingestion", _run_ingestion)
 
-# Drop stage — called once per eligible drop; return value = next status
-DropStage("zooniverse-clips", "Step 4: ...", _step4_process_drop,
-          input_statuses=[PipelineStatus.ML_COMPLETE])
+# Drop stage — called once per eligible drop; return value = next section status value
+DropStage(
+    "zooniverse-clips",
+    "Step 4: extract and upload Zooniverse clips",
+    _step4_process_drop,
+    section="citsci_status",
+    input_statuses=[CitSciStatus.PENDING],
+    prerequisites={"ml_status": MlStatus.COMPLETE},
+)
 ```
+
+`StageRunner._advance_section` dispatches to the correct typed advance method (`advance_ml_status`, `advance_citsci_status`, etc.) based on `stage.section`. On error, it calls `update_section_status(section, drop_id, "error")` to record the failure in the correct section column.
 
 ### Configuration design
 
 All non-secret configuration lives in `config.yaml` and is accessed through a singleton `ConfigWrapper`. Key rules:
 
 - **No silent defaults** — missing keys raise `ValueError` immediately
-- **No hardcoded strings in business logic** — column names, regex patterns, S3 prefixes, confidence thresholds all live in `config.yaml`
+- **External contracts in config, internal schema in code** — `config.yaml` holds things that can change between environments or external systems: CSV column names from PowerApps/SharePoint, regex patterns, S3 prefixes, confidence thresholds, API IDs. Internal schema strings (DB column names, pipeline status values, section state machines) live on the status classes in `spyfish/config/base.py` because the state-machine logic depends on their exact values and changing them requires a code + migration pair.
 - **No manual path construction** — all file paths generated by config methods
 - **Secrets in `.env`** — never committed to git
 
@@ -735,6 +825,8 @@ graph TD
 ```
 
 
+
+> **⚠️ TODO — frame selection stage position is unresolved.** The `zooniverse-images` stage (which selects and uploads frames to Zooniverse) currently reads frame candidates directly from the raw ML CSV. It does **not** consume volunteer clip classifications from Zooniverse. This means the `clips_uploaded → frames_uploaded` pipeline edge has no real data dependency — the stages are ordered by convention, not by need. Three open options: (1) remove the `zooniverse-images` stage and let frames come only from the BIIGLE-upload path; (2) move it to run right after `--ml` with no citsci ordering; (3) keep it after clips but actually consume volunteer clip MaxN data to narrow frame candidates (real data dependency). Decision pending, will be revisited when the `CLIPS_DONE` / `FRAMES_DONE` retirement gates (see §7) are wired. See `spyfish/extraction/select_frames.py` for the matching in-code TODO.
 
 ### Two specific technical choices
 
@@ -825,16 +917,16 @@ These are complementary tools, not competing choices.
 
 Sequenced by dependency, not assigned dates.
 
-### Phase 1 — Core Pipeline 🔄 Near Complete
+### Phase 1 — Core Pipeline ✅ Complete
 
-- SQLite state machine with all pipeline statuses
-- Metadata ingestion from S3 (deployment, survey, site, species CSVs)
+- Multi-section pipeline status model (5 independent section columns replacing single linear status)
+- Metadata ingestion from S3 (deployment, survey, site, species CSVs) with S3 storage class tracking
 - Data validation framework with configurable rules
 - YOLO ML inference module (OpenCV streaming, sampling window)
 - MaxN post-processing (per-interval, per-species aggregation)
-- Declarative stage framework (`GlobalStage` / `DropStage` / `StageRunner`)
+- Declarative stage framework (`GlobalStage` / `DropStage` / `StageRunner`) with cross-section prerequisites
 - S3 sync (DB + results after each run)
-- Streamlit dashboard (deployment monitoring, error review)
+- Streamlit dashboard (deployment monitoring, error review, annotation export)
 - SharePoint → S3 metadata download integrated into pipeline
 
 ### Phase 2 — Annotation Platforms 🔄 In Progress
@@ -870,7 +962,7 @@ Sequenced by dependency, not assigned dates.
 
 - Annotation data export format defined and connected to PowerBI
 - Time-series visualisations of species abundance by marine reserve
-- Marine reserve monitoring reports and report cards generated automatically from `PIPELINE_COMPLETE` deployments
+- Marine reserve monitoring reports and report cards generated automatically from deployments with `biigle_status = complete` or `reporting_status = complete`
 - BIIGLE substrate and size review parsing (same pipeline, new annotation type)
 
 ---
@@ -881,6 +973,7 @@ Sequenced by dependency, not assigned dates.
 
 > **⚠️ TODO — NEEDS TESTING & CLEANUP**
 > The Zooniverse parse pipeline (`parse_zooniverse_classifications.py` + `spyfish/zooniverse/parse_classifications.py`) has been substantially reworked but has **not been tested end-to-end against real Zooniverse data** since the refactor. Before treating any output as production-ready:
+>
 > - Run against real classifications from the API and verify MaxN CSVs are correct
 > - Run against legacy CSV backfill with and without subjects CSVs
 > - Verify the completion gate correctly identifies fully-retired subject sets
@@ -891,6 +984,7 @@ Sequenced by dependency, not assigned dates.
 Classification parsing is implemented in `parse_zooniverse_classifications.py` (standalone script) and `spyfish/zooniverse/parse_classifications.py` (reusable module). It is **not yet wired into `run_pipeline.py`** as a `--zooniverse-sync` stage.
 
 **What is built:**
+
 - Fetch from Panoptes API across multiple source projects (`source_project_ids` in config)
 - Bulk backfill from downloaded Zooniverse export CSVs (`--from-csv`)
 - Parse annotations: species, count (with bucket handling: "2030"→25, "3040"→35), timestamp
@@ -901,7 +995,8 @@ Classification parsing is implemented in `parse_zooniverse_classifications.py` (
 - Legacy filename resolution: date-pattern filenames (e.g. `AHE_062_25_04_2022`) reconstructed to drop_id
 
 **What remains:**
-- Wire into `run_pipeline.py` as `--zooniverse-sync`: check subject set completion, parse if done, advance status to `CITSCI_COMPLETE`
+
+- Wire into `run_pipeline.py` as `--zooniverse-sync`: check subject set completion, parse if done, advance `citsci_status` to `citsci_complete`
 - Deduplication of identical MaxN runs at frame extraction step (currently deferred)
 
 **Current workaround:** run `parse_zooniverse_classifications.py` manually, then advance drops with `set_status`.
@@ -954,7 +1049,7 @@ The pipeline runs on NeSI (New Zealand eScience Infrastructure HPC). A NeSI cron
 - BIIGLE API credentials
 - Zooniverse credentials
 
-> **Video prerequisite:** The pipeline expects each deployment's video to already exist in S3 as `media/{SurveyID}/{DropID}/{DropID}.mp4`. Getting videos into S3 is handled by the video-uploader app (BytesNZ). If the file isn't there, `check-arrivals` will leave the drop at `PENDING_ARRIVAL`.
+> **Video prerequisite:** The pipeline expects each deployment's video to already exist in S3 as `media/{SurveyID}/{DropID}/{DropID}.mp4`. Getting videos into S3 is handled by the video-uploader app (BytesNZ). If the file isn't there, `check-arrivals` will leave the drop at `ml_status = pending` with `video_presence = absent`.
 
 ### Install
 
@@ -1003,30 +1098,34 @@ python run_pipeline.py --biigle-sync --retrain
 
 ### Pipeline stage flags
 
-| Flag | Stage | Description |
-|---|---|---|
-| `--ingest` | Step 1 | Download metadata CSVs from S3, validate, populate DB |
-| `--check-arrivals` | Step 1b | Check S3 for newly arrived videos, advance to `READY_FOR_ML` |
-| `--ml` | Steps 2+3 | Run YOLO inference + compute MaxN annotations |
-| `--zooniverse-clips` | Step 4 | Select + extract clips, upload to Zooniverse |
-| `--zooniverse-images` | Step 5 | Extract frames, upload to Zooniverse |
-| `--zooniverse-sync` | Step 5b | Sync volunteer classifications back — **not yet wired in, use `parse_zooniverse_classifications.py` directly** |
-| `--biigle-upload` | Step 6 | Select frames, upload to S3, create BIIGLE volume |
-| `--biigle-sync` | Step 7 | Download completed expert annotations from BIIGLE |
-| `--retrain` | Step 8 | Retrain YOLO model on expert annotations |
+
+| Flag                  | Stage     | Section queried    | Advances                                                                                        |
+| --------------------- | --------- | ------------------ | ----------------------------------------------------------------------------------------------- |
+| `--ingest`            | Step 1    | —                  | Sets `ingest_status` + `video_presence` + `ml_status=ml_ready` when video present               |
+| `--check-arrivals`    | Step 1b   | `ml_status`        | `ml_pending` → `ml_ready` when video found in S3 (requires `video_presence=absent`)             |
+| `--ml`                | Steps 2+3 | `ml_status`        | `ml_ready → ml_running → ml_complete` (or `ml_error`)                                           |
+| `--zooniverse-clips`  | Step 4    | `citsci_status`    | `citsci_pending → citsci_clips_uploaded` (requires `ml_status=ml_complete`)                     |
+| `--zooniverse-images` | Step 5    | `citsci_status`    | `citsci_clips_uploaded → citsci_frames_uploaded`                                                |
+| `--zooniverse-sync`   | Step 5b   | `citsci_status`    | `citsci_frames_uploaded → citsci_complete` — **not yet wired in, use `parse_zooniverse_classifications.py`** |
+| `--biigle-upload`     | Step 6    | `biigle_status`    | `expert_pending → expert_uploaded` (requires `citsci_status=citsci_complete` OR `ml_status=ml_complete`) |
+| `--biigle-sync`       | Step 7    | `biigle_status`    | `expert_uploaded → expert_complete`                                                             |
+| `--retrain`           | Step 8    | —                  | Retrain YOLO model on expert annotations                                                        |
+
 
 ### Special flags
 
-| Flag | Description |
-|---|---|
-| `--no-upload` | Skip all S3 uploads (DB sync, models, results). Safe for local testing. |
-| `--test-run` | Use test dataset. Also controlled by `is_test_run` in `config.yaml`. |
+
+| Flag            | Description                                                                                  |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| `--no-upload`   | Skip all S3 uploads (DB sync, models, results). Safe for local testing.                      |
+| `--test-run`    | Use test dataset. Also controlled by `is_test_run` in `config.yaml`.                         |
 | `--set-targets` | Bulk-update deployment statuses from a CSV (see `paths.orchestration.pipeline_targets_csv`). |
-| `--ping` | Print config summary (bucket, base dir, test mode) and exit — connectivity check. |
+| `--ping`        | Print config summary (bucket, base dir, test mode) and exit — connectivity check.            |
+
 
 ### Biigle-direct path (skip Zooniverse)
 
-Run `--biigle-upload` without any `--zooniverse-*` flags. The stage automatically picks up drops at `ML_COMPLETE` in addition to `CITSCI_COMPLETE`, letting you skip the citizen science loop and send drops straight to expert review.
+Run `--biigle-upload` without any `--zooniverse-*` flags. The callable `prerequisites` function detects that Zooniverse is not in the run and sets the prerequisite to `ml_status = complete`, letting drops bypass the citizen science loop entirely.
 
 ### Zooniverse classification sync (standalone)
 
@@ -1048,7 +1147,7 @@ python parse_zooniverse_classifications.py --from-csv path/to/classifications.cs
 python parse_zooniverse_classifications.py --from-csv path/to/file.csv --limit 1000
 ```
 
-After running, manually advance fully-parsed drops using `set_status` until `--zooniverse-sync` is wired into the pipeline.
+After running, manually advance fully-parsed drops using `set_status --citsci-status complete` until `--zooniverse-sync` is wired into the pipeline.
 
 ### Re-run post-ML processing on a specific drop
 
@@ -1078,32 +1177,36 @@ rsync -avz --progress -e "ssh" /path/to/local/videos/ mahuika:/nesi/nobackup/uoa
 # Show current record
 python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01
 
-# Update status (bypasses state-machine validation — use carefully)
-python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 READY_FOR_ML
+# Update a specific section status (bypasses transition validation — use carefully)
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --ml-status ready
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --citsci-status complete
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --biigle-status pending
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --ingest-status ok
 
-# Update status + fields
-python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 READY_FOR_ML \
-    --sampling-start 0 --sampling-end 1800
-
-# Create a new record if not already in DB
-python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 READY_FOR_ML \
-    --sampling-start 0 --sampling-end 1800 --create
+# Update multiple sections + metadata at once
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 \
+    --ml-status ready --sampling-start 0 --sampling-end 1800
 
 # Apply and immediately print the updated record
-python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 ML_COMPLETE --show
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --ml-status ready --show
 ```
 
-Optional fields: `--sampling-start`, `--sampling-end`, `--video-path`.
+Available section flags: `--ml-status`, `--citsci-status`, `--biigle-status`, `--ingest-status`, `--reporting-status`.
+Optional metadata fields: `--sampling-start`, `--sampling-end`, `--video-path`, `--priority`.
 
-> `set_status` uses `update_status()` directly, bypassing `advance_status()` transition validation. This is intentional — it's a surgical admin tool, not part of normal pipeline flow.
+> `set_status` calls `update_section_status()` directly, bypassing `advance_*_status()` transition validation. This is intentional — it's a surgical admin tool, not part of normal pipeline flow.
 
 ### Reset a stuck or errored drop
 
 ```bash
-python -m spyfish.database.set_status MY_DROP_ID READY_FOR_ML
+# Reset ML back to ready after a failed inference
+python -m spyfish.database.set_status MY_DROP_ID --ml-status ml_ready
+
+# Reset biigle after a failed upload
+python -m spyfish.database.set_status MY_DROP_ID --biigle-status expert_pending
 ```
 
-Moving away from `ERROR` automatically clears `PIPELINE_ERROR` rows in `validation_errors` for that drop.
+Moving out of `error` via the admin tool does **not** automatically clear `validation_errors` rows — that only happens when the pipeline's typed advance methods are used. Use `db.clear_validation_errors(drop_id, error_type)` for manual cleanup if needed.
 
 ### Check connectivity / config
 
@@ -1127,46 +1230,54 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 
 ### ML inference (`ml_inference` section)
 
-| Key | Default | Effect |
-|---|---|---|
-| `limit_processing` | 1 | Max videos processed per pipeline run. Increase for production. |
-| `ml_fps` | 3 | Frames per second submitted to YOLO. Stride = `actual_fps / ml_fps`. |
-| `confidence_threshold` | 0.25 | YOLO detection threshold. Lower = more detections, more false positives. |
-| `maxn_confidence_threshold` | 0.50 | Min confidence to count a detection in MaxN computation. |
-| `imgsz` | 640 | YOLO inference image size. |
+
+| Key                         | Default | Effect                                                                   |
+| --------------------------- | ------- | ------------------------------------------------------------------------ |
+| `limit_processing`          | 1       | Max videos processed per pipeline run. Increase for production.          |
+| `ml_fps`                    | 3       | Frames per second submitted to YOLO. Stride = `actual_fps / ml_fps`.     |
+| `confidence_threshold`      | 0.25    | YOLO detection threshold. Lower = more detections, more false positives. |
+| `maxn_confidence_threshold` | 0.50    | Min confidence to count a detection in MaxN computation.                 |
+| `imgsz`                     | 640     | YOLO inference image size.                                               |
+
 
 ### Extraction (`extraction` section)
 
-| Key | Default | Effect |
-|---|---|---|
-| `clip_length` | 10.0 s | Duration of each extracted clip |
-| `clip_cap` | 180 | Max clips per video (180 × 10s = full 30-min video) |
-| `force_binary_strategy` | false | If true, always use binary strategy regardless of species count |
-| `frame_multiplier` | 2 | Doubles BIIGLE frame count and halves temporal spacing for denser coverage |
-| `binary_strategy.maxn_export` | 30 | Clips at peak fish-count moments |
-| `binary_strategy.confusing_export` | 60 | High count + low confidence clips |
-| `binary_strategy.empty_export` | 10 | Clips with zero detections (false negative check) |
-| `binary_strategy.start_export` | 3 | Clips from first 2 minutes (deployment health check) |
+
+| Key                                | Default | Effect                                                                     |
+| ---------------------------------- | ------- | -------------------------------------------------------------------------- |
+| `clip_length`                      | 10.0 s  | Duration of each extracted clip                                            |
+| `clip_cap`                         | 180     | Max clips per video (180 × 10s = full 30-min video)                        |
+| `force_binary_strategy`            | false   | If true, always use binary strategy regardless of species count            |
+| `frame_multiplier`                 | 2       | Doubles BIIGLE frame count and halves temporal spacing for denser coverage |
+| `binary_strategy.maxn_export`      | 30      | Clips at peak fish-count moments                                           |
+| `binary_strategy.confusing_export` | 60      | High count + low confidence clips                                          |
+| `binary_strategy.empty_export`     | 10      | Clips with zero detections (false negative check)                          |
+| `binary_strategy.start_export`     | 3       | Clips from first 2 minutes (deployment health check)                       |
+
 
 ### Zooniverse (`zooniverse` section)
 
-| Key | Effect |
-|---|---|
-| `project_id` | Upload target project |
-| `source_project_ids` | List of projects to fetch classifications from (main + EY clone etc.) |
-| `size_limit_mb` | CRF is calibrated to stay under this per clip (~12 MB Zooniverse limit) |
-| `health_check_count` | Evenly-spaced clips when MaxN CSV is empty (no detections) |
-| `min_votes` | Minimum volunteer agreement to count a detection as valid |
+
+| Key                  | Effect                                                                  |
+| -------------------- | ----------------------------------------------------------------------- |
+| `project_id`         | Upload target project                                                   |
+| `source_project_ids` | List of projects to fetch classifications from (main + EY clone etc.)   |
+| `size_limit_mb`      | CRF is calibrated to stay under this per clip (~12 MB Zooniverse limit) |
+| `health_check_count` | Evenly-spaced clips when MaxN CSV is empty (no detections)              |
+| `min_votes`          | Minimum volunteer agreement to count a detection as valid               |
+
 
 ### Training (`training` section)
 
-| Key | Default | Effect |
-|---|---|---|
-| `epochs` | 100 | Max training epochs |
-| `patience` | 25 | Early stopping patience |
-| `class_ceiling_pct` | 0.40 | Cap any species at 40% of training data |
-| `class_floor_pct` | 0.02 | Merge species below 2% into generic "fish" label |
-| `retrain_min_improvement_pct` | 2.0 | New model must beat current by ≥2% mAP to be promoted |
+
+| Key                           | Default | Effect                                                |
+| ----------------------------- | ------- | ----------------------------------------------------- |
+| `epochs`                      | 100     | Max training epochs                                   |
+| `patience`                    | 25      | Early stopping patience                               |
+| `class_ceiling_pct`           | 0.40    | Cap any species at 40% of training data               |
+| `class_floor_pct`             | 0.02    | Merge species below 2% into generic "fish" label      |
+| `retrain_min_improvement_pct` | 2.0     | New model must beat current by ≥2% mAP to be promoted |
+
 
 ### CSV column mapping (`csv_mapping` section)
 
@@ -1190,14 +1301,24 @@ Single access point for all configuration and path construction. Key properties:
 
 Two database managers with distinct responsibilities:
 
-**`DatabaseManager`** (`spyfish_pipeline.db`):
-- `upsert_deployment(row)` — insert or update a deployment record
-- `get_deployments_by_statuses(statuses)` — query eligible drops for a pipeline stage
-- `advance_status(drop_id, new_status)` — validated status transition (raises `InvalidTransitionError`)
-- `update_status(drop_id, new_status, **fields)` — unvalidated update (used by `set_status` admin tool)
-- `export_to_csv(output_dir)` — dump all tables to CSV
+`**DatabaseManager**` (`spyfish_pipeline.db`):
 
-**`AnnotationDatabaseManager`** (`spyfish_annotations.db`):
+- `add_or_update_deployment(drop_id, ingest_status, ml_status, ...)` — upsert a deployment. ON CONFLICT only updates metadata fields (video path, sampling window, storage class, is_bad_deployment) — **section statuses are never overwritten on conflict, preserving pipeline progress across re-ingestions**.
+- `get_deployments_eligible(section, statuses, prerequisites=None)` — query eligible drops for a pipeline stage. Always filters `ingest_status = 'ok'`. The `prerequisites` dict adds extra `AND` conditions (e.g. `{"ml_status": "ml_complete"}`). Orders by `priority DESC`.
+- `advance_ml_status(drop_id, new_status)` — validated ML transition, raises `InvalidTransitionError`. Moving out of `ml_error` clears `ML_ERROR` rows from `validation_errors`.
+- `advance_citsci_status(drop_id, new_status)` — validated CitSci transition.
+- `advance_biigle_status(drop_id, new_status)` — validated Biigle transition.
+- `advance_reporting_status(drop_id, new_status)` — validated Reporting transition.
+- `update_section_status(section, drop_id, new_status)` — unvalidated update for a specific section column. Used by the `set_status` admin tool and by the `StageRunner` error handler.
+- `update_deployment_fields(drop_id, **kwargs)` — update arbitrary metadata fields on an existing record.
+- `get_deployment(drop_id)` — fetch a single deployment record as a dict.
+- `sync_annotation_counts(drop_id)` — recompute `ml_annotations`, `citsci_annotations`, `expert_annotations` from the annotations DB.
+- `export_to_csv(output_dir)` — dump all tables to CSV.
+
+**Error type isolation:** `_SECTION_ERROR_TYPES = {"ml_status": "ML_ERROR", "citsci_status": "CITSCI_ERROR", "biigle_status": "BIIGLE_ERROR", "reporting_status": "PIPELINE_ERROR"}`. When advancing out of an error state (any value ending in `_error`), only the matching error type is cleared from `validation_errors` — other sections' errors are untouched.
+
+`**AnnotationDatabaseManager**` (`spyfish_annotations.db`):
+
 - Stores one row per species observation from any source (`ml`, `citsci`, `expert`)
 - `upsert_annotations(df)` — bulk insert/update annotation records
 - `get_annotations_for_drop(drop_id)` — retrieve all annotations for a drop
@@ -1225,41 +1346,46 @@ class GlobalStage:
 class DropStage:
     flag: str
     description: str
-    fn: Callable[[str], Optional[str]]   # (drop_id) → new_status or None
-    input_statuses: list[str]            # Which statuses to query
+    fn: Callable[[str], Optional[str]]   # (drop_id) → new section status value or None
+    section: str                         # Which DB column to query and advance
+    input_statuses: list[str]            # Status values that make a drop eligible
+    prerequisites: dict | Callable | None = None  # Extra AND conditions (static dict or callable)
     run_in_all: bool = True
-    queue_status: str | None = None      # Intermediate status before fn runs
 ```
 
-`StageRunner.run()`: determines active stages from args → queries eligible drops → calls `fn(drop_id)` → calls `db.advance_status(drop_id, result)` → catches exceptions, sets `ERROR`.
+`prerequisites` can be a plain `dict` (e.g. `{"ml_status": "ml_complete"}`) or a callable `(args, run_all) -> dict` for cases where the required conditions depend on which flags were passed (e.g. biigle-upload needing either `ml_status=ml_complete` or `citsci_status=citsci_complete` depending on whether Zooniverse was run).
+
+`StageRunner.run()`: determines active stages from args → calls `db.get_deployments_eligible(section, input_statuses, prerequisites)` → calls `fn(drop_id)` → dispatches to the correct typed advance method via `_ADVANCE_METHOD[section]` → on exception, calls `db.update_section_status(section, drop_id, section_error_status)` using `_SECTION_ERROR_STATUS` mapping.
 
 ---
 
 ### `spyfish/orchestrator/ingest.py` — Step 1
 
-**`run_ingestion()`**: Downloads metadata CSVs from S3, validates, upserts deployments at `PENDING_ARRIVAL`, sets `source_status` based on validation results, marks removed deployments as `REMOVED_FROM_SOURCE`.
+`**run_ingestion()**`: Downloads the deployments metadata CSV from S3, validates, upserts all records. Sets `ingest_status` (`ok` / `excluded` / `validation_error`), `video_presence` (`present` / `absent` / `no_video_bad_dep`), and `video_storage_class` (from `list_objects_v2` `StorageClass` field — no extra API call). New records with `ingest_status=ok` and `video_presence=present` start with `ml_status=ml_ready`; all others start at `ml_pending`. All other section statuses start at their respective `pending` values.
 
-**`check_pending_arrivals()`**: Lists S3 for videos matching `PENDING_ARRIVAL` drops, advances to `READY_FOR_ML` when the video is present.
+Single S3 scan: `storage.get_objects_from_s3(prefix="media/", keys_only=False)` returns the full object list including `StorageClass`. Both `known_files` (set for O(1) membership checks) and `media_file_info` (dict for storage class lookup) are built from this one response.
+
+`**check_pending_arrivals(known_files)**`: Queries `get_deployments_eligible("ml_status", [ml_pending], prerequisites={"video_presence": "absent"})`. For each drop, checks whether the video is now in S3 and if so sets `video_presence=present` and advances `ml_status` to `ml_ready`.
 
 ---
 
 ### `spyfish/orchestrator/ml_runner.py` — Steps 2+3
 
-**`MLRunner`**: `get_inference_targets()` → `run_inference_loop(targets)` → downloads video, runs YOLO, advances status to `ML_COMPLETE` or `ERROR`.
+`**MLRunner**`: `get_inference_targets()` queries `get_deployments_eligible("ml_status", [ml_ready])` → `run_inference_loop(targets)` advances `ml_ready → ml_running` before the batch starts, then `ml_running → ml_complete` on success or `ml_running → ml_error` on failure.
 
-**`run_post_ml(drop_ids, video_dir)`** (`process_ml_annotations.py`): Groups raw detections by 10-second intervals, applies `maxn_confidence_threshold`, computes MaxN per interval × species, stores in `spyfish_annotations.db` with `annotated_by = model_name`.
+`**run_post_ml(drop_ids, video_dir)**` (`process_ml_annotations.py`): Groups raw detections by 10-second intervals, applies `maxn_confidence_threshold`, computes MaxN per interval × species, stores in `spyfish_annotations.db` with `annotated_by = model_name`.
 
 ---
 
 ### `spyfish/ml/run_inference.py` — YOLO inference
 
-**`run_yolo_inference(video_path, model_path, conf, imgsz, sampling_start, sampling_end)`**: Streams video via OpenCV at `ml_fps`, only processes frames within `[sampling_start, sampling_end]`. Output: one row per bounding box → saved as `{DropID}_{model}_raw.csv`.
+`**run_yolo_inference(video_path, model_path, conf, imgsz, sampling_start, sampling_end)**`: Streams video via OpenCV at `ml_fps`, only processes frames within `[sampling_start, sampling_end]`. Output: one row per bounding box → saved as `{DropID}_{model}_raw.csv`.
 
 ---
 
 ### `spyfish/extraction/select_clips.py` — Clip selection
 
-**`select_clips_with_strategy(raw_csv, maxn_csv, drop_id)`**: Two strategies auto-selected by species count (or forced via config):
+`**select_clips_with_strategy(raw_csv, maxn_csv, drop_id)**`: Two strategies auto-selected by species count (or forced via config):
 
 - **Binary**: `maxn_export` top peaks + `confusing_export` high-count/low-confidence + `empty_export` zero-detection + `start_export` first-2-min clips
 - **Multiclass**: same categories per-species, with per-species quotas
@@ -1270,31 +1396,32 @@ class DropStage:
 
 ### `spyfish/extraction/extract_clips.py` — Clip extraction
 
-**`extract_clips_from_selections(selections_csv_path, video_path)`**: CRF probing estimates a quality setting to stay under `size_limit_mb`, then uses FFmpeg to cut each clip.
+`**extract_clips_from_selections(selections_csv_path, video_path)`**: CRF probing estimates a quality setting to stay under `size_limit_mb`, then uses FFmpeg to cut each clip.
 
 ---
 
 ### `spyfish/extraction/extract_frames.py` — Frame extraction
 
-**`extract_frame(video_path, seek_seconds, out_path)`**: Uses OpenCV (not FFmpeg) — matches the exact frame seen by YOLO. Reads EXIF rotation and applies it.
+`**extract_frame(video_path, seek_seconds, out_path)**`: Uses OpenCV (not FFmpeg) — matches the exact frame seen by YOLO. Reads EXIF rotation and applies it.
 
-**`extract_frames_from_selections(selections_csv_path, video_path, raw_csv_path)`**: Extracts one JPEG per selection at `TimeOfMax`, generates a COCO JSON sidecar with bounding boxes from the raw ML CSV.
+`**extract_frames_from_selections(selections_csv_path, video_path, raw_csv_path)**`: Extracts one JPEG per selection at `TimeOfMax`, generates a COCO JSON sidecar with bounding boxes from the raw ML CSV.
 
 ---
 
 ### `spyfish/extraction/select_frames.py` — Frame selection (for BIIGLE)
 
-**`select_frames(raw_csv, output_csv, drop_id)`**: Same MaxN/confusing/start strategy as clips, at frame resolution. Applies `frame_multiplier` for denser BIIGLE coverage.
+`**select_frames(raw_csv, output_csv, drop_id)**`: Same MaxN/confusing/start strategy as clips, at frame resolution. Applies `frame_multiplier` for denser BIIGLE coverage.
 
 ---
 
 ### `spyfish/zooniverse/` — Citizen science integration
 
-**`process_zooniverse_clips(maxn_csv, selections_csv, drop_id)`** (`select_zooniverse_clips.py`): Reads MaxN CSV (or generates evenly-spaced health checks if empty), applies clip selection strategy.
+`**process_zooniverse_clips(maxn_csv, selections_csv, drop_id)**` (`select_zooniverse_clips.py`): Reads MaxN CSV (or generates evenly-spaced health checks if empty), applies clip selection strategy.
 
-**`upload_clips_to_zooniverse(clips_df)`** / **`upload_frames_to_zooniverse(frames_df)`** (`upload.py`): Authenticates with `panoptes_client`, creates or retrieves subject set keyed to the drop, uploads each clip/frame as a subject. Idempotent — skips already-existing subjects.
+`**upload_clips_to_zooniverse(clips_df)**` / `**upload_frames_to_zooniverse(frames_df)**` (`upload.py`): Authenticates with `panoptes_client`, creates or retrieves subject set keyed to the drop, uploads each clip/frame as a subject. Idempotent — skips already-existing subjects.
 
-**`parse_classifications.py`** — standalone module for classification sync. Key functions:
+`**parse_classifications.py**` — standalone module for classification sync. Key functions:
+
 - `connect_to_zooniverse()` / `fetch_classifications(since)` — API fetch
 - `load_classifications_from_csv(paths)` — CSV backfill path
 - `parse_classifications(raw, db_drop_ids)` — resolve drop_ids, parse species + counts
@@ -1306,34 +1433,36 @@ class DropStage:
 
 ### `spyfish/biigle/` — Expert annotation platform
 
-**`BiigleHandler`** (`biigle_handler.py`): REST API wrapper with request timeouts.
+`**BiigleHandler**` (`biigle_handler.py`): REST API wrapper with request timeouts.
+
 - `create_volume(name, url, disk_id, filenames)` — create image volume
 - `export_annotations(volume_id, report_type)` — download annotation CSV (async, with polling)
 - `get_pending_volumes()` — volumes not yet marked Done
 - `finalize_volume(volume_id)` — mark done
 
-**`upload_frames_to_biigle(drop_id, frames_df)`** (`upload_frames.py`): Uploads JPEGs to S3 at `biigle_images/{SurveyID}/{DropID}/`, creates BIIGLE volume pointing to that S3 folder via the configured S3 disk (production disk ID: **134**), polls for readiness, stores `volume_id` in DB.
+`**upload_frames_to_biigle(drop_id, frames_df)**` (`upload_frames.py`): Uploads JPEGs to S3 at `biigle_images/{SurveyID}/{DropID}/`, creates BIIGLE volume pointing to that S3 folder via the configured S3 disk (production disk ID: **134**), polls for readiness, stores `volume_id` in DB.
 
 **Label defaults:** All ML-detected bounding boxes are uploaded with the "Fish - review required" label (`default_fish_label_id: 531298` in config). To map specific species to specific BIIGLE labels, add entries to `label_mapping` in `config.yaml`.
 
-**`sync_biigle_annotations()`** (`sync_annotations.py`): Checks `AWAITING_EXPERT_REVIEW` drops for "Done" label, downloads CSV, parses frame filenames (`{DropID}__frame_{seconds}s.jpg`) to timestamps, stores in `spyfish_annotations.db` with `annotated_by='expert'`, advances to `PIPELINE_COMPLETE`.
+`**sync_biigle_annotations()`** (`sync_annotations.py`): Queries `get_deployments_eligible("biigle_status", [expert_uploaded])` with `biigle_volume_id IS NOT NULL`. Checks for volumes marked "Done", downloads annotation CSV, parses frame filenames (`{DropID}__frame_{seconds}s.jpg`) to timestamps, stores in `spyfish_annotations.db` with `annotated_by='expert'`, advances `biigle_status` to `expert_complete`.
 
 ---
 
 ### `spyfish/validation/data_validator.py` — Data quality
 
-**`DataValidator`**: Applies rules from `config.yaml` (`validation_rules` section). Rule types: `required`, `unique`, `formats` (regex), `foreign_keys`, `relationships`, `value_range`. All errors go to `validation_errors` table and are visible in Streamlit.
+`**DataValidator**`: Applies rules from `config.yaml` (`validation_rules` section). Rule types: `required`, `unique`, `formats` (regex), `foreign_keys`, `relationships`, `value_range`. All errors go to `validation_errors` table and are visible in Streamlit.
 
 ---
 
 ### `spyfish/storage/` — File storage
 
-**`S3Handler`** (`s3_handler.py`): Boto3 wrapper with exponential backoff.
+`**S3Handler**` (`s3_handler.py`): Boto3 wrapper with exponential backoff.
+
 - `upload_file_to_s3(local_path, key)` / `download_file_from_s3(key, local_path)`
 - `get_file_paths_set_from_s3(prefix)` / `read_df_from_s3_csv(key)`
 - `sync_directory_to_s3(local_dir, s3_prefix)` — bulk upload (never `--delete`)
 
-**`sync_pipeline_results()`** (`db_sync.py`): Called at the end of every non-`--no-upload` run. Uploads both SQLite DBs, annotation CSVs, and logs to S3.
+`**sync_pipeline_results()**` (`db_sync.py`): Called at the end of every non-`--no-upload` run. Uploads both SQLite DBs, annotation CSVs, and logs to S3.
 
 ---
 
@@ -1342,16 +1471,13 @@ class DropStage:
 Run with `--retrain` (typically after `--biigle-sync`).
 
 1. **Export BIIGLE annotations to YOLO format** (`biigle_to_yolo.py`): Reads frame annotation CSVs from `data_quality/{DropID}/biigle_frames/`, converts bounding boxes to YOLO `.txt` format, generates `class_map.json`.
-
 2. **Balance training data** (`prepare_training_data.py`): `class_ceiling_pct` (40%) — subsample dominant class. `class_floor_pct` (2%) — merge rare species into generic "fish".
-
 3. **Split** (`split_data.py`): Stratified 70/15/15 train/val/test. Requires min `val_min_images` (20).
-
 4. **Train** (`train.py`): YOLOv12 with underwater-tuned augmentation (HSV shifts, rotation, horizontal flip). AMP disabled (prevents NaN losses on some underwater data).
-
 5. **Evaluate** (`evaluate.py`): Evaluates new model vs base model on test set. Promotes if mAP improvement ≥ `retrain_min_improvement_pct` (2%). Results in `process_files/training/`.
 
 **Model paths:**
+
 - Production model weights: `process_files/models/pipeline_model/`
 - Base model (evaluation baseline): `process_files/models/base_model/`
 - Model name is read from the filename stem and embedded in output CSV names (e.g. `{DropID}_ml_{model_name}_maxn.csv`), so annotations are always traceable to the exact model version that produced them.
@@ -1383,14 +1509,16 @@ streamlit run "app/🐟_Spyfish_Data_Tools.py"
 
 ### Pages
 
-| Page | Description |
-|---|---|
-| 🐟 Spyfish Data Tools | Home / navigation |
-| ⚙️ Deployment Management | Live pipeline status; trigger stage transitions |
-| 🔍 Error Review | Browse `validation_errors` by drop, survey, or error type |
-| 📺 View Deployment Videos | Browse and play locally downloaded videos |
-| 📊 Model Metrics | Training results and mAP scores |
-| 📥 Export BIIGLE Annotations | Download expert annotation data as CSV |
+
+| Page                         | Description                                               |
+| ---------------------------- | --------------------------------------------------------- |
+| 🐟 Spyfish Data Tools        | Home / navigation                                         |
+| ⚙️ Deployment Management     | Live pipeline status; trigger stage transitions           |
+| 🔍 Error Review              | Browse `validation_errors` by drop, survey, or error type |
+| 📺 View Deployment Videos    | Browse and play locally downloaded videos                 |
+| 📊 Model Metrics             | Training results and mAP scores                           |
+| 📥 Export BIIGLE Annotations | Download expert annotation data as CSV                    |
+
 
 ### Sensitive data reminder
 
@@ -1426,7 +1554,8 @@ Everything else (CLI flag, eligibility querying, status transitions, error handl
 
 ```python
 def _run_my_new_step() -> None:
-    records = db.get_deployments_by_status(PipelineStatus.SOME_STATUS)
+    db = DatabaseManager()
+    records = db.get_deployments_eligible("ml_status", [MlStatus.COMPLETE])
     for r in records:
         do_something(r["drop_id"])
 
@@ -1440,30 +1569,45 @@ GlobalStage("my-step", "My new step description", _run_my_new_step)
 def _step_my_processing(drop_id: str) -> str | None:
     if not_ready:
         return None  # Leave status unchanged; runner will try again next run
-    return PipelineStatus.MY_TARGET_STATUS
+    return MyStatus.COMPLETE  # Returned value is passed to advance_*_status()
 
 DropStage(
     "my-processing",
     "My per-drop processing",
     _step_my_processing,
-    input_statuses=[PipelineStatus.ML_COMPLETE],
+    section="my_status",                   # Which DB column to query and advance
+    input_statuses=[MyStatus.PENDING],
+    prerequisites={"ml_status": MlStatus.COMPLETE},  # Optional cross-section filter
 )
 ```
 
-### If you need a new pipeline status
+For prerequisites that depend on which flags were passed (e.g. Biigle needing either citsci or ML complete):
 
-1. Add the constant to `PipelineStatus` in `spyfish/config/base.py`
-2. Add valid transition(s) to `PipelineStatus.VALID_TRANSITIONS`
-3. Optionally add a `STAGE_ORDER` entry for the Streamlit dashboard display
+```python
+def _my_prerequisites(args, run_all) -> dict:
+    if run_all or args.some_flag:
+        return {"citsci_status": CitSciStatus.COMPLETE}
+    return {"ml_status": MlStatus.COMPLETE}
+
+DropStage(..., prerequisites=_my_prerequisites)
+```
+
+### If you need a new status value or section
+
+1. Add the status constants and `VALID_TRANSITIONS` to the relevant class in `spyfish/config/base.py`
+2. Add the corresponding `advance_*_status()` method to `DatabaseManager`
+3. Add the new section to `_ADVANCE_METHOD` in `stage.py` and `_SECTION_ERROR_TYPES` in `manager.py`
+4. Add the column to the `CREATE TABLE` statement and the `add_or_update_deployment()` upsert
 
 ### Checklist
 
-- [ ] Step function written and tested locally
-- [ ] `STAGES` entry added with correct `input_statuses`
-- [ ] New `PipelineStatus` constant(s) added if needed
-- [ ] `VALID_TRANSITIONS` updated
-- [ ] `config.yaml` updated if the stage needs new config values
-- [ ] Stage is idempotent (safe to re-run on already-processed drops)
+- Step function written and tested locally
+- `STAGES` entry added with correct `section`, `input_statuses`, and `prerequisites`
+- New status constants added to `base.py` with `VALID_TRANSITIONS` updated
+- New `advance_*_status()` method added if needed
+- `_ADVANCE_METHOD` and `_SECTION_ERROR_TYPES` dicts updated in `stage.py` / `manager.py`
+- `config.yaml` updated if the stage needs new config values
+- Stage is idempotent (safe to re-run on already-processed drops)
 
 ---
 
@@ -1475,12 +1619,15 @@ This section covers how to get historical annotation data — from Zooniverse (v
 
 Zooniverse stores two types of exports, both downloadable from the project's **Data Exports** page at `zooniverse.org/lab/{project_id}/data-exports`:
 
-| Export type | What it contains | Used for |
-|---|---|---|
-| **Classifications export** | Every volunteer classification submitted | Parsing species counts and timestamps |
-| **Subjects export** | Every subject (clip/frame) uploaded, with retirement status | Completion gate: knowing when all clips in a set are retired |
+
+| Export type                | What it contains                                            | Used for                                                     |
+| -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
+| **Classifications export** | Every volunteer classification submitted                    | Parsing species counts and timestamps                        |
+| **Subjects export**        | Every subject (clip/frame) uploaded, with retirement status | Completion gate: knowing when all clips in a set are retired |
+
 
 **Download steps:**
+
 1. Go to `zooniverse.org/lab/{project_id}/data-exports`
 2. Request a fresh "Classifications export" and "Subjects export" (they are generated asynchronously — refresh after a few minutes)
 3. Download the CSV files
@@ -1515,7 +1662,7 @@ The completion gate will use the subjects CSV to ensure only fully-retired subje
 **After backfill:** manually advance each completed drop using `set_status`:
 
 ```bash
-python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 CITSCI_COMPLETE
+python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --citsci-status complete
 ```
 
 ### BIIGLE legacy volumes (created outside the pipeline)

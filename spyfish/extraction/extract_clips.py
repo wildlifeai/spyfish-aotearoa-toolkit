@@ -18,6 +18,39 @@ from spyfish.config.wrapper import config
 from spyfish.utils import generate_clip_filename
 
 
+def _build_ffmpeg_clip_cmd(
+    video_path: str,
+    seek_seconds: float,
+    duration: float,
+    output_path: Path,
+    crf: int,
+) -> List[str]:
+    """Builds the ffmpeg command for extracting a single clip.
+
+    Single source of truth for the codec / preset / CRF / audio-strip flags —
+    both the CRF probe and the main extraction loop call this so they can't
+    drift out of sync if a flag is added or changed.
+    """
+    return [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(seek_seconds),
+        "-i",
+        str(video_path),
+        "-t",
+        str(duration),
+        "-c:v",
+        config.ffmpeg_codec,
+        "-preset",
+        config.ffmpeg_preset,
+        "-crf",
+        str(crf),
+        "-an",  # strip audio — standard for processed clips
+        str(output_path),
+    ]
+
+
 def _extract_clip(
     video_path: str, seek_seconds: float, duration: float, output_path: Path, crf: int
 ) -> float:
@@ -26,24 +59,9 @@ def _extract_clip(
         output_path.unlink()
     try:
         subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-ss",
-                str(seek_seconds),
-                "-i",
-                str(video_path),
-                "-t",
-                str(duration),
-                "-c:v",
-                config.ffmpeg_codec,
-                "-preset",
-                config.ffmpeg_preset,
-                "-crf",
-                str(crf),
-                "-an",
-                str(output_path),
-            ],
+            _build_ffmpeg_clip_cmd(
+                video_path, seek_seconds, duration, output_path, crf
+            ),
             check=True,
             capture_output=True,
             text=True,
@@ -147,16 +165,13 @@ def extract_clips_from_selections(
         probe_row = df.loc[df[col].idxmax()]
     else:
         probe_row = df.iloc[0]
-    first = probe_row
-    probe_sampling_start = float(first.get(config.csv_sampling_start_column, 0))
-    probe_start = float(first[config.csv_clip_start_column])
+    probe_seek = float(probe_row[config.csv_clip_start_absolute_column])
     probe_end = (
-        float(first[config.csv_clip_end_column])
-        if config.csv_clip_end_column in first
-        else probe_start + config.clip_length
+        float(probe_row[config.csv_clip_end_absolute_column])
+        if config.csv_clip_end_absolute_column in probe_row
+        else probe_seek + config.clip_length
     )
-    probe_duration = probe_end - probe_start
-    probe_seek = probe_sampling_start + probe_start
+    probe_duration = probe_end - probe_seek
     probe_path = Path(output_dir) / generate_clip_filename(
         drop_id, probe_duration, probe_seek
     )
@@ -187,44 +202,23 @@ def extract_clips_from_selections(
 
     clip_paths: List[Optional[str]] = []
     for idx, row in df.iterrows():
-        if config.csv_clip_start_column not in row:
-            logging.error(f"Missing {config.csv_clip_start_column} in row: {row}")
+        if config.csv_clip_start_absolute_column not in row:
+            logging.error(
+                f"Missing {config.csv_clip_start_absolute_column} in row: {row}"
+            )
             clip_paths.append(None)
             continue
 
-        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
-        clip_start_relative = float(row[config.csv_clip_start_column])
-        # Use config-defined clip length as fallback
-        clip_end_relative = (
-            float(row[config.csv_clip_end_column])
-            if config.csv_clip_end_column in row
-            else clip_start_relative + config.clip_length
+        seek_seconds = float(row[config.csv_clip_start_absolute_column])
+        clip_end_absolute = (
+            float(row[config.csv_clip_end_absolute_column])
+            if config.csv_clip_end_absolute_column in row
+            else seek_seconds + config.clip_length
         )
-
-        clip_duration = clip_end_relative - clip_start_relative
-        seek_seconds = sampling_start + clip_start_relative
+        clip_duration = clip_end_absolute - seek_seconds
 
         out_filename = generate_clip_filename(drop_id, clip_duration, seek_seconds)
         out_path = Path(output_dir) / out_filename
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(seek_seconds),
-            "-i",
-            str(video_path),
-            "-t",
-            str(clip_duration),
-            "-c:v",
-            config.ffmpeg_codec,
-            "-preset",
-            config.ffmpeg_preset,
-            "-crf",
-            str(effective_crf),
-            "-an",  # remove audio — standard for processed clips
-            str(out_path),
-        ]
 
         logging.info(f"  [{idx+1}/{len(df)}] {seek_seconds:.1f}s → {out_filename}")
 
@@ -233,6 +227,9 @@ def extract_clips_from_selections(
             clip_paths.append(str(out_path))
             continue
 
+        cmd = _build_ffmpeg_clip_cmd(
+            video_path, seek_seconds, clip_duration, out_path, effective_crf
+        )
         try:
             subprocess.run(
                 cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL

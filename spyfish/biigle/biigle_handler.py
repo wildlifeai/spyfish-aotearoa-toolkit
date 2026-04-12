@@ -370,13 +370,19 @@ class BiigleHandler:
         self,
         resource: ResourceType,
         resource_id: int,
-        type_id: int = config.annotation_report_type_video,
+        type_id: Optional[int] = None,
     ) -> int:
         """
         Request a BIIGLE annotation report. Returns the report ID.
         Reports are generated asynchronously — use download_report_zip_bytes() to fetch.
         Defaults to the video annotation CSV report type (config.annotation_report_type_video).
+
+        `type_id` defaults to None and is resolved to config at call time rather
+        than at class-definition time — evaluating `config.x` in a default arg
+        runs at module import, which is brittle if import order changes.
         """
+        if type_id is None:
+            type_id = config.annotation_report_type_video
         resp = self.api.post(
             f"{resource}/{resource_id}/reports", json={"type_id": type_id}
         )
@@ -391,13 +397,21 @@ class BiigleHandler:
     def download_report_zip_bytes(
         self,
         report_id: int,
-        max_tries: int = 60,
-        poll_interval: float = 2.0,
+        max_tries: Optional[int] = None,
+        poll_interval: Optional[float] = None,
     ) -> bytes:
         """
         Poll until a report ZIP is ready and return its raw bytes.
         BIIGLE reports are generated asynchronously (may take up to ~2 min).
+
+        Retry parameters default to None and are resolved from config at call
+        time (`biigle.report_download_max_retries` and
+        `biigle.report_download_retry_interval_secs`).
         """
+        if max_tries is None:
+            max_tries = config.report_download_max_retries
+        if poll_interval is None:
+            poll_interval = config.report_download_retry_interval_secs
         for attempt in range(1, max_tries + 1):
             resp = self.api.get(f"reports/{report_id}", raise_for_status=False)
             status = resp.status_code
@@ -465,13 +479,14 @@ class BiigleHandler:
         self,
         resource: ResourceType,
         resource_id: int,
-        type_id: int = config.annotation_report_type_video,
+        type_id: Optional[int] = None,
         source_col: str = "source_file",
     ) -> pd.DataFrame:
         """
         High-level helper: request report → wait → download ZIP → read all CSVs → return DataFrame.
-        Defaults to the video annotation CSV report type.
+        Defaults to the video annotation CSV report type (resolved at call time).
         """
+        # `create_report` resolves type_id=None → config.annotation_report_type_video
         report_id = self.create_report(resource, resource_id, type_id)
         zip_bytes = self.download_report_zip_bytes(report_id)
         allow_nested = resource == "projects"

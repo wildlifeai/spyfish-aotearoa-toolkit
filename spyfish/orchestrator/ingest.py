@@ -3,7 +3,11 @@ from typing import Optional, Set
 
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus, SourceStatus, VideoPresence
+from spyfish.config.base import (
+    IngestStatus,
+    MlStatus,
+    VideoPresence,
+)
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
@@ -12,21 +16,25 @@ from spyfish.validation.data_validator import DataValidator
 
 def check_pending_arrivals(known_files: Optional[Set[str]] = None):
     """
-    Checks S3 for videos of deployments in PENDING_ARRIVAL status.
-    Advances them to READY_FOR_ML if found.
+    Checks S3 for videos of deployments with ml_status='pending' and video_presence='absent'.
+    Advances ml_status to 'ready' when the video is confirmed in S3.
 
     Args:
         known_files: Optional pre-fetched set of S3 'media/' file paths.
                     If None, it will be fetched from S3.
     """
     db = DatabaseManager()
-    pending = db.get_deployments_by_status(PipelineStatus.PENDING_ARRIVAL)
+    pending = db.get_deployments_eligible(
+        "ml_status",
+        [MlStatus.PENDING],
+        prerequisites={"video_presence": VideoPresence.ABSENT},
+    )
 
     if not pending:
-        logging.info("No PENDING_ARRIVAL drops found.")
+        logging.info("No pending-arrival drops found.")
         return
 
-    logging.info(f"Checking S3 for {len(pending)} PENDING_ARRIVAL drops...")
+    logging.info(f"Checking S3 for {len(pending)} pending drops...")
 
     if known_files is None:
         storage = S3Handler(bucket=config.s3_bucket)
@@ -38,20 +46,16 @@ def check_pending_arrivals(known_files: Optional[Set[str]] = None):
         drop_id = drop["drop_id"]
         video_path = drop["video_path"]
 
-        # Skip deployments with source data issues — they shouldn't enter the pipeline
-        if drop.get("source_status", SourceStatus.OK) != SourceStatus.OK:
-            continue
-
         if video_path and video_path in known_files:
             logging.info(
-                f"✅ Video confirmed for {drop_id}. Updating status to {PipelineStatus.READY_FOR_ML}."
+                f"✅ Video confirmed for {drop_id}. Advancing ml_status → ready."
             )
             db.update_deployment_fields(drop_id, video_presence=VideoPresence.PRESENT)
-            db.advance_status(drop_id, PipelineStatus.READY_FOR_ML)
+            db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.READY)
             updated_count += 1
 
     logging.info(
-        f"Arrival check complete. Advanced {updated_count} drops to {PipelineStatus.READY_FOR_ML}."
+        f"Arrival check complete. Advanced {updated_count} drops to ml_status=ready."
     )
 
 
@@ -76,9 +80,12 @@ def run_ingestion():
     db = DatabaseManager()
     storage = S3Handler(bucket=config.s3_bucket)
 
-    # Fetch File List & Deployment CSV (One Journey, One S3 Scan)
     logging.info("Fetching known media files and master deployments list from S3...")
-    known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
+    media_objects = storage.get_objects_from_s3(prefix="media/", keys_only=False)
+    known_files = {obj["Key"] for obj in media_objects}
+    media_file_info = {
+        obj["Key"]: obj.get("StorageClass", "STANDARD") for obj in media_objects
+    }
 
     csv_path = config.s3_sharepoint_deployment_csv
     deployments_df = storage.read_df_from_s3_csv(csv_path)
@@ -98,22 +105,28 @@ def run_ingestion():
     structured_errors = []
 
     if validator.errors_df is not None and not validator.errors_df.empty:
-        for idx, e in validator.errors_df.iterrows():
+        # Dict-style access (e["SurveyID"]) rather than attribute-style
+        # (e.SurveyID) — the latter silently breaks when a column name
+        # collides with a pandas Series method (e.g. a column named `name`,
+        # `count`, `size` would return the method instead of the value).
+        for _, e in validator.errors_df.iterrows():
             structured_errors.append(
                 {
-                    "SurveyID": str(e.SurveyID) if pd.notna(e.SurveyID) else "",
-                    "DropID": str(e.DropID) if pd.notna(e.DropID) else "",
-                    "ErrorType": str(e.ErrorType),
-                    "FileName": str(e.FileName),
-                    "ColumnName": str(e.ColumnName) if pd.notna(e.ColumnName) else "",
-                    "ErrorMessage": str(e.ErrorMessage),
+                    "SurveyID": str(e["SurveyID"]) if pd.notna(e["SurveyID"]) else "",
+                    "DropID": str(e["DropID"]) if pd.notna(e["DropID"]) else "",
+                    "ErrorType": str(e["ErrorType"]),
+                    "FileName": str(e["FileName"]),
+                    "ColumnName": (
+                        str(e["ColumnName"]) if pd.notna(e["ColumnName"]) else ""
+                    ),
+                    "ErrorMessage": str(e["ErrorMessage"]),
                     "InvalidValue": (
-                        str(e.InvalidValue) if pd.notna(e.InvalidValue) else ""
+                        str(e["InvalidValue"]) if pd.notna(e["InvalidValue"]) else ""
                     ),
                 }
             )
-            if pd.notna(e.DropID):
-                structural_error_drops.add(str(e.DropID).strip())
+            if pd.notna(e["DropID"]):
+                structural_error_drops.add(str(e["DropID"]).strip())
 
     logging.debug(
         f"Found {len(structural_error_drops)} DropIDs with structural CSV errors, logging them into DB."
@@ -121,26 +134,11 @@ def run_ingestion():
     db.clear_validation_errors()
     db.add_validation_errors(structured_errors)
 
-    # Load expert annotations and count per DropID (always from S3)
-    logging.debug("Fetching expert annotations from S3...")
-    expert_counts = {}
-    try:
-        annotations_df = storage.read_df_from_s3_csv(
-            config.s3_sharepoint_annotations_legacy_experts_csv
-        )
-        if not annotations_df.empty:
-            expert_counts = (
-                annotations_df[config.drop_id_column].value_counts().to_dict()
-            )
-            logging.info(
-                f"Loaded {len(annotations_df)} annotation rows covering {len(expert_counts)} deployments."
-            )
-    except Exception as e:
-        logging.warning(
-            f"Failed to load KSO annotations from S3: {e}. Expert counts will default to 0."
-        )
-
-    # Load sites CSV and cache in DB so upload step doesn't need S3
+    # Note: we intentionally do NOT load the legacy annotations CSV here to
+    # write expert_annotations counts. That's `ingest_legacy_expert_annotations()`'s
+    # job — it runs right after this under the same --ingest flag, inserts into
+    # spyfish_annotations.db, and calls sync_annotation_counts() which is the
+    # sole authority on the annotation count columns.
     try:
         sites_df = storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
         db.upsert_sites(sites_df)
@@ -150,126 +148,117 @@ def run_ingestion():
         )
 
     _sync_deployments_to_db(
-        deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
+        deployments_df,
+        db,
+        structural_error_drops,
+        known_files,
+        media_file_info,
+        mapping,
     )
     logging.info(
         f"Ingestion complete. Synchronized {len(deployments_df)} records into the pipeline database."
     )
 
-    # After full ingestion, check for arrivals of drops that WERE already PENDING in the DB
+    # After ingestion, check for video arrivals
     check_pending_arrivals(known_files=known_files)
 
 
 def _sync_deployments_to_db(
-    deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
+    deployments_df,
+    db,
+    structural_error_drops: set,
+    known_files,
+    media_file_info,
+    mapping,
 ):
+    """Upsert deployment rows into the pipeline DB.
+
+    `structural_error_drops` is read-only here — drops flagged by the
+    validator before we started. Per-row sampling-parse failures are
+    tracked locally rather than mutated back into the caller's set, so
+    this function stays pure with respect to its inputs.
+    """
     drop_col = mapping.get("drop_id_column")
     bad_col = mapping.get("is_bad_deployment_column")
     video_col = mapping.get("video_file_link_column")
 
     new_count = 0
-    expt_count = 0
-    existing_deployments = db.get_all_deployments_map()
 
-    # Iterate over all drops and sync them into our SQLite brain
     for _, row in deployments_df.iterrows():
-        # Strict validation of drop_id to prevent path traversal and ensure format
         try:
             raw_drop_id = str(row.get(drop_col, "")).strip()
             drop_id = config.validate_drop_id(raw_drop_id)
         except ValueError:
-            continue  # invalid DropID format — error surfaced by DataValidator
+            logging.debug(
+                f"Skipping row with invalid DropID format: {raw_drop_id!r} "
+                "(error surfaced by DataValidator)"
+            )
+            continue
 
         video_path = str(row.get(video_col, "")).strip()
-
-        # Parse IsBadDeployment column strictly
         is_bad_deployment = str(row.get(bad_col, "")).strip() == "True"
 
-        # Parse Sampling offsets — these MUST exist in the BUV Deployment CSV
         try:
-            # We strictly require these to be numeric
             sampling_start = float(row[config.csv_sampling_start_column])
             sampling_end = float(row[config.csv_sampling_end_column])
+            sampling_parse_failed = False
         except (ValueError, TypeError, KeyError):
-            if drop_id not in structural_error_drops:
-                structural_error_drops.add(drop_id)
             sampling_start = None
             sampling_end = None
+            sampling_parse_failed = True
 
-        expert_anns = expert_counts.get(drop_id, 0)
-        ml_anns = 0
-        citsci_anns = 0
-
-        # Determine source_status from data quality checks (orthogonal to pipeline stage)
+        # Determine ingest_status from data quality checks.
+        # Two sources of VALIDATION_ERROR:
+        #   - drop was flagged by the validator upstream (structural_error_drops)
+        #   - sampling_start / sampling_end couldn't be parsed from the row
         if is_bad_deployment:
-            source_status = SourceStatus.EXCLUDED
-        elif drop_id in structural_error_drops:
-            source_status = SourceStatus.VALIDATION_ERROR
+            ingest_status = IngestStatus.EXCLUDED
+        elif drop_id in structural_error_drops or sampling_parse_failed:
+            ingest_status = IngestStatus.VALIDATION_ERROR
         else:
-            source_status = SourceStatus.OK
+            ingest_status = IngestStatus.OK
 
-        # Determine video_presence from current S3 state (updated every ingest run)
-        if is_bad_deployment:
-            video_presence = VideoPresence.NO_VIDEO_BAD_DEP
-        elif video_path and video_path in known_files:
+        # Determine video_presence from current S3 state.
+        # For bad deployments: use NO_VIDEO_BAD_DEP only if the video is truly absent;
+        # if a video was uploaded for a bad deployment, record it as PRESENT.
+        if video_path and video_path in known_files:
             video_presence = VideoPresence.PRESENT
+        elif is_bad_deployment:
+            video_presence = VideoPresence.NO_VIDEO_BAD_DEP
         else:
             video_presence = VideoPresence.ABSENT
 
-        # Determine pipeline status
-        if expert_anns > 0:
-            # Legacy data: deployments that already have expert annotations (pre-pipeline)
-            # are set to PIPELINE_COMPLETE immediately, skipping ML and citsci stages.
-            # TODO: verify this doesn't interfere with drops that have expert annotations
-            # but still need ML inference (e.g. re-annotated surveys).
-            status = PipelineStatus.PIPELINE_COMPLETE
-        elif source_status != SourceStatus.OK:
-            # Don't advance source-problematic deployments through the pipeline.
-            # Preserve existing stage if already in DB, otherwise default to PENDING_ARRIVAL.
-            existing_record = existing_deployments.get(drop_id)
-            status = (
-                existing_record["status"]
-                if existing_record
-                else PipelineStatus.PENDING_ARRIVAL
-            )
+        # Determine initial ml_status. Only applied on INSERT — existing records
+        # preserve their section statuses via the ON CONFLICT clause in
+        # add_or_update_deployment. get_deployments_eligible filters ingest_status='ok'
+        # so bad/excluded deployments won't be picked up by processing stages.
+        # ml_status starts at 'ready' only when the video is confirmed present
+        # and the deployment is in good standing; other sections default to
+        # their respective 'pending' values via SQL defaults.
+        if ingest_status == IngestStatus.OK and video_presence == VideoPresence.PRESENT:
+            ml_status = MlStatus.READY
         else:
-            existing_record = existing_deployments.get(drop_id)
-            if existing_record and existing_record["status"] not in [
-                PipelineStatus.PENDING_ARRIVAL,
-                PipelineStatus.ERROR,
-            ]:
-                # It's already moving through the pipeline, leave it alone.
-                status = existing_record["status"]
-            else:
-                # Immediate File Check Optimization!
-                if video_path and video_path in known_files:
-                    status = PipelineStatus.READY_FOR_ML
-                else:
-                    status = PipelineStatus.PENDING_ARRIVAL
+            ml_status = MlStatus.PENDING
+
+        video_storage_class = media_file_info.get(video_path) if video_path else None
 
         db.add_or_update_deployment(
             drop_id=drop_id,
-            status=status,
-            source_status=source_status,
+            ingest_status=ingest_status,
+            ml_status=ml_status,
             video_path=video_path,
             video_presence=video_presence,
+            video_storage_class=video_storage_class,
             is_bad_deployment=is_bad_deployment,
-            error_message=(
-                "Found in structural errors"
-                if source_status == SourceStatus.VALIDATION_ERROR
-                else ""
-            ),
             sampling_start=sampling_start,
             sampling_end=sampling_end,
-            expert_annotations=expert_anns,
-            ml_annotations=ml_anns,
-            citsci_annotations=citsci_anns,
         )
         new_count += 1
-        expt_count += expert_anns
 
     logging.info(
-        f"Ingestion complete. Synchronized {new_count} records into the pipeline database, with {expt_count} of {sum(expert_counts.values())} expert annotations."
+        f"Ingestion complete. Synchronized {new_count} records into the pipeline database. "
+        "Expert annotation counts will be populated by sync_annotation_counts() "
+        "via ingest_legacy_expert_annotations()."
     )
 
 

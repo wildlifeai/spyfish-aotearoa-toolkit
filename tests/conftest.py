@@ -12,9 +12,9 @@ environment under pytest's tmp_path:
 
 Canonical deployment identifiers:
 
-    DROP_NORMAL       KSF_20240124_BUV_KSF_085_01  READY_FOR_ML   — happy-path drop
-    DROP_STUCK        KSF_20240124_BUV_KSF_085_02  PROCESSING_ML  — simulates a mid-run crash
-    DROP_ML_COMPLETE  KSF_20240124_BUV_KSF_085_03  ML_COMPLETE    — for post-ML step tests
+    DROP_NORMAL       KSF_20240124_BUV_KSF_085_01  ml_status=ready    — happy-path drop
+    DROP_STUCK        KSF_20240124_BUV_KSF_085_02  ml_status=running  — simulates a mid-run crash
+    DROP_ML_COMPLETE  KSF_20240124_BUV_KSF_085_03  ml_status=complete — for post-ML step tests
 
 Usage in tests:
 
@@ -22,7 +22,7 @@ Usage in tests:
 
     def test_something(pipeline_env):
         env = pipeline_env
-        assert env.db.get_deployment(DROP_NORMAL)["status"] == PipelineStatus.READY_FOR_ML
+        assert env.db.get_deployment(DROP_NORMAL)["ml_status"] == MlStatus.READY
 """
 
 import subprocess
@@ -34,7 +34,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import MlStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -68,8 +68,8 @@ csv_mapping:
   video_file_link_column: "LinkToVideoFile"
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
-  clip_start_column: "ClipStartDeploySeconds"
-  clip_end_column: "ClipEndDeploySeconds"
+  clip_start_absolute_column: "ClipStartAbsoluteSeconds"
+  clip_end_absolute_column: "ClipEndAbsoluteSeconds"
   clip_max_time_column: "TimeOfMaxAbsSeconds"
   maxn_time_seconds_column: "TimeOfMaxAbsSeconds"
   confidence_agreement_column: "ConfidenceAgreement"
@@ -110,9 +110,8 @@ paths:
     models: "models"
     base_model: "base_model"
     pipeline_model: "pipeline_model"
-    trained: "trained"
+    archived_models: "archived_models"
     biigle_images: "media/biigle_images"
-    biigle_cache: "biigle_cache"
 
 ml_inference:
   limit_processing: 1
@@ -362,7 +361,8 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
 }
 
 # Pre-written MaxN data for DROP_ML_COMPLETE — stored in the fixture as if a prior
-# pipeline run already completed inference and wrote this output.
+# pipeline run already completed inference and wrote this output. Three rows so
+# `sync_annotation_counts` yields ml_annotations = 3.
 _ML_COMPLETE_MAXN_ROWS = [
     {
         "DropID": DROP_ML_COMPLETE,
@@ -373,6 +373,26 @@ _ML_COMPLETE_MAXN_ROWS = [
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
         "TimeOfMaxAbsSeconds": 5.0,
+    },
+    {
+        "DropID": DROP_ML_COMPLETE,
+        "ScientificName": "Pagrus auratus",
+        "TimeOfMax": "00:00:15.000",
+        "MaxInterval": 2,
+        "AnnotatedBy": MODEL_NAME,
+        "IntervalAnnotation": 10,
+        "ConfidenceAgreement": 0.75,
+        "TimeOfMaxAbsSeconds": 15.0,
+    },
+    {
+        "DropID": DROP_ML_COMPLETE,
+        "ScientificName": "Parika scaber",
+        "TimeOfMax": "00:00:25.000",
+        "MaxInterval": 1,
+        "AnnotatedBy": MODEL_NAME,
+        "IntervalAnnotation": 10,
+        "ConfidenceAgreement": 0.90,
+        "TimeOfMaxAbsSeconds": 25.0,
     },
 ]
 
@@ -461,25 +481,26 @@ def pipeline_env(tmp_path, monkeypatch):
     # ── 5. Seed the three deployments ─────────────────────────────────────
     db.add_or_update_deployment(
         drop_id=DROP_NORMAL,
-        status=PipelineStatus.READY_FOR_ML,
+        ml_status=MlStatus.READY,
         sampling_start=1,
         sampling_end=5,
     )
-    # DROP_STUCK: video was present when the crash happened; status was set to
-    # PROCESSING_ML before the crash so it is now permanently stuck there.
+    # DROP_STUCK: video was present when the crash happened; ml_status was set to
+    # 'running' before the crash so it is now permanently stuck there.
     db.add_or_update_deployment(
         drop_id=DROP_STUCK,
-        status=PipelineStatus.PROCESSING_ML,
+        ml_status=MlStatus.RUNNING,
         sampling_start=1,
         sampling_end=5,
     )
     # DROP_ML_COMPLETE: a prior pipeline run finished inference successfully.
+    # ml_annotations count is derived from the annotations DB via
+    # sync_annotation_counts() in step 8 below — not set directly here.
     db.add_or_update_deployment(
         drop_id=DROP_ML_COMPLETE,
-        status=PipelineStatus.ML_COMPLETE,
+        ml_status=MlStatus.COMPLETE,
         sampling_start=1,
         sampling_end=5,
-        ml_annotations=3,
     )
 
     # ── 6. Generate tiny real videos ──────────────────────────────────────
@@ -534,6 +555,11 @@ def pipeline_env(tmp_path, monkeypatch):
             for row in _ML_COMPLETE_MAXN_ROWS
         ]
     )
+
+    # Propagate counts from annotations DB → deployments table. This matches
+    # how the real pipeline works: sync_annotation_counts() is the only writer
+    # to the ml_annotations / citsci_annotations / expert_annotations columns.
+    db.sync_annotation_counts([DROP_ML_COMPLETE])
 
     return PipelineEnv(
         tmp_path=tmp_path,

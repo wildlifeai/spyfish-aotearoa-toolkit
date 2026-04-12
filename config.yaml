@@ -14,10 +14,11 @@ csv_mapping:
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
   # Selection CSV columns
-  clip_start_column: "ClipStartDeploySeconds"
-  clip_end_column: "ClipEndDeploySeconds"
-  clip_max_time_column: "TimeOfMaxAbsSeconds"
-  maxn_time_seconds_column: "TimeOfMaxAbsSeconds"
+  # All time columns are absolute seconds from frame 0 of the source video file.
+  clip_start_absolute_column: "ClipStartAbsoluteSeconds"
+  clip_end_absolute_column: "ClipEndAbsoluteSeconds"
+  clip_max_time_column: "TimeOfMaxAbsoluteSeconds"
+  maxn_time_seconds_column: "TimeOfMaxAbsoluteSeconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -25,7 +26,7 @@ csv_mapping:
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
-  time_seconds_column: "TimeAbsSeconds"
+  time_seconds_column: "TimeAbsoluteSeconds"
 
 # Centralized path and storage configuration
 paths:
@@ -67,9 +68,8 @@ paths:
     models: "models"
     base_model: "base_model"
     pipeline_model: "pipeline_model"
-    trained: "trained"
+    archived_models: "archived_models"
     biigle_images: "media/biigle_images"
-    biigle_cache: "biigle_cache"
 
 
 ml_inference:
