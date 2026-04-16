@@ -83,14 +83,16 @@ csv_mapping:
 
 paths:
   base_dir: "process_files"
-  orchestration:
-    pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
-    test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
+  deployment_targets_csv: process_files/deployment_targets.csv
+  test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
+  legacy:
+    zooniverse: "legacy/zooniverse"
+    experts: "legacy/experts"
   metadata:
-    root: "spyfish_metadata"
+    root: "metadata"
     sharepoint_dir: "sharepoint_lists"
     status_dir: "status"
     files:
@@ -103,7 +105,7 @@ paths:
   sub_dirs:
     media: "media"
     annotations: "annotations"
-    data_quality: "data_quality"
+    deployment_data: "deployment_data"
     db: "db"
     logs: "logs"
     training: "training"
@@ -149,7 +151,7 @@ extraction:
 zooniverse:
   project_id: 99999
   size_limit_mb: 12.0
-  health_check_count: 6
+  min_clips_per_video: 6
   min_votes: 3
   max_frames_per_run: 3
 
@@ -200,7 +202,7 @@ validation_patterns:
 
 validation_rules:
   deployments:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
+    file_name: "metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID", "SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     info_columns: ["SurveyID", "SiteID"]
@@ -231,7 +233,7 @@ validation_rules:
         range: [170, 178.5]
         allowed_values: [0]
   surveys:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Metadata.csv"
     required: ["SurveyID"]
     unique: ["SurveyID"]
     info_columns: ["SurveyName"]
@@ -239,7 +241,7 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   sites:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Sites.csv"
     required: ["SiteID", "LinkToMarineReserve"]
     unique: ["SiteID"]
     info_columns: ["SiteName", "LinkToMarineReserve"]
@@ -247,14 +249,14 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   species:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
+    file_name: "metadata/sharepoint_lists/BUV Species.csv"
     required: ["AphiaID", "CommonName", "ScientificName"]
     unique: ["AphiaID", "ScientificName", "CommonName"]
     info_columns: ["AphiaID", "CommonName", "ScientificName"]
     foreign_keys: {}
     relationships: []
   reserves:
-    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
+    file_name: "metadata/sharepoint_lists/Marine Reserves.csv"
     required: []
     unique: []
     info_columns: []

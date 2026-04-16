@@ -36,13 +36,27 @@ class PathsConfig(BaseConfig):
         return get_required(self.paths, "base_dir", "paths")
 
     @property
-    def orchestration_paths(self) -> dict:
-        return get_required(self.paths, "orchestration", "paths")
+    def pipeline_targets_csv(self) -> str | None:
+        """Default CSV path for --set-targets."""
+        return self.paths.get("deployment_targets_csv")
+
+    # ── Legacy directories (at project root) ────────────────────────────────
 
     @property
-    def pipeline_targets_csv(self) -> str | None:
-        """Default CSV path for --set-targets"""
-        return self.orchestration_paths.get("pipeline_targets_csv")
+    def legacy_paths(self) -> dict:
+        return get_required(self.paths, "legacy", "paths")
+
+    @property
+    def legacy_zooniverse_dir(self) -> Path:
+        return self.project_root / get_required(
+            self.legacy_paths, "zooniverse", "paths.legacy"
+        )
+
+    @property
+    def legacy_experts_dir(self) -> Path:
+        return self.project_root / get_required(
+            self.legacy_paths, "experts", "paths.legacy"
+        )
 
     # ── Metadata / S3 keys ─────────────────────────────────────────────────
 
@@ -85,7 +99,7 @@ class PathsConfig(BaseConfig):
     @property
     def test_deployment_metadata_csv(self) -> Path:
         return self.project_root / get_required(
-            self.orchestration_paths, "test_deployment_csv", "paths.orchestration"
+            self.paths, "test_deployment_csv", "paths"
         )
 
     @property
@@ -109,8 +123,8 @@ class PathsConfig(BaseConfig):
         return self.project_root / self._sub("media")
 
     @property
-    def data_quality_dir(self) -> Path:
-        return self.project_root / self.base_dir / self._sub("data_quality")
+    def deployment_data_dir(self) -> Path:
+        return self.project_root / self.base_dir / self._sub("deployment_data")
 
     @property
     def logs_dir(self) -> Path:
@@ -144,8 +158,8 @@ class PathsConfig(BaseConfig):
         return f"{self.base_dir}/{self._sub('biigle_images')}"
 
     @property
-    def s3_data_quality_dir(self) -> str:
-        return f"{self.base_dir}/{self._sub('data_quality')}"
+    def s3_deployment_data_dir(self) -> str:
+        return f"{self.base_dir}/{self._sub('deployment_data')}"
 
     @property
     def s3_annotations_dir(self) -> str:
@@ -255,7 +269,7 @@ class PathsConfig(BaseConfig):
     def get_drop_dir(self, drop_id: str) -> Path:
         validated = self.validate_drop_id(drop_id)
         survey_id = self.get_survey_id_from_drop(validated)
-        return self.data_quality_dir / survey_id / validated
+        return self.deployment_data_dir / survey_id / validated
 
     def get_drop_annotations_dir(self, drop_id: str) -> Path:
         return self.get_drop_dir(drop_id) / "annotations"

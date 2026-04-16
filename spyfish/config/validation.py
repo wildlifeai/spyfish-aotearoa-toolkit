@@ -50,6 +50,62 @@ class ValidationConfig(BaseConfig):
             }
         }
 
+    @property
+    def _deployment_validation(self) -> dict:
+        return get_required(self._yaml_config, "deployment_validation", "")
+
+    @property
+    def buv_video_duration_seconds(self) -> int:
+        return int(
+            get_required(
+                self._deployment_validation,
+                "buv_video_duration_seconds",
+                "deployment_validation",
+            )
+        )
+
+    @property
+    def sampling_end_buffer_seconds(self) -> int:
+        return int(
+            get_required(
+                self._deployment_validation,
+                "sampling_end_buffer_seconds",
+                "deployment_validation",
+            )
+        )
+
+    def validate_sampling_window(
+        self, drop_id: str, sampling_start: float, sampling_end: float
+    ) -> list[str]:
+        """Check that the sampling window looks valid for a BUV deployment.
+
+        Returns a list of error messages (empty = valid). Wire into ingest
+        to set ingest_status=validation_error for bad deployments.
+
+        Rules:
+          - sampling_start=0 on a video longer than expected duration means
+            the ranger didn't set the window → bait-settling footage.
+          - sampling_end shorter than (expected duration - buffer) means the
+            video is likely corrupted or incomplete.
+        """
+        errors = []
+        expected = self.buv_video_duration_seconds
+        buffer = self.sampling_end_buffer_seconds
+
+        if sampling_start == 0 and sampling_end > expected:
+            errors.append(
+                f"{drop_id}: sampling_start=0 on a {sampling_end:.0f}s video — "
+                f"likely missing sampling window metadata."
+            )
+
+        if sampling_end < (expected - buffer):
+            errors.append(
+                f"{drop_id}: sampling_end={sampling_end:.0f}s is shorter than "
+                f"expected ({expected}s - {buffer}s buffer = {expected - buffer}s)."
+            )
+
+        return errors
+
     def validate_drop_id(self, drop_id: str) -> str:
         pattern = self.validation_patterns[self.drop_id_column]
         if not re.match(pattern, drop_id):

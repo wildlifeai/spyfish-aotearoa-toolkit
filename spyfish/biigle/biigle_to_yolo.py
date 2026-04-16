@@ -2,7 +2,7 @@
 biigle_to_yolo.py — Convert local Biigle expert CSV exports → YOLO label .txt files.
 
 This tool is strictly offline; it consumes CSVs previously exported by sync_biigle_annotations
-into process_files/data_quality/{drop_id}/annotations/.
+into process_files/deployment_data/{drop_id}/annotations/.
 """
 
 import argparse
@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from spyfish.config.wrapper import config
 
 # ---------------------------------------------------------------------------
 # Core conversion helpers
@@ -184,7 +186,7 @@ def draw_frames_on_images(
     for label_path in samples:
         img_path = None
         for ext in (".jpg", ".jpeg", ".png"):
-            # Search in all subdirectories of images_dir (e.g. data_quality/drop_id/biigle_frames/)
+            # Search in all subdirectories of images_dir (e.g. deployment_data/drop_id/biigle_frames/)
             for p in images_dir.rglob(label_path.stem + ext):
                 img_path = p
                 break
@@ -234,22 +236,22 @@ def draw_frames_on_images(
 
 
 def biigle_to_yolo(
-    data_quality_dir: Path,
+    deployment_data_dir: Path,
     class_map_path: Path,
 ) -> Dict[str, int]:
     """
-    Finds all expert CSVs in data_quality and converts them to YOLO .txt files.
+    Finds all expert CSVs in deployment_data and converts them to YOLO .txt files.
 
     Labels are written into each drop's annotations/ folder alongside the source CSV.
     Use biigle_to_yolo_collect() afterwards to copy them into a flat staging directory.
     """
-    logging.info(f"Searching for expert CSVs in {data_quality_dir}...")
+    logging.info(f"Searching for expert CSVs in {deployment_data_dir}...")
     csv_paths = []
     all_dfs = []
 
     # Strictly use the per-drop expert raw CSVs
     for csv_path in sorted(
-        data_quality_dir.glob("**/annotations/*_biigle_expert_raw.csv")
+        deployment_data_dir.glob("**/annotations/*_biigle_expert_raw.csv")
     ):
         logging.debug(f"  Found expert CSV: {csv_path}")
         csv_paths.append(csv_path)
@@ -275,24 +277,104 @@ def biigle_to_yolo(
     return class_map
 
 
+def download_extra_volume_labels(
+    volume_id: int,
+    output_dir: Path,
+    class_map_path: Optional[Path] = None,
+    report_type: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Download raw annotations from any Biigle volume and convert to YOLO labels.
+
+    No DropID, no DB, no MaxN — just raw CSV → YOLO .txt files
+    dumped into output_dir for inclusion in training data.
+    """
+    from spyfish.biigle.biigle_parser import BiigleParser
+
+    if report_type is None:
+        report_type = config.annotation_report_type_images
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir = output_dir / "labels"
+
+    parser = BiigleParser()
+    logging.info(f"Downloading annotations for volume {volume_id}...")
+    df = parser.download_volume_annotations(volume_id, type_id=report_type)
+
+    if df.empty:
+        logging.warning(f"No annotations found for volume {volume_id}.")
+        return {}
+
+    raw_csv_path = output_dir / f"volume_{volume_id}_raw.csv"
+    df.to_csv(raw_csv_path, index=False)
+    logging.info(f"Saved raw CSV ({len(df)} rows) → {raw_csv_path}")
+
+    class_map = build_class_map(df, class_map_path)
+    if class_map_path:
+        save_class_map(class_map, class_map_path)
+
+    summary = convert_annotations_to_yolo(df, class_map, labels_dir)
+    logging.info(f"Wrote {len(summary)} YOLO label files → {labels_dir}")
+    return class_map
+
+
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
         description="Convert local Biigle expert CSVs to YOLO labels."
     )
-    parser.add_argument(
-        "--data-dir", required=True, type=Path, help="Root data_quality directory"
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Existing: convert local CSVs
+    convert_cmd = subparsers.add_parser(
+        "convert", help="Convert local expert CSVs to YOLO labels"
     )
-    parser.add_argument(
+    convert_cmd.add_argument(
+        "--data-dir", required=True, type=Path, help="Root deployment_data directory"
+    )
+    convert_cmd.add_argument(
         "--class-map",
         required=True,
         type=Path,
         help="Path to write/update the class_map.json",
     )
 
+    # New: download from arbitrary volume
+    download_cmd = subparsers.add_parser(
+        "download-volume", help="Download labels from any Biigle volume"
+    )
+    download_cmd.add_argument(
+        "--volume-id", required=True, type=int, help="Biigle volume ID"
+    )
+    download_cmd.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: training/extra_labels)",
+    )
+    download_cmd.add_argument(
+        "--class-map",
+        type=Path,
+        default=None,
+        help="Path to write/update class_map.json",
+    )
+    download_cmd.add_argument(
+        "--report-type",
+        type=int,
+        default=None,
+        help="Biigle report type ID (default: image annotations)",
+    )
+
     args = parser.parse_args()
 
-    biigle_to_yolo(args.data_dir, args.class_map)
+    if args.command == "convert":
+        biigle_to_yolo(args.data_dir, args.class_map)
+    elif args.command == "download-volume":
+        output_dir = args.output_dir or config.local_training_dir / "extra_labels"
+        download_extra_volume_labels(
+            args.volume_id, output_dir, args.class_map, args.report_type
+        )
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

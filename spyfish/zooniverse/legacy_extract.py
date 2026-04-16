@@ -71,10 +71,6 @@ _LEGACY_YMD_PATTERN = re.compile(r"^([A-Z]{2,4})_(\d{3})_(\d{4})_(\d{2})_(\d{2})
 _REPLICATE_SUFFIX_RE = re.compile(r"^(.+_)(\d+)$")
 _NEW_FORMAT_PATTERN = re.compile(r"^[A-Z]+_\d{8}_BUV_.*")
 
-_ZOONIVERSE_OUT_DIR = config.data_quality_dir.parent / "zooniverse"
-_LEGACY_CSV_DIR = _ZOONIVERSE_OUT_DIR / "legacy_classifications"
-_LEGACY_SUBJECTS_DIR = _ZOONIVERSE_OUT_DIR / "legacy_subjects"
-
 
 def build_legacy_prefix_index(db_drop_ids: list[str]) -> dict[str, list[str]]:
     """
@@ -356,22 +352,29 @@ def run_legacy_zooniverse_backfill() -> None:
 
     Idempotent: ``ingest_zooniverse_annotations`` clears previous citsci rows
     per drop before writing, so re-running ``--legacy`` is safe.
+
+    All CSVs live flat in ``config.legacy_zooniverse_dir``. Classification
+    exports are identified by ``*classification*`` in the filename; subjects
+    exports by ``*subject*``.
     """
-    if not _LEGACY_CSV_DIR.exists():
+    legacy_dir = config.legacy_zooniverse_dir
+    if not legacy_dir.exists():
         logging.info(
-            f"Legacy backfill: {_LEGACY_CSV_DIR} does not exist. Nothing to ingest."
+            f"Legacy backfill: {legacy_dir} does not exist. Nothing to ingest."
         )
         return
 
-    csv_paths = sorted(_LEGACY_CSV_DIR.glob("*.csv"))
-    if not csv_paths:
-        logging.info(
-            f"Legacy backfill: no CSVs in {_LEGACY_CSV_DIR}. Nothing to ingest."
-        )
+    classification_csvs = sorted(legacy_dir.glob("*classification*.csv"))
+    subjects_csvs = sorted(legacy_dir.glob("*subject*.csv"))
+
+    if not classification_csvs:
+        logging.info(f"Legacy backfill: no *classification*.csv in {legacy_dir}.")
         return
 
-    logging.info(f"Legacy backfill: loading {len(csv_paths)} classification CSV(s)")
-    raw = load_classifications_from_csv([str(p) for p in csv_paths])
+    logging.info(
+        f"Legacy backfill: loading {len(classification_csvs)} classification CSV(s)"
+    )
+    raw = load_classifications_from_csv([str(p) for p in classification_csvs])
     if not raw:
         logging.info("Legacy backfill: no classifications loaded. Done.")
         return
@@ -380,8 +383,8 @@ def run_legacy_zooniverse_backfill() -> None:
     parsed_df = parse_legacy_classifications(raw, db_drop_ids)
     aggregated_df = aggregate_by_subject_species(parsed_df)
 
-    _ZOONIVERSE_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    audit_path = _ZOONIVERSE_OUT_DIR / "legacy_zooniverse_review.csv"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = legacy_dir / "audit.csv"
     aggregated_df.to_csv(audit_path, index=False)
     logging.info(f"Legacy audit log → {audit_path} ({len(aggregated_df)} rows)")
 
@@ -389,11 +392,6 @@ def run_legacy_zooniverse_backfill() -> None:
         logging.info("Legacy backfill: no rows passed min_votes filter. Done.")
         return
 
-    subjects_csvs = (
-        sorted(_LEGACY_SUBJECTS_DIR.glob("*.csv"))
-        if _LEGACY_SUBJECTS_DIR.exists()
-        else []
-    )
     if subjects_csvs:
         logging.info(
             f"Legacy completion gate: loading {len(subjects_csvs)} subjects CSV(s)"
@@ -401,9 +399,7 @@ def run_legacy_zooniverse_backfill() -> None:
         completion_df = subject_completion_from_csv([str(p) for p in subjects_csvs])
         aggregated_df = _filter_to_complete_drops(aggregated_df, completion_df)
     else:
-        logging.warning(
-            f"No subjects CSVs in {_LEGACY_SUBJECTS_DIR} — completion gate skipped."
-        )
+        logging.warning(f"No *subject*.csv in {legacy_dir} — completion gate skipped.")
 
     if aggregated_df.empty:
         logging.info("Legacy backfill: no fully-complete drop_ids to export. Done.")
@@ -411,9 +407,10 @@ def run_legacy_zooniverse_backfill() -> None:
 
     nothing_here_df = sample_nothing_here_clips(aggregated_df)
     if not nothing_here_df.empty:
-        nh_path = _ZOONIVERSE_OUT_DIR / "legacy_zooniverse_nothing_here_sample.csv"
-        nothing_here_df.to_csv(nh_path, index=False)
-        logging.info(f"Legacy NOTHINGHERE sample → {nh_path}")
+        logging.info(
+            f"NOTHINGHERE sampling: {len(nothing_here_df)} subjects selected "
+            f"across {nothing_here_df['drop_id'].nunique()} drops."
+        )
 
     # Suspicious minority finds stay in the audit CSV but do not get exported.
     export_df = aggregated_df[~aggregated_df["suspicious_minority_find"]].copy()

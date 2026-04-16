@@ -107,16 +107,14 @@ def run_retraining(
 
     # Configuration for retraining
     local_training_dir = config.local_training_dir
-    # The training scripts look for images. Expert frames are usually in data_quality/{drop_id}/biigle_frames/
-    images_dir = config.data_quality_dir
+    images_dir = config.deployment_data_dir
 
-    # 2. Export Rectangle annotations from Biigle (essential for YOLO points)
     labels_dir = local_training_dir / "labels_raw"
     class_map_path = local_training_dir / "class_map.json"
 
-    logging.info("Step 2a: Generating per-drop YOLO labels from Biigle expert CSVs...")
+    logging.info("Generating per-drop YOLO labels from Biigle expert CSVs...")
     class_map = biigle_to_yolo(
-        data_quality_dir=images_dir,
+        deployment_data_dir=images_dir,
         class_map_path=class_map_path,
     )
 

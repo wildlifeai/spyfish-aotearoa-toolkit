@@ -32,16 +32,18 @@ csv_mapping:
 paths:
   # Base directory for all project data
   base_dir: "process_files"
-  # Path to orchestration files (local only, not synced to S3)
-  orchestration:
-    pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
-    test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
+  deployment_targets_csv: process_files/deployment_targets.csv
+  test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
+  # Legacy directories (at project root, synced to S3)
+  legacy:
+    zooniverse: "legacy/zooniverse"
+    experts: "legacy/experts"
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
   # Metadata paths (relative to bucket root)
   metadata:
-    root: "spyfish_metadata"
+    root: "metadata"
     sharepoint_dir: "sharepoint_lists"
     status_dir: "status"
     files:
@@ -61,7 +63,7 @@ paths:
   sub_dirs:
     media: "media"
     annotations: "annotations"
-    data_quality: "data_quality"
+    deployment_data: "deployment_data"
     db: "db"
     logs: "logs"
     training: "training"
@@ -111,9 +113,13 @@ zooniverse:
     - 14054                  # spyfish-aotearoa main
     - 30327                  # spyfish-aotearoa-ey (EY clone workflow)
   size_limit_mb: 12.0  # Zooniverse upload limit — CRF is calibrated to stay under this
-  health_check_count: 6  # Number of evenly-spaced health check clips when MaxN CSV is empty
+  min_clips_per_video: 30  # Minimum clips per video — if ML strategy selects fewer, top up with evenly-spaced health checks
   min_votes: 3           # Min classifiers agreeing on a species to count as a valid detection
   max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
+
+deployment_validation:
+  buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
+  sampling_end_buffer_seconds: 120  # Sampling can end up to 2 min before the full duration — still valid
 
 orchestrator:
   log_output: "console"
@@ -177,7 +183,7 @@ validation_patterns:
 
 validation_rules:
   deployments:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
+    file_name: "metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID","SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     formats: ["DropID"]
@@ -209,7 +215,7 @@ validation_rules:
         range: [170, 178.5]
         allowed_values: [0]
   surveys:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Metadata.csv"
     required: ["SurveyID"]
     unique: ["SurveyID"]
     info_columns: ["SurveyName"]
@@ -217,7 +223,7 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   sites:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Sites.csv"
     required: ["SiteID", "LinkToMarineReserve"]
     unique: ["SiteID"]
     info_columns: ["SiteName", "LinkToMarineReserve"]
@@ -225,14 +231,14 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   species:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
+    file_name: "metadata/sharepoint_lists/BUV Species.csv"
     required: ["AphiaID", "CommonName", "ScientificName"]
     unique: ["AphiaID", "ScientificName", "CommonName"]
     info_columns: ["AphiaID", "CommonName", "ScientificName"]
     foreign_keys: {}
     relationships: []
   reserves:
-    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
+    file_name: "metadata/sharepoint_lists/Marine Reserves.csv"
     required: []
     unique: []
     info_columns: []

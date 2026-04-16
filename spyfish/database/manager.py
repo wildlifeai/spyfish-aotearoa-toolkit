@@ -103,6 +103,15 @@ class DatabaseManager:
             """
             )
 
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """
+            )
+
             # Create a trigger to automatically update updated_at
             cursor.execute(
                 """
@@ -114,6 +123,28 @@ class DatabaseManager:
             """
             )
 
+            conn.commit()
+
+    # ── Pipeline metadata KV store ───────────────────────────────────────────
+
+    def get_metadata(self, key: str) -> Optional[str]:
+        """Read a value from the pipeline_metadata table, or None if not set."""
+        with self.get_connection() as conn:
+            row = (
+                conn.cursor()
+                .execute("SELECT value FROM pipeline_metadata WHERE key = ?", (key,))
+                .fetchone()
+            )
+            return row["value"] if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        """Upsert a key-value pair in the pipeline_metadata table."""
+        with self.get_connection() as conn:
+            conn.cursor().execute(
+                "INSERT INTO pipeline_metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
             conn.commit()
 
     def upsert_sites(self, sites_df) -> None:

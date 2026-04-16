@@ -375,7 +375,7 @@ def test_aggregate_flags_suspicious_minority(mock_config):
     df = pd.DataFrame(rows)
     result = aggregate_by_subject_species(df)
     assert len(result) == 1
-    assert result.iloc[0]["suspicious_minority_find"]
+    assert result.iloc[0]["suspicious_minority_find"]  # numpy bool
 
 
 @patch("spyfish.zooniverse.parse_classifications.config")

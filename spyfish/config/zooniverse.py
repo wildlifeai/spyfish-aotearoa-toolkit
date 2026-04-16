@@ -33,8 +33,8 @@ class ZooniverseConfig(BaseConfig):
         return float(get_required(self._zooniverse, "size_limit_mb", "zooniverse"))
 
     @property
-    def health_check_count(self) -> int:
-        return int(get_required(self._zooniverse, "health_check_count", "zooniverse"))
+    def min_clips_per_video(self) -> int:
+        return int(get_required(self._zooniverse, "min_clips_per_video", "zooniverse"))
 
     @property
     def zooniverse_min_votes(self) -> int:

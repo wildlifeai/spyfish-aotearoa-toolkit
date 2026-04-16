@@ -761,8 +761,8 @@ Stage eligibility is resolved at query time via `get_deployments_eligible(sectio
 
 ### Transition rules
 
-- Per-section advance methods (`advance_ml_status`, `advance_citsci_status`, etc.) validate against `VALID_TRANSITIONS` in `spyfish/config/base.py` and raise `InvalidTransitionError` for disallowed moves.
-- Moving out of `error` automatically clears only the relevant section's error rows from `validation_errors` (using `_SECTION_ERROR_TYPES` in `manager.py`) — other sections' errors are not affected.
+- `db.advance_status(drop_id, section, to_status)` validates against `VALID_TRANSITIONS` on the section's status class (looked up via the `SECTIONS` registry in `base.py`) and raises `InvalidTransitionError` for disallowed moves.
+- Moving out of a section's ERROR value automatically clears that section's error rows from `validation_errors` — other sections' errors are not affected.
 - The `set_status` admin tool calls `update_section_status()` directly, bypassing transition validation — surgical admin use only.
 - Error recovery: set the section back to its `pending` or `ready` value using `set_status`. The next pipeline run picks it up automatically.
 
@@ -789,7 +789,7 @@ DropStage(
 )
 ```
 
-`StageRunner._advance_section` dispatches to the correct typed advance method (`advance_ml_status`, `advance_citsci_status`, etc.) based on `stage.section`. On error, it calls `update_section_status(section, drop_id, "error")` to record the failure in the correct section column.
+`StageRunner._run_drop_stage` calls `db.advance_status(drop_id, stage.section, next_status)` directly — no per-section dispatch needed since `advance_status` uses the `SECTIONS` registry. On exception, it calls `db.update_section_status(drop_id, stage.section, SECTIONS[stage.section].ERROR)`.
 
 ### Configuration design
 
@@ -1293,7 +1293,7 @@ All column names from metadata CSVs are configured here, not hardcoded in Python
 from spyfish.config.wrapper import config
 ```
 
-Single access point for all configuration and path construction. Key properties: `config.drop_id_column`, `config.survey_id_column`, `config.csv_scientific_name_column` (and all other CSV column names), `config.media_dir`, `config.data_quality_dir`, `config.get_drop_annotations_dir(drop_id)`, `config.get_maxn_csv_path(drop_id, model_name)`, `config.validate_drop_id(drop_id)`, `config.clip_length`, `config.zooniverse_source_project_ids`, etc.
+Single access point for all configuration and path construction. Key properties: `config.drop_id_column`, `config.survey_id_column`, `config.csv_scientific_name_column` (and all other CSV column names), `config.media_dir`, `config.data_quality_dir`, `config.get_drop_annotations_dir(drop_id)`, `config.get_maxn_csv_path(drop_id, model_name)`, `config.get_zooniverse_maxn_csv_path(drop_id)`, `config.validate_drop_id(drop_id)`, `config.clip_length`, `config.zooniverse_source_project_ids`, etc.
 
 ---
 
@@ -1305,17 +1305,14 @@ Two database managers with distinct responsibilities:
 
 - `add_or_update_deployment(drop_id, ingest_status, ml_status, ...)` — upsert a deployment. ON CONFLICT only updates metadata fields (video path, sampling window, storage class, is_bad_deployment) — **section statuses are never overwritten on conflict, preserving pipeline progress across re-ingestions**.
 - `get_deployments_eligible(section, statuses, prerequisites=None)` — query eligible drops for a pipeline stage. Always filters `ingest_status = 'ok'`. The `prerequisites` dict adds extra `AND` conditions (e.g. `{"ml_status": "ml_complete"}`). Orders by `priority DESC`.
-- `advance_ml_status(drop_id, new_status)` — validated ML transition, raises `InvalidTransitionError`. Moving out of `ml_error` clears `ML_ERROR` rows from `validation_errors`.
-- `advance_citsci_status(drop_id, new_status)` — validated CitSci transition.
-- `advance_biigle_status(drop_id, new_status)` — validated Biigle transition.
-- `advance_reporting_status(drop_id, new_status)` — validated Reporting transition.
-- `update_section_status(section, drop_id, new_status)` — unvalidated update for a specific section column. Used by the `set_status` admin tool and by the `StageRunner` error handler.
-- `update_deployment_fields(drop_id, **kwargs)` — update arbitrary metadata fields on an existing record.
+- `advance_status(drop_id, section, to_status)` — validated transition for any section. Looks up the status class via `SECTIONS[section]`, checks `VALID_TRANSITIONS`, raises `InvalidTransitionError` for disallowed moves. Moving out of a section's ERROR value clears that section's error rows from `validation_errors`.
+- `update_section_status(drop_id, section, new_status)` — unvalidated update for a specific section column. Used by the `set_status` admin tool and by the `StageRunner` error handler.
+- `update_deployment_fields(drop_id, **kwargs)` — update metadata fields on an existing record. Rejects section status columns — use `update_section_status` or `advance_status` for those.
 - `get_deployment(drop_id)` — fetch a single deployment record as a dict.
 - `sync_annotation_counts(drop_id)` — recompute `ml_annotations`, `citsci_annotations`, `expert_annotations` from the annotations DB.
 - `export_to_csv(output_dir)` — dump all tables to CSV.
 
-**Error type isolation:** `_SECTION_ERROR_TYPES = {"ml_status": "ML_ERROR", "citsci_status": "CITSCI_ERROR", "biigle_status": "BIIGLE_ERROR", "reporting_status": "PIPELINE_ERROR"}`. When advancing out of an error state (any value ending in `_error`), only the matching error type is cleared from `validation_errors` — other sections' errors are untouched.
+**Error type isolation:** Each status class has an `ERROR` value (e.g. `MlStatus.ERROR = "ml_error"`) that doubles as the `ErrorType` discriminator in `validation_errors`. When `advance_status` moves out of ERROR, only rows matching that section's ERROR value are deleted. The `SECTIONS` registry in `base.py` is the single lookup — no separate `_SECTION_ERROR_TYPES` dict.
 
 `**AnnotationDatabaseManager**` (`spyfish_annotations.db`):
 
