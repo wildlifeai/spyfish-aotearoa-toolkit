@@ -168,7 +168,9 @@ class AnnotationDatabaseManager:
 
         return df[export_cols]
 
-    def get_maxn_summary(self, drop_id: Optional[str] = None, annotated_by: Optional[str] = None) -> pd.DataFrame:
+    def get_maxn_summary(
+        self, drop_id: Optional[str] = None, annotated_by: Optional[str] = None
+    ) -> pd.DataFrame:
         """
         Returns the canonical MaxN per drop × species × source — i.e. the peak
         max_interval across all time intervals for each combination.

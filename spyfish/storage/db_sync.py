@@ -13,8 +13,6 @@ def download_db() -> bool:
     s3 = S3Handler()
     local_path = config.db_path
     s3_key = config.s3_db_key
-    bucket = config.s3_bucket
-
     # Check if object exists and get metadata
     try:
         last_modified = s3.get_object_last_modified(s3_key)

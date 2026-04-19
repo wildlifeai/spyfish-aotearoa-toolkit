@@ -25,11 +25,10 @@ Usage in tests:
         assert env.db.get_deployment(DROP_NORMAL)["status"] == PipelineStatus.READY_FOR_ML
 """
 
-import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -71,8 +70,8 @@ csv_mapping:
   sampling_end_column: "SamplingEnd"
   clip_start_column: "ClipStartRelative"
   clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnMs"
-  maxn_time_ms_column: "time_of_maxn_ms"
+  clip_max_time_column: "TimeOfMaxnSeconds"
+  maxn_time_seconds_column: "time_of_maxn_seconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -84,7 +83,6 @@ csv_mapping:
 
 paths:
   base_dir: "process_files"
-  bucket_name: "marine-buv-test"
   orchestration:
     pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
     test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
@@ -119,7 +117,11 @@ paths:
 ml_inference:
   limit_processing: 1
   log_interval_frames: 10
+<<<<<<< HEAD
   frame_skip: 15
+=======
+  ml_fps: 3
+>>>>>>> ac212b03c416c95d0df6a231976737b835ac55db
   imgsz: 640
   confidence_threshold: 0.25
   maxn_confidence_threshold: 0.50
@@ -129,25 +131,32 @@ ml_inference:
     interval_seconds: 10
     annotated_by_prefix: "ml"
 
-zooniverse_extraction:
-  project_id: 99999
-  health_check_count: 6
-  video_start_threshold_seconds: 120
+extraction:
+  clip_length: 10.0
   clip_cap: 50
+  video_start_threshold_seconds: 120
   force_binary_strategy: false
-  temporal_spacing_seconds: 0
+  sample_all_clips: false
+  frame_multiplier: 2
   binary_strategy:
-    maxn_clips: 10
-    confusing_clips: 20
-    empty_clips: 5
-    start_clips: 2
+    maxn_export: 10
+    confusing_export: 20
+    empty_export: 5
+    start_export: 2
     temporal_spacing_seconds: 10
   multiclass_strategy:
-    per_species_maxn_clips: 5
-    per_species_confusing_clips: 10
-    per_video_empty_clips: 3
-    per_video_start_clips: 2
+    per_species_maxn_export: 5
+    per_species_confusing_export: 10
+    per_video_empty_export: 3
+    per_video_start_export: 2
     temporal_spacing_seconds: 10
+
+zooniverse:
+  project_id: 99999
+  size_limit_mb: 12.0
+  health_check_count: 6
+  min_votes: 3
+  max_frames_per_run: 3
 
 orchestrator:
   is_test_run: true
@@ -338,7 +347,7 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.875,  # (0.85 + 0.90) / 2
-                "time_of_maxn_ms": 4.0,
+                "time_of_maxn_seconds": 4.0,
             },
             {
                 "DropID": DROP_NORMAL,
@@ -348,11 +357,11 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.95,  # frame 25 wins tiebreak
-                "time_of_maxn_ms": 10.0,
+                "time_of_maxn_seconds": 10.0,
             },
         ]
     )
-    .sort_values("time_of_maxn_ms")
+    .sort_values("time_of_maxn_seconds")
     .reset_index(drop=True),
 }
 
@@ -367,7 +376,7 @@ _ML_COMPLETE_MAXN_ROWS = [
         "AnnotatedBy": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
-        "time_of_maxn_ms": 5.0,
+        "time_of_maxn_seconds": 5.0,
     },
 ]
 
@@ -440,14 +449,13 @@ def pipeline_env(tmp_path, monkeypatch):
     # the on-disk test file rather than the production config.yaml.
     monkeypatch.setattr(config, "_project_root", tmp_path)
     monkeypatch.setattr(config, "_yaml_config", test_yaml)
+    monkeypatch.setenv("S3_BUCKET", "marine-buv-test")
 
     # ── 3. Create the expected folder tree ────────────────────────────────
     (tmp_path / "media").mkdir()
     (tmp_path / "process_files" / "db").mkdir(parents=True)
     for drop_id in [DROP_NORMAL, DROP_STUCK, DROP_ML_COMPLETE]:
-        (tmp_path / "process_files" / "data_quality" / drop_id / "annotations").mkdir(
-            parents=True
-        )
+        config.get_drop_annotations_dir(drop_id).mkdir(parents=True)
 
     # ── 4. Create databases ───────────────────────────────────────────────
     # Paths now resolve inside tmp_path thanks to the monkeypatch above.

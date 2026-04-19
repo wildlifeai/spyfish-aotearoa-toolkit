@@ -16,8 +16,8 @@ csv_mapping:
   # Selection CSV columns
   clip_start_column: "ClipStartRelative"
   clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnMs"
-  maxn_time_ms_column: "time_of_maxn_ms"
+  clip_max_time_column: "TimeOfMaxnSeconds"
+  maxn_time_seconds_column: "time_of_maxn_seconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -31,8 +31,6 @@ csv_mapping:
 paths:
   # Base directory for all project data
   base_dir: "process_files"
-  # S3 Storage configuration
-  bucket_name: "marine-buv"
   # Path to orchestration files (local only, not synced to S3)
   orchestration:
     pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
@@ -77,7 +75,7 @@ paths:
 ml_inference:
   limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
-  frame_skip: 10   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
+  ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
   confidence_threshold: 0.25      # Base YOLO inference threshold
   maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
@@ -87,30 +85,32 @@ ml_inference:
     interval_seconds: 10
     annotated_by_prefix: "ml"
 
-zooniverse_extraction:
-  clip_length: 10.0
-  project_id: 14054 # spyfish 14054      # test: 32041
-  # TODO: what are these 2 things about
-  health_check_count: 6 # Number of health checks to perform
-  video_start_threshold_seconds: 120 # Number of seconds to sample from the start of the video to do the start of the video health check
-  clip_cap: 180 # Maximum number of clips to extract per video
-  size_limit_mb: 12.0 # Zooniverse upload limit — CRF is calibrated to stay under this
-  force_binary_strategy: false # If true, use binary strategy regardless of species count
-  sample_all_clips: false # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
-  min_votes: 3            # Min classifiers agreeing on a species to include in Zooniverse MaxN CSV
-  max_frames_per_run: 3   # Max frames extracted per run of identical MaxN count
+extraction:
+  clip_length: 10.0        # Length of each extracted clip in seconds
+  clip_cap: 180            # Maximum number of clips to extract per video
+  video_start_threshold_seconds: 120 # Seconds from video start used for start-of-video health check clips
+  force_binary_strategy: false       # If true, use binary strategy regardless of species count
+  sample_all_clips: false            # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
+  frame_multiplier: 2                # Multiplies export counts and divides temporal_spacing for denser frame coverage
   binary_strategy:
-    maxn_clips: 30
-    confusing_clips: 60
-    empty_clips: 10
-    start_clips: 3
-    temporal_spacing_seconds: 10
+    maxn_export: 30          # Clips at highest fish-count moments
+    confusing_export: 60     # Clips with high count but low confidence (uncertain detections)
+    empty_export: 10         # Clips with zero detections (false negative check)
+    start_export: 3          # Clips from the start of the video (health check)
+    temporal_spacing_seconds: 10  # Minimum seconds between selected clips
   multiclass_strategy:
-    per_species_maxn_clips: 5
-    per_species_confusing_clips: 10
-    per_video_empty_clips: 3
-    per_video_start_clips: 2
-    temporal_spacing_seconds: 10
+    per_species_maxn_export: 5       # MaxN clips per species
+    per_species_confusing_export: 10 # Confusing clips per species
+    per_video_empty_export: 3        # Empty clips per video
+    per_video_start_export: 2        # Start clips per video
+    temporal_spacing_seconds: 10     # Minimum seconds between selected clips
+
+zooniverse:
+  project_id: 14054    # spyfish 14054  # test: 32041
+  size_limit_mb: 12.0  # Zooniverse upload limit — CRF is calibrated to stay under this
+  health_check_count: 6  # Number of evenly-spaced health check clips when MaxN CSV is empty
+  min_votes: 3           # Min classifiers agreeing on a species to count as a valid detection
+  max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
 
 orchestrator:
   is_test_run: true
@@ -124,7 +124,7 @@ ffmpeg:
 
 biigle:
   project_id:  4081        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
-  disk_id: 134             #  134 doc, 98 kalindi, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report

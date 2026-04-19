@@ -75,10 +75,8 @@ def run_ingestion():
     db = DatabaseManager()
     storage = S3Handler(bucket=config.s3_bucket)
 
-    # 1. Fetch File List & Deployment CSV (One Journey, One S3 Scan)
-    logging.info(
-        "Step 1/3: Fetching known media files and master deployments list from S3..."
-    )
+    # Fetch File List & Deployment CSV (One Journey, One S3 Scan)
+    logging.info("Fetching known media files and master deployments list from S3...")
     known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
 
     csv_path = config.s3_sharepoint_deployment_csv
@@ -122,7 +120,7 @@ def run_ingestion():
     db.clear_validation_errors()
     db.add_validation_errors(structured_errors)
 
-    # 5. Load expert annotations and count per DropID (always from S3)
+    # Load expert annotations and count per DropID (always from S3)
     logging.debug("Fetching expert annotations from S3...")
     expert_counts = {}
     try:
@@ -146,7 +144,9 @@ def run_ingestion():
         sites_df = storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
         db.upsert_sites(sites_df)
     except Exception as e:
-        logging.warning(f"Failed to load sites CSV from S3: {e}. Site metadata will not be updated in DB.")
+        logging.warning(
+            f"Failed to load sites CSV from S3: {e}. Site metadata will not be updated in DB."
+        )
 
     _sync_deployments_to_db(
         deployments_df, db, structural_error_drops, known_files, expert_counts, mapping
@@ -221,7 +221,11 @@ def _sync_deployments_to_db(
             # Don't advance source-problematic deployments through the pipeline.
             # Preserve existing stage if already in DB, otherwise default to PENDING_ARRIVAL.
             existing_record = existing_deployments.get(drop_id)
-            status = existing_record["status"] if existing_record else PipelineStatus.PENDING_ARRIVAL
+            status = (
+                existing_record["status"]
+                if existing_record
+                else PipelineStatus.PENDING_ARRIVAL
+            )
         else:
             existing_record = existing_deployments.get(drop_id)
             if existing_record and existing_record["status"] not in [
@@ -244,7 +248,9 @@ def _sync_deployments_to_db(
             video_path=video_path,
             is_bad_deployment=is_bad_deployment,
             error_message=(
-                "Found in structural errors" if source_status == SourceStatus.VALIDATION_ERROR else ""
+                "Found in structural errors"
+                if source_status == SourceStatus.VALIDATION_ERROR
+                else ""
             ),
             sampling_start=sampling_start,
             sampling_end=sampling_end,

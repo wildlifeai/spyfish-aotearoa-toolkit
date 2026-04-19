@@ -20,7 +20,6 @@ This test FAILS against the unfixed code and PASSES after the fix is applied.
 """
 
 import pandas as pd
-import pytest
 
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations, process_maxn
 from tests.conftest import DROP_NORMAL, MODEL_NAME

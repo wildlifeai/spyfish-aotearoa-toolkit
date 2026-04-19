@@ -2,7 +2,7 @@
 Extract frames at MaxN peak times from source videos using ffmpeg.
 
 Reads the selections CSV output from selection strategies and extracts one clean JPEG
-per row at the exact TimeOfMax moment (sampling_start + time_of_maxn_ms).
+per row at the exact TimeOfMax moment (absolute video timestamp in seconds).
 
 Also converts the corresponding YOLO bounding boxes from the raw ML CSV into
 COCO-format JSON alongside the frames — ready for upload (e.g., to Biigle).
@@ -215,7 +215,7 @@ def extract_frames_from_selections(
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
     and produce a COCO JSON with the corresponding YOLO bounding boxes.
 
-    The frame is grabbed at the absolute video timestamp stored in csv_clip_max_time_column.
+    The frame is grabbed at the absolute video timestamp in csv_clip_max_time_column (TimeOfMaxnSeconds).
     This is the exact frame that was the deciding factor in the MaxN calculation.
 
     Unlike draw_frames.py (which draws boxes ON the frame using cv2 for QA),
@@ -253,11 +253,17 @@ def extract_frames_from_selections(
         pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
     )
 
-    # Read video dimensions once from metadata
+    # Read video dimensions and rotation once from metadata.
+    # extract_frame() applies rotation to pixel data, so swap w/h for 90°/270° videos
+    # so that COCO image dimensions match the actual saved frame orientation.
     cap = cv2.VideoCapture(str(video_path))
     vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    rotation = _read_video_rotation(cap)
     cap.release()
+
+    if rotation in (90, 270):
+        vid_w, vid_h = vid_h, vid_w
 
     if vid_w == 0 or vid_h == 0:
         logging.warning(
@@ -268,9 +274,8 @@ def extract_frames_from_selections(
     frame_paths = []
 
     for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # TimeOfMaxnMs is relative to SamplingStart — add it to get the absolute video position.
-        sampling_start = float(row.get(config.csv_sampling_start_column, 0))
-        seek_seconds = sampling_start + float(row[config.csv_clip_max_time_column])
+        # TimeOfMaxnMs is an absolute video timestamp — use it directly.
+        seek_seconds = float(row[config.csv_clip_max_time_column])
         frame_index = None
 
         if not raw_df.empty:
@@ -286,19 +291,18 @@ def extract_frames_from_selections(
         out_path = out_dir / out_filename
 
         if out_path.exists():
-            logging.debug(f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}")
+            logging.debug(
+                f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}"
+            )
             frame_paths.append(str(out_path))
-            continue
-
-        logging.info(
-            f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
-        )
-        success = extract_frame(
-            video_path, seek_seconds, out_path, frame_index=frame_index
-        )
-        frame_paths.append(str(out_path) if success else None)
-
-        img_w, img_h = vid_w, vid_h
+        else:
+            logging.info(
+                f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
+            )
+            success = extract_frame(
+                video_path, seek_seconds, out_path, frame_index=frame_index
+            )
+            frame_paths.append(str(out_path) if success else None)
 
         frame_records.append(
             {
@@ -307,8 +311,8 @@ def extract_frames_from_selections(
                 "time_of_max": seek_seconds,
                 "drop_id": drop_id,
                 "selection_reason": row.get("SelectionReason", ""),
-                "img_w": img_w,
-                "img_h": img_h,
+                "img_w": vid_w,
+                "img_h": vid_h,
             }
         )
 
@@ -323,7 +327,22 @@ def extract_frames_from_selections(
         logging.warning(
             f"Skipping {skipped} frame(s) from COCO JSON for {drop_id} due to extraction failure"
         )
-    coco = build_coco_from_raw_csv(raw_csv_path, successful_records)
+
+    # Deduplicate by file_name: multiple selections rows can share the same timestamp
+    # (e.g. different species at the same MaxN peak), producing identical frames.
+    # Keep the first occurrence so each physical file appears exactly once in the COCO JSON.
+    seen: set[str] = set()
+    deduped_records = []
+    for rec in successful_records:
+        if rec["file_name"] not in seen:
+            seen.add(rec["file_name"])
+            deduped_records.append(rec)
+    if len(deduped_records) < len(successful_records):
+        logging.debug(
+            f"Deduplicated {len(successful_records) - len(deduped_records)} duplicate frame record(s) for {drop_id}"
+        )
+
+    coco = build_coco_from_raw_csv(raw_csv_path, deduped_records)
 
     # Save the COCO annotations to the drop's annotations directory
     annotations_dir = config.get_drop_annotations_dir(drop_id)
@@ -337,7 +356,5 @@ def extract_frames_from_selections(
     )
 
     successful = df["FramePath"].notna().sum()
-    logging.info(
-        f"Extracted {successful}/{len(df)} frames for {drop_id} → {out_dir}"
-    )
+    logging.info(f"Extracted {successful}/{len(df)} frames for {drop_id} → {out_dir}")
     return df

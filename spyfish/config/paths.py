@@ -49,10 +49,6 @@ class PathsConfig(BaseConfig):
         return _require(self.paths, "base_dir", "paths")
 
     @property
-    def s3_bucket(self) -> str:
-        return _require(self.paths, "bucket_name", "paths")
-
-    @property
     def orchestration_paths(self) -> dict:
         return _require(self.paths, "orchestration", "paths")
 
@@ -332,8 +328,8 @@ class PathsConfig(BaseConfig):
         return self._col("maxn_time_column")
 
     @property
-    def csv_maxn_time_ms_column(self) -> str:
-        return self._col("maxn_time_ms_column")
+    def csv_maxn_time_seconds_column(self) -> str:
+        return self._col("maxn_time_seconds_column")
 
     @property
     def csv_max_interval_column(self) -> str:
@@ -421,7 +417,7 @@ class PathsConfig(BaseConfig):
     def get_site_id_from_drop(self, drop_id: str) -> str:
         """Derive SiteID from a validated DropID.
 
-        DropID format is ^[A-Z]{3}_\d{8}_BUV_[A-Z]{3}_\d{3}_\d{2}$
+        DropID format is ^[A-Z]{3}_\\d{8}_BUV_[A-Z]{3}_\\d{3}_\\d{2}$
         SiteID is always parts[3:5] — positional, not regex, because the
         site_id pattern also matches parts of the survey prefix.
         """
@@ -459,6 +455,12 @@ class PathsConfig(BaseConfig):
         return (
             self.get_drop_annotations_dir(drop_id)
             / f"{self.validate_drop_id(drop_id)}_frames_selection.csv"
+        )
+
+    def get_biigle_selections_csv_path(self, drop_id: str) -> Path:
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_biigle_frames_selection.csv"
         )
 
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:

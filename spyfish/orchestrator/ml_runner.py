@@ -28,9 +28,7 @@ class MLRunner:
         self.limit = get_required(
             config.ml_inference, "limit_processing", "ml_inference"
         )
-        self.frame_skip = get_required(
-            config.ml_inference, "frame_skip", "ml_inference"
-        )
+        self.ml_fps = config.ml_fps
         self.imgsz = int(config.imgsz)
         self.confidence = get_required(
             config.ml_inference, "confidence_threshold", "ml_inference"
@@ -50,9 +48,6 @@ class MLRunner:
             )
             return []
 
-        drop_id_col = config.drop_id_column
-        video_link_col = config.csv_video_file_link_column
-
         df = pd.DataFrame(
             self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML)
         )
@@ -69,26 +64,22 @@ class MLRunner:
                     .tolist()
                 )
                 priority_order = {d: i for i, d in enumerate(priority_ids)}
-                df["_priority"] = df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                df["_priority"] = (
+                    df["drop_id"].map(priority_order).fillna(len(priority_ids))
+                )
                 df = df.sort_values("_priority").drop(columns=["_priority"])
-                logging.debug(f"Priority order applied from {targets_csv}: {priority_ids}")
+                logging.debug(
+                    f"Priority order applied from {targets_csv}: {priority_ids}"
+                )
             except Exception as e:
-                logging.warning(f"Could not apply priority ordering from {targets_csv}: {e}")
+                logging.warning(
+                    f"Could not apply priority ordering from {targets_csv}: {e}"
+                )
 
         df = df.head(self.limit)
 
         if df.empty:
             return []
-
-        # Rename columns to match what the rest of the method expects (BUV Deployment CSV style)
-        df = df.rename(
-            columns={
-                "drop_id": drop_id_col,
-                "video_path": video_link_col,
-                "sampling_start": config.csv_sampling_start_column,
-                "sampling_end": config.csv_sampling_end_column,
-            }
-        )
 
         logging.debug("Generating target paths and downloading media via aws s3...")
 
@@ -97,7 +88,7 @@ class MLRunner:
 
         valid_indices = []
         local_filepaths = []
-        for idx, path in df[video_link_col].items():
+        for idx, path in df["video_path"].items():
             filename = os.path.basename(path)
             local_path = os.path.join(actual_video_dir, filename)
 
@@ -133,9 +124,7 @@ class MLRunner:
 
         df["VideoURL"] = local_filepaths
 
-        df["VideoURL"] = local_filepaths
-
-        # Return list of records for inference
+        # Return list of records for inference (using DB key names: drop_id, sampling_start, sampling_end)
         return df.to_dict("records")
 
     def run_inference_loop(self, targets: List[dict]) -> List[str]:
@@ -143,8 +132,7 @@ class MLRunner:
         if not targets:
             return []
 
-        drop_id_col = config.drop_id_column
-        drop_ids = [t[drop_id_col] for t in targets]
+        drop_ids = [t["drop_id"] for t in targets]
 
         # Model must exist before any drop status is changed.
         # Checking here keeps all drops in READY_FOR_ML so the batch can be
@@ -170,17 +158,17 @@ class MLRunner:
         success_targets = []
         for row in targets:
             try:
-                drop_id = row[drop_id_col]
+                drop_id = row["drop_id"]
 
                 drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
                 model_name = Path(self.model).stem
                 inference_args = {
                     "drop_id": drop_id,
                     "video_url": row["VideoURL"],
-                    "sampling_start": row[config.csv_sampling_start_column],
-                    "sampling_end": row[config.csv_sampling_end_column],
+                    "sampling_start": row["sampling_start"],
+                    "sampling_end": row["sampling_end"],
                     "model_path": self.model,
-                    "frame_skip": self.frame_skip,
+                    "ml_fps": self.ml_fps,
                     "imgsz": self.imgsz,
                     "confidence_threshold": self.confidence,
                     "output_csv": os.path.join(
@@ -198,7 +186,7 @@ class MLRunner:
                 self.db.add_validation_errors(
                     [
                         {
-                            "SurveyID": "_".join(drop_id.split("_")[:3]),
+                            "SurveyID": config.get_survey_id_from_drop(drop_id),
                             "DropID": drop_id,
                             "ErrorType": "PIPELINE_ERROR",
                             "FileName": "",

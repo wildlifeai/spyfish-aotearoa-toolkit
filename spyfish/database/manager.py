@@ -135,7 +135,9 @@ class DatabaseManager:
                     ),
                 )
             if skipped:
-                logging.warning(f"Skipped {skipped} site rows with missing/empty site_id — check column mapping in config.yaml.")
+                logging.warning(
+                    f"Skipped {skipped} site rows with missing/empty site_id — check column mapping in config.yaml."
+                )
             conn.commit()
         logging.info(f"Upserted {len(sites_df) - skipped} sites into DB.")
 
@@ -184,8 +186,8 @@ class DatabaseManager:
                     error_message=excluded.error_message,
                     sampling_start=excluded.sampling_start,
                     sampling_end=excluded.sampling_end,
-                    ml_annotations=excluded.ml_annotations,
-                    citsci_annotations=excluded.citsci_annotations,
+                    -- ml_annotations and citsci_annotations are owned by sync_annotation_counts;
+                    -- ingestion must not overwrite them (ingestion always passes 0 for these).
                     expert_annotations=excluded.expert_annotations,
                     biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id)
             """,
@@ -266,8 +268,14 @@ class DatabaseManager:
     def update_deployment_fields(self, drop_id: str, **fields) -> bool:
         """Update arbitrary columns on a deployment record. Returns False if drop_id not found."""
         allowed = {
-            "status", "source_status", "sampling_start", "sampling_end", "video_path",
-            "is_bad_deployment", "error_message", "biigle_volume_id",
+            "status",
+            "source_status",
+            "sampling_start",
+            "sampling_end",
+            "video_path",
+            "is_bad_deployment",
+            "error_message",
+            "biigle_volume_id",
         }
         invalid = set(fields) - allowed
         if invalid:

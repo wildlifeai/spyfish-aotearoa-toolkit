@@ -16,7 +16,6 @@ Import these constants in integration tests that need the canonical drop IDs:
 
 import cv2
 import pandas as pd
-import pytest
 
 from spyfish.config.base import PipelineStatus
 from spyfish.config.wrapper import config
@@ -39,12 +38,11 @@ def test_config_yaml_written_to_disk(pipeline_env):
     assert pipeline_env.config_path.exists()
     loaded = yaml.safe_load(pipeline_env.config_path.read_text())
     assert loaded["orchestrator"]["is_test_run"] is True
-    assert loaded["paths"]["bucket_name"] == "marine-buv-test"
 
 
 def test_config_singleton_uses_test_config(pipeline_env):
     """config.* properties must reflect the test config, not the production one."""
-    # bucket_name is "marine-buv-test" in the test config, "marine-buv-kalindi" in prod
+    # S3_BUCKET is set to "marine-buv-test" by the pipeline_env fixture via monkeypatch.setenv
     assert config.s3_bucket == "marine-buv-test"
 
 
@@ -174,11 +172,13 @@ def test_process_maxn_matches_ground_truth(pipeline_env):
     )
 
     expected = env.expected_maxn[DROP_NORMAL]
-    result = result.sort_values("time_of_maxn_ms").reset_index(drop=True)
+    result = result.sort_values("time_of_maxn_seconds").reset_index(drop=True)
 
     assert len(result) == len(expected)
     assert list(result["MaxInterval"]) == list(expected["MaxInterval"])
-    assert list(result["time_of_maxn_ms"]) == list(expected["time_of_maxn_ms"])
+    assert list(result["time_of_maxn_seconds"]) == list(
+        expected["time_of_maxn_seconds"]
+    )
     assert list(result["ConfidenceAgreement"]) == list(expected["ConfidenceAgreement"])
     assert list(result["TimeOfMax"]) == list(expected["TimeOfMax"])
 
@@ -205,4 +205,4 @@ def test_process_maxn_respects_confidence_threshold(pipeline_env):
 
     assert len(result) == 1
     assert result.iloc[0]["MaxInterval"] == 1
-    assert result.iloc[0]["time_of_maxn_ms"] == 10.0
+    assert result.iloc[0]["time_of_maxn_seconds"] == 10.0

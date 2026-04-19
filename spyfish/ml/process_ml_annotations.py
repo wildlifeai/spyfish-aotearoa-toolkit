@@ -10,7 +10,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -102,7 +101,7 @@ def process_maxn(
                 config.csv_annotated_by_column: model_name,
                 config.csv_interval_annotation_column: interval_seconds,
                 config.csv_confidence_agreement_column: round(best_confidence, 4),
-                config.csv_maxn_time_ms_column: best_second,  # float seconds of the MaxN peak frame (sub-second precision)
+                config.csv_maxn_time_seconds_column: best_second,
             }
         )
 
@@ -111,7 +110,7 @@ def process_maxn(
     if not maxn_df.empty:
         maxn_df = maxn_df.sort_values(
             [
-                config.csv_maxn_time_ms_column,
+                config.csv_maxn_time_seconds_column,
                 config.csv_scientific_name_column,
             ]
         )
@@ -188,9 +187,9 @@ def _run_qa_visualizations(
     low_conf = maxn_df.nsmallest(5, config.csv_confidence_agreement_column)
     review_df = pd.concat([top_maxn, low_conf]).drop_duplicates()
 
-    # Map time_of_maxn_ms back to raw CSV frame numbers
+    # Map time_of_maxn_seconds back to raw CSV frame numbers
     frame_indices = []
-    for t_sec in review_df[config.csv_maxn_time_ms_column]:
+    for t_sec in review_df[config.csv_maxn_time_seconds_column]:
         closest = raw_df.iloc[(raw_df["time_seconds"] - t_sec).abs().argsort()[:1]]
         if closest.empty:
             continue
@@ -201,7 +200,10 @@ def _run_qa_visualizations(
     if t_max > t_min:
         boundaries = np.linspace(t_min, t_max, 6)  # 5 equal bands
         for i in range(5):
-            band = raw_df[(raw_df["time_seconds"] >= boundaries[i]) & (raw_df["time_seconds"] < boundaries[i + 1])]
+            band = raw_df[
+                (raw_df["time_seconds"] >= boundaries[i])
+                & (raw_df["time_seconds"] < boundaries[i + 1])
+            ]
             if not band.empty:
                 frame_indices.append(int(band.sample(1)["frame"].iloc[0]))
 
@@ -286,7 +288,7 @@ def run_post_ml(
                     config.csv_annotated_by_column,
                     config.csv_interval_annotation_column,
                     config.csv_confidence_agreement_column,
-                    config.csv_maxn_time_ms_column,
+                    config.csv_maxn_time_seconds_column,
                 ]
             )
             maxn_df.to_csv(maxn_csv, index=False)

@@ -24,6 +24,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from spyfish.config.base import PipelineStatus
 from spyfish.database.manager import DatabaseManager
 from spyfish.log_config import log_header
 
@@ -152,7 +153,10 @@ class StageRunner:
 
         for drop_id in drop_ids:
             try:
-                if stage.queue_status and status_by_drop.get(drop_id) != stage.queue_status:
+                if (
+                    stage.queue_status
+                    and status_by_drop.get(drop_id) != stage.queue_status
+                ):
                     self.db.advance_status(drop_id, stage.queue_status)
                     logging.info(f"  → {drop_id}: queued as {stage.queue_status}")
                 next_status = stage.fn(drop_id)
@@ -164,3 +168,4 @@ class StageRunner:
             except Exception as e:
                 logging.error(f"{stage.flag} failed for {drop_id}: {e}")
                 logging.error(traceback.format_exc())
+                self.db.update_status(drop_id, PipelineStatus.ERROR)

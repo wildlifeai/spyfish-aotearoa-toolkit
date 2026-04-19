@@ -12,8 +12,8 @@ class MLConfig(BaseConfig):
         return get_required(self.ml_inference, "limit_processing", "ml_inference")
 
     @property
-    def frame_skip(self):
-        return get_required(self.ml_inference, "frame_skip", "ml_inference")
+    def ml_fps(self):
+        return float(get_required(self.ml_inference, "ml_fps", "ml_inference"))
 
     @property
     def log_interval_frames(self) -> int:
