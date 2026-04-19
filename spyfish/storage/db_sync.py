@@ -1,141 +1,94 @@
 import logging
 import os
+import time
+from pathlib import Path
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
 
 
-def download_db() -> bool:
-    """
-    Downloads the pipeline database from S3 if it exists.
-    Returns True if successfully downloaded or if it doesn't exist on S3 yet.
+def _download_db_if_newer(s3_key: str, local_path: Path, label: str) -> bool:
+    """Download a SQLite DB from S3 to `local_path` if S3 has a newer version.
+
+    Returns True if the local file is up-to-date (downloaded, already newer,
+    or S3 has nothing yet). Returns False on an unexpected error.
+
+    `label` is used only in log messages (e.g. "pipeline database").
     """
     s3 = S3Handler()
-    local_path = config.db_path
-    s3_key = config.s3_db_key
-    bucket = config.s3_bucket
-
-    # Check if object exists and get metadata
     try:
         last_modified = s3.get_object_last_modified(s3_key)
         if last_modified is None:
-            logging.info("Database not found on S3. Starting fresh.")
+            logging.info(f"{label.capitalize()} not found on S3. Starting fresh.")
             return True
 
         s3_mtime = last_modified.timestamp()
 
-        # If local file exists, check if it's already newer or same as S3
-        if local_path.exists():
-            local_mtime = local_path.stat().st_mtime
-            if local_mtime >= s3_mtime:
-                logging.info("Local database is up-to-date with S3. Skipping download.")
-                return True
-
-    except Exception as e:
-        logging.error(f"Error checking database on S3: {e}")
-        return False
-
-    logging.info(f"Downloading database to {local_path} (S3 is newer)...")
-    try:
-        s3.download_object_from_s3(s3_key, str(local_path))
-        # Ensure local mtime matches S3 so we don't re-download next time
-        import time
-
-        os.utime(local_path, (time.time(), s3_mtime))
-        logging.info("Database downloaded successfully.")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to download database: {e}")
-        return False
-
-
-def upload_db() -> bool:
-    """
-    Uploads the pipeline database to S3.
-    """
-    if config.is_test_run:
-        logging.info("Skipping database upload in test run.")
-        return True
-    s3 = S3Handler()
-    local_path = config.db_path
-    s3_key = config.s3_db_key
-
-    if not local_path.exists():
-        logging.warning(f"Database file {local_path} does not exist. Skipping upload.")
-        return False
-
-    logging.info(f"Uploading database to s3://{config.s3_bucket}/{s3_key}...")
-    try:
-        s3.upload_file_to_s3(str(local_path), s3_key)
-        logging.info("Database uploaded successfully.")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to upload database: {e}")
-        return False
-
-
-def download_annotations_db() -> bool:
-    """
-    Downloads the annotations database from S3 if it doesn't exist locally or S3 is newer.
-    Returns True if successful or not needed.
-    """
-    s3_key = config.s3_annotations_db_key
-    local_path = config.annotations_db_path
-
-    try:
-        s3 = S3Handler()
-        last_modified = s3.get_object_last_modified(s3_key)
-        if last_modified is None:
-            logging.info("Annotations database not found on S3 yet. Starting fresh.")
+        if local_path.exists() and local_path.stat().st_mtime >= s3_mtime:
+            logging.info(f"Local {label} is up-to-date with S3. Skipping download.")
             return True
-
-        s3_mtime = last_modified.timestamp()
-
-        if local_path.exists():
-            local_mtime = local_path.stat().st_mtime
-            if local_mtime >= s3_mtime:
-                logging.info(
-                    "Local annotations database is up-to-date with S3. Skipping download."
-                )
-                return True
-
-        logging.info("Downloading annotations database...")
-        s3.download_object_from_s3(s3_key, str(local_path))
-        import time
-
-        os.utime(local_path, (time.time(), s3_mtime))
-        logging.info("Annotations database downloaded successfully.")
-        return True
-
     except Exception as e:
-        logging.warning(f"Could not download annotations database: {e}")
+        logging.error(f"Error checking {label} on S3: {e}")
+        return False
+
+    logging.info(f"Downloading {label} to {local_path} (S3 is newer)...")
+    try:
+        s3.download_object_from_s3(s3_key, str(local_path))
+        # Match local mtime to S3 so the next run's timestamp check skips correctly.
+        os.utime(local_path, (time.time(), s3_mtime))
+        logging.info(f"{label.capitalize()} downloaded successfully.")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to download {label}: {e}")
         return False
 
 
-def upload_annotations_db() -> bool:
-    """
-    Uploads the annotations database to S3.
-    """
-    s3_key = config.s3_annotations_db_key
-    local_path = config.annotations_db_path
+def _upload_db(s3_key: str, local_path: Path, label: str) -> bool:
+    """Upload a SQLite DB from `local_path` to S3.
 
+    Returns True on success, False if the local file is missing or upload fails.
+    """
     if not local_path.exists():
         logging.warning(
-            f"Annotations database {local_path} does not exist. Skipping upload."
+            f"{label.capitalize()} file {local_path} does not exist. Skipping upload."
         )
         return False
 
-    logging.info(
-        f"Uploading annotations database to s3://{config.s3_bucket}/{s3_key}..."
-    )
+    logging.info(f"Uploading {label} to s3://{config.s3_bucket}/{s3_key}...")
     try:
         s3 = S3Handler()
         s3.upload_file_to_s3(str(local_path), s3_key)
-        logging.info("Annotations database uploaded successfully.")
+        logging.info(f"{label.capitalize()} uploaded successfully.")
         return True
     except Exception as e:
-        logging.error(f"Failed to upload annotations database: {e}")
+        logging.error(f"Failed to upload {label}: {e}")
         return False
+
+
+# ── Public wrappers ──
+# One-liners over the generic helpers. Kept as distinct functions so callers
+# can name the specific DB they mean — changing the label or wiring up a third
+# DB is a single-line edit.
+
+
+def download_db() -> bool:
+    return _download_db_if_newer(config.s3_db_key, config.db_path, "pipeline database")
+
+
+def upload_db() -> bool:
+    return _upload_db(config.s3_db_key, config.db_path, "pipeline database")
+
+
+def download_annotations_db() -> bool:
+    return _download_db_if_newer(
+        config.s3_annotations_db_key, config.annotations_db_path, "annotations database"
+    )
+
+
+def upload_annotations_db() -> bool:
+    return _upload_db(
+        config.s3_annotations_db_key, config.annotations_db_path, "annotations database"
+    )
 
 
 def sync_annotations() -> bool:
@@ -145,8 +98,8 @@ def sync_annotations() -> bool:
     and raw BUV footage already lives in media/ on S3.
     """
     s3 = S3Handler()
-    local_dq_dir = config.data_quality_dir
-    s3_prefix = config.s3_data_quality_dir
+    local_dq_dir = config.deployment_data_dir
+    s3_prefix = config.s3_deployment_data_dir
 
     # Start with global exclude
     filters = ["--exclude", "*"]
@@ -157,7 +110,7 @@ def sync_annotations() -> bool:
     filters += ["--include", "*/clips/*.csv"]
 
     # Include images (standardize on .jpg/.jpeg/.png)
-    image_patterns = ["*/qa_frames/*", "*/biigle_cache/*", "*/frames/*"]
+    image_patterns = ["*/qa_frames/*", "*/frames/*"]
     for pattern in image_patterns:
         filters += ["--include", f"{pattern}.jpg"]
         filters += ["--include", f"{pattern}.jpeg"]
@@ -194,10 +147,9 @@ def sync_pipeline_results() -> bool:
         success = False
 
     # 2. Annotations & Selections
-    if not config.is_test_run:
-        if not sync_annotations():
-            logging.error("Failed to sync annotations directory.")
-            success = False
+    if not sync_annotations():
+        logging.error("Failed to sync annotations directory.")
+        success = False
 
     if success:
         logging.info("Consolidated S3 sync completed successfully.")

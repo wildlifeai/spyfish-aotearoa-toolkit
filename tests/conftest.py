@@ -12,9 +12,9 @@ environment under pytest's tmp_path:
 
 Canonical deployment identifiers:
 
-    DROP_NORMAL       KSF_20240124_BUV_KSF_085_01  READY_FOR_ML   — happy-path drop
-    DROP_STUCK        KSF_20240124_BUV_KSF_085_02  PROCESSING_ML  — simulates a mid-run crash
-    DROP_ML_COMPLETE  KSF_20240124_BUV_KSF_085_03  ML_COMPLETE    — for post-ML step tests
+    DROP_NORMAL       KSF_20240124_BUV_KSF_085_01  ml_status=ready    — happy-path drop
+    DROP_STUCK        KSF_20240124_BUV_KSF_085_02  ml_status=running  — simulates a mid-run crash
+    DROP_ML_COMPLETE  KSF_20240124_BUV_KSF_085_03  ml_status=complete — for post-ML step tests
 
 Usage in tests:
 
@@ -22,20 +22,19 @@ Usage in tests:
 
     def test_something(pipeline_env):
         env = pipeline_env
-        assert env.db.get_deployment(DROP_NORMAL)["status"] == PipelineStatus.READY_FOR_ML
+        assert env.db.get_deployment(DROP_NORMAL)["ml_status"] == MlStatus.READY
 """
 
-import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 import yaml
 
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import MlStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -69,10 +68,10 @@ csv_mapping:
   video_file_link_column: "LinkToVideoFile"
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
-  clip_start_column: "ClipStartRelative"
-  clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnMs"
-  maxn_time_ms_column: "time_of_maxn_ms"
+  clip_start_absolute_column: "ClipStartAbsoluteSeconds"
+  clip_end_absolute_column: "ClipEndAbsoluteSeconds"
+  clip_max_time_column: "TimeOfMaxAbsSeconds"
+  maxn_time_seconds_column: "TimeOfMaxAbsSeconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -80,19 +79,20 @@ csv_mapping:
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
-  time_seconds_column: "TimeSeconds"
+  time_seconds_column: "TimeAbsSeconds"
 
 paths:
   base_dir: "process_files"
-  bucket_name: "marine-buv-test"
-  orchestration:
-    pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
-    test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
+  deployment_targets_csv: process_files/deployment_targets.csv
+  test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
+  legacy:
+    zooniverse: "legacy/zooniverse"
+    experts: "legacy/experts"
   metadata:
-    root: "spyfish_metadata"
+    root: "metadata"
     sharepoint_dir: "sharepoint_lists"
     status_dir: "status"
     files:
@@ -105,21 +105,19 @@ paths:
   sub_dirs:
     media: "media"
     annotations: "annotations"
-    data_quality: "data_quality"
+    deployment_data: "deployment_data"
     db: "db"
     logs: "logs"
     training: "training"
     models: "models"
     base_model: "base_model"
     pipeline_model: "pipeline_model"
-    trained: "trained"
-    biigle_images: "media/biigle_images"
-    biigle_cache: "biigle_cache"
+    archived_models: "archived_models"
 
 ml_inference:
   limit_processing: 1
   log_interval_frames: 10
-  frame_skip: 15
+  ml_fps: 3
   imgsz: 640
   confidence_threshold: 0.25
   maxn_confidence_threshold: 0.50
@@ -129,25 +127,32 @@ ml_inference:
     interval_seconds: 10
     annotated_by_prefix: "ml"
 
-zooniverse_extraction:
-  project_id: 99999
-  health_check_count: 6
-  video_start_threshold_seconds: 120
+extraction:
+  clip_length: 10.0
   clip_cap: 50
+  video_start_threshold_seconds: 120
   force_binary_strategy: false
-  temporal_spacing_seconds: 0
+  sample_all_clips: false
+  frame_multiplier: 2
   binary_strategy:
-    maxn_clips: 10
-    confusing_clips: 20
-    empty_clips: 5
-    start_clips: 2
+    maxn_export: 10
+    confusing_export: 20
+    empty_export: 5
+    start_export: 2
     temporal_spacing_seconds: 10
   multiclass_strategy:
-    per_species_maxn_clips: 5
-    per_species_confusing_clips: 10
-    per_video_empty_clips: 3
-    per_video_start_clips: 2
+    per_species_maxn_export: 5
+    per_species_confusing_export: 10
+    per_video_empty_export: 3
+    per_video_start_export: 2
     temporal_spacing_seconds: 10
+
+zooniverse:
+  project_id: 99999
+  size_limit_mb: 12.0
+  min_clips_per_video: 6
+  min_votes: 3
+  max_frames_per_run: 3
 
 orchestrator:
   is_test_run: true
@@ -166,7 +171,6 @@ biigle:
   volume_report_type_video: 10
   volume_report_type_image: 10
   done_labels: ["Done Volume", "Done QA Review"]
-  s3_images_prefix: "biigle_images"
   default_fish_label_id: 1
   default_label_tree_id: 1
   label_mapping: {}
@@ -196,7 +200,7 @@ validation_patterns:
 
 validation_rules:
   deployments:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
+    file_name: "metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID", "SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     info_columns: ["SurveyID", "SiteID"]
@@ -227,7 +231,7 @@ validation_rules:
         range: [170, 178.5]
         allowed_values: [0]
   surveys:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Metadata.csv"
     required: ["SurveyID"]
     unique: ["SurveyID"]
     info_columns: ["SurveyName"]
@@ -235,7 +239,7 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   sites:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Sites.csv"
     required: ["SiteID", "LinkToMarineReserve"]
     unique: ["SiteID"]
     info_columns: ["SiteName", "LinkToMarineReserve"]
@@ -243,14 +247,14 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   species:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
+    file_name: "metadata/sharepoint_lists/BUV Species.csv"
     required: ["AphiaID", "CommonName", "ScientificName"]
     unique: ["AphiaID", "ScientificName", "CommonName"]
     info_columns: ["AphiaID", "CommonName", "ScientificName"]
     foreign_keys: {}
     relationships: []
   reserves:
-    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
+    file_name: "metadata/sharepoint_lists/Marine Reserves.csv"
     required: []
     unique: []
     info_columns: []
@@ -338,7 +342,7 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.875,  # (0.85 + 0.90) / 2
-                "time_of_maxn_ms": 4.0,
+                "TimeOfMaxAbsSeconds": 4.0,
             },
             {
                 "DropID": DROP_NORMAL,
@@ -348,16 +352,17 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "AnnotatedBy": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.95,  # frame 25 wins tiebreak
-                "time_of_maxn_ms": 10.0,
+                "TimeOfMaxAbsSeconds": 10.0,
             },
         ]
     )
-    .sort_values("time_of_maxn_ms")
+    .sort_values("TimeOfMaxAbsSeconds")
     .reset_index(drop=True),
 }
 
 # Pre-written MaxN data for DROP_ML_COMPLETE — stored in the fixture as if a prior
-# pipeline run already completed inference and wrote this output.
+# pipeline run already completed inference and wrote this output. Three rows so
+# `sync_annotation_counts` yields ml_annotations = 3.
 _ML_COMPLETE_MAXN_ROWS = [
     {
         "DropID": DROP_ML_COMPLETE,
@@ -367,7 +372,27 @@ _ML_COMPLETE_MAXN_ROWS = [
         "AnnotatedBy": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
-        "time_of_maxn_ms": 5.0,
+        "TimeOfMaxAbsSeconds": 5.0,
+    },
+    {
+        "DropID": DROP_ML_COMPLETE,
+        "ScientificName": "Pagrus auratus",
+        "TimeOfMax": "00:00:15.000",
+        "MaxInterval": 2,
+        "AnnotatedBy": MODEL_NAME,
+        "IntervalAnnotation": 10,
+        "ConfidenceAgreement": 0.75,
+        "TimeOfMaxAbsSeconds": 15.0,
+    },
+    {
+        "DropID": DROP_ML_COMPLETE,
+        "ScientificName": "Parika scaber",
+        "TimeOfMax": "00:00:25.000",
+        "MaxInterval": 1,
+        "AnnotatedBy": MODEL_NAME,
+        "IntervalAnnotation": 10,
+        "ConfidenceAgreement": 0.90,
+        "TimeOfMaxAbsSeconds": 25.0,
     },
 ]
 
@@ -425,7 +450,7 @@ def pipeline_env(tmp_path, monkeypatch):
                     KSF_20240124_BUV_KSF_085_01_yolov8n_raw.csv
                 KSF_20240124_BUV_KSF_085_02/annotations/   (empty — crash before inference)
                 KSF_20240124_BUV_KSF_085_03/annotations/
-                    KSF_20240124_BUV_KSF_085_03_yolov8n_maxn.csv
+                    KSF_20240124_BUV_KSF_085_03_ml_yolov8n_maxn.csv
 
     Skips the test if ffmpeg is not installed.
     """
@@ -440,14 +465,13 @@ def pipeline_env(tmp_path, monkeypatch):
     # the on-disk test file rather than the production config.yaml.
     monkeypatch.setattr(config, "_project_root", tmp_path)
     monkeypatch.setattr(config, "_yaml_config", test_yaml)
+    monkeypatch.setenv("S3_BUCKET", "marine-buv-test")
 
     # ── 3. Create the expected folder tree ────────────────────────────────
     (tmp_path / "media").mkdir()
     (tmp_path / "process_files" / "db").mkdir(parents=True)
     for drop_id in [DROP_NORMAL, DROP_STUCK, DROP_ML_COMPLETE]:
-        (tmp_path / "process_files" / "data_quality" / drop_id / "annotations").mkdir(
-            parents=True
-        )
+        config.get_drop_annotations_dir(drop_id).mkdir(parents=True)
 
     # ── 4. Create databases ───────────────────────────────────────────────
     # Paths now resolve inside tmp_path thanks to the monkeypatch above.
@@ -457,25 +481,26 @@ def pipeline_env(tmp_path, monkeypatch):
     # ── 5. Seed the three deployments ─────────────────────────────────────
     db.add_or_update_deployment(
         drop_id=DROP_NORMAL,
-        status=PipelineStatus.READY_FOR_ML,
+        ml_status=MlStatus.READY,
         sampling_start=1,
         sampling_end=5,
     )
-    # DROP_STUCK: video was present when the crash happened; status was set to
-    # PROCESSING_ML before the crash so it is now permanently stuck there.
+    # DROP_STUCK: video was present when the crash happened; ml_status was set to
+    # 'running' before the crash so it is now permanently stuck there.
     db.add_or_update_deployment(
         drop_id=DROP_STUCK,
-        status=PipelineStatus.PROCESSING_ML,
+        ml_status=MlStatus.RUNNING,
         sampling_start=1,
         sampling_end=5,
     )
     # DROP_ML_COMPLETE: a prior pipeline run finished inference successfully.
+    # ml_annotations count is derived from the annotations DB via
+    # sync_annotation_counts() in step 8 below — not set directly here.
     db.add_or_update_deployment(
         drop_id=DROP_ML_COMPLETE,
-        status=PipelineStatus.ML_COMPLETE,
+        ml_status=MlStatus.COMPLETE,
         sampling_start=1,
         sampling_end=5,
-        ml_annotations=3,
     )
 
     # ── 6. Generate tiny real videos ──────────────────────────────────────
@@ -530,6 +555,11 @@ def pipeline_env(tmp_path, monkeypatch):
             for row in _ML_COMPLETE_MAXN_ROWS
         ]
     )
+
+    # Propagate counts from annotations DB → deployments table. This matches
+    # how the real pipeline works: sync_annotation_counts() is the only writer
+    # to the ml_annotations / citsci_annotations / expert_annotations columns.
+    db.sync_annotation_counts([DROP_ML_COMPLETE])
 
     return PipelineEnv(
         tmp_path=tmp_path,

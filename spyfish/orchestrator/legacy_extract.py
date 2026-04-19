@@ -1,4 +1,6 @@
 import logging
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -19,7 +21,11 @@ def ingest_legacy_expert_annotations():
     bucket = config.s3_bucket
     s3_key = config.s3_sharepoint_annotations_legacy_experts_csv
 
-    local_csv = config.project_root / "temp_legacy_annotations.csv"
+    # Use a per-run temp file so concurrent pipeline invocations don't collide.
+    with tempfile.NamedTemporaryFile(
+        prefix="legacy_annotations_", suffix=".csv", delete=False
+    ) as tmp:
+        local_csv = Path(tmp.name)
 
     try:
         # 1. Download from S3
@@ -32,36 +38,27 @@ def ingest_legacy_expert_annotations():
 
         # Expected columns: DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy, IntervalAnnotation, ConfidenceAgreement
         # We map these to our annotation schema
+        conf_col = config.csv_confidence_agreement_column
+        intv_col = config.csv_interval_annotation_column
+
         annotations = []
-        for _, row in df.iterrows():
-            scientific_name = (
-                row[config.csv_scientific_name_column]
-                if not pd.isna(row[config.csv_scientific_name_column])
-                else None
-            )
-            conf = row[config.csv_confidence_agreement_column]
+        for row in df.to_dict("records"):
+            conf = row.get(conf_col)
             confidence = None if (pd.isna(conf) or conf == "NA") else float(conf)
+
+            sci = row.get(config.csv_scientific_name_column)
+            t_max = row.get(config.csv_maxn_time_column)
+            m_intv = row.get(config.csv_max_interval_column)
+            intv_ann = row.get(intv_col)
 
             annotations.append(
                 {
                     "drop_id": row[config.drop_id_column],
-                    "scientific_name": scientific_name,
-                    "time_of_max": (
-                        row[config.csv_maxn_time_column]
-                        if not pd.isna(row[config.csv_maxn_time_column])
-                        else None
-                    ),
-                    "max_interval": (
-                        row[config.csv_max_interval_column]
-                        if not pd.isna(row[config.csv_max_interval_column])
-                        else 0
-                    ),
+                    "scientific_name": None if pd.isna(sci) else sci,
+                    "time_of_max": None if pd.isna(t_max) else t_max,
+                    "max_interval": 0 if pd.isna(m_intv) else m_intv,
                     "annotated_by": "expert",
-                    "interval_annotation": (
-                        row.get(config.csv_interval_annotation_column, None)
-                        if not pd.isna(row.get(config.csv_interval_annotation_column))
-                        else None
-                    ),
+                    "interval_annotation": None if pd.isna(intv_ann) else intv_ann,
                     "confidence_agreement": confidence,
                     "external_id": "legacy",  # distinguishes these from Biigle-synced expert annotations
                 }

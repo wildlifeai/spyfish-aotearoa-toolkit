@@ -21,7 +21,9 @@ def _select_all_clips(
     """Generate every non-overlapping clip across the full sampling window."""
     starts = np.arange(sampling_start, sampling_end - clip_length + 0.001, clip_length)
     if len(starts) == 0:
-        logging.warning(f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id} — no clips generated.")
+        logging.warning(
+            f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id} — no clips generated."
+        )
         return pd.DataFrame()
     if clip_cap and len(starts) > clip_cap:
         # Evenly space the selected clips across the full window rather than front-loading
@@ -31,8 +33,8 @@ def _select_all_clips(
         {
             config.drop_id_column: drop_id,
             config.csv_sampling_start_column: sampling_start,
-            config.csv_clip_start_column: float(s),
-            config.csv_clip_end_column: float(s) + clip_length,
+            config.csv_clip_start_absolute_column: float(s),
+            config.csv_clip_end_absolute_column: float(s) + clip_length,
             config.csv_clip_max_time_column: float(s),
             config.csv_scientific_name_column: "All",
             "SelectionReason": "Full Video Sample",
@@ -44,7 +46,7 @@ def _select_all_clips(
     return pd.DataFrame(rows)
 
 
-def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, config):
+def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
     """
     Selects n-second intervals from the MaxN CSV to send to Zooniverse.
     Uses the generic selection strategy with Zooniverse-specific overrides.
@@ -74,7 +76,9 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
 
     # Full-video sampling — bypasses ML strategy and MaxN CSV entirely
     if config.sample_all_clips:
-        logging.info(f"sample_all_clips=true: selecting every clip in sampling window for {drop_id}.")
+        logging.info(
+            f"sample_all_clips=true: selecting every clip in sampling window for {drop_id}."
+        )
         selections_df = _select_all_clips(
             drop_id, sampling_start, sampling_end, config.clip_length, config.clip_cap
         )
@@ -88,24 +92,9 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
 
     df = pd.read_csv(maxn_csv_path)
 
-    # Health Check Handling (Zooniverse specific)
     if df.empty:
-        logging.info(f"Empty MaxN CSV for {drop_id}. Generating health check clips.")
-        selector = ClipSelector(drop_id, sampling_start, config.clip_length)
-        duration = sampling_end - sampling_start
-        if duration > 0:
-            interval_step = duration / config.health_check_count
-            for i in range(1, config.health_check_count):
-                t = sampling_start + (interval_step * i)
-                selector.add_interval(
-                    {
-                        config.csv_time_seconds_column: t,
-                        config.csv_max_interval_column: 0,
-                        config.csv_confidence_agreement_column: 1.0,
-                    },
-                    reason="Health Check (Empty Video)",
-                )
-        selections_df = selector.finalize_df()
+        logging.info(f"Empty MaxN CSV for {drop_id}. All clips will be health checks.")
+        selections_df = pd.DataFrame()
     else:
         # Convert human-readable time to seconds
         df[config.csv_time_seconds_column] = df[config.csv_maxn_time_column].apply(
@@ -131,6 +120,58 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id, con
             clip_cap=config.clip_cap,
         )
 
+    # Top up with evenly-spaced health check clips if below the minimum.
+    # This fires for both empty MaxN CSVs AND sparse videos where the ML
+    # strategy produced too few clips for meaningful volunteer coverage.
+    min_clips = config.min_clips_per_video
+    if len(selections_df) < min_clips:
+        n_needed = min_clips - len(selections_df)
+        logging.info(
+            f"Only {len(selections_df)} clips from ML strategy — "
+            f"topping up with {n_needed} health check clips to reach {min_clips}."
+        )
+        selector = ClipSelector(drop_id, sampling_start, config.clip_length)
+
+        # Register existing clips so health checks don't overlap them
+        for _, row in selections_df.iterrows():
+            selector.add_interval(
+                {
+                    config.csv_time_seconds_column: row[
+                        config.csv_clip_max_time_column
+                    ],
+                    config.csv_max_interval_column: row.get(
+                        config.csv_max_interval_column, 0
+                    ),
+                    config.csv_confidence_agreement_column: row.get(
+                        config.csv_confidence_agreement_column, 1.0
+                    ),
+                },
+                reason=row.get("SelectionReason", "ML Strategy"),
+            )
+
+        # Fill remaining slots with evenly-spaced clips
+        duration = sampling_end - sampling_start
+        if duration > 0:
+            # Generate more candidates than needed so we can skip overlaps
+            n_candidates = min_clips * 2
+            interval_step = duration / n_candidates
+            added = 0
+            for i in range(n_candidates):
+                if added >= n_needed:
+                    break
+                t = sampling_start + interval_step * (i + 0.5)
+                if selector.add_interval(
+                    {
+                        config.csv_time_seconds_column: t,
+                        config.csv_max_interval_column: 0,
+                        config.csv_confidence_agreement_column: 1.0,
+                    },
+                    reason="Health Check",
+                ):
+                    added += 1
+
+        selections_df = selector.finalize_df()
+
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
     selections_df.to_csv(output_selections_path, index=False)
     logging.info(
@@ -146,7 +187,7 @@ def main(drop_id):
     input_maxn = str(config.get_maxn_csv_path(drop_id, model_name))
     output_selections = str(config.get_selections_csv_path(drop_id))
 
-    process_zooniverse_clips(input_maxn, output_selections, drop_id, config)
+    process_zooniverse_clips(input_maxn, output_selections, drop_id)
 
 
 if __name__ == "__main__":

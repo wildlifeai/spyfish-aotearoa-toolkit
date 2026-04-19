@@ -34,7 +34,7 @@ def plot_maxn_timeline(
 
     Args:
         raw_df: Raw YOLO detections DataFrame (columns: time_seconds, confidence).
-        maxn_df: MaxN results DataFrame (columns: time_of_maxn_ms, MaxInterval, ConfidenceAgreement).
+        maxn_df: MaxN results DataFrame (columns: TimeOfMaxAbsSeconds, MaxInterval, ConfidenceAgreement).
         drop_id: Deployment identifier used for the title and output filename.
         output_dir: Directory to save the PNG into (created if absent).
         base_conf: Base inference confidence threshold (shown as light grey line).
@@ -79,7 +79,7 @@ def plot_maxn_timeline(
 
     # 2. Green highlight: MaxN clip windows
     for _, row in maxn_df.iterrows():
-        t = row[config.csv_maxn_time_ms_column]
+        t = row[config.csv_maxn_time_seconds_column]
         interval_start = (t // interval_seconds) * interval_seconds
         ax.axvspan(
             interval_start,
@@ -127,7 +127,7 @@ def plot_maxn_timeline(
 
     # 5. Red dots: MaxN peaks with annotation
     for _, row in maxn_df.iterrows():
-        t = row[config.csv_maxn_time_ms_column]
+        t = row[config.csv_maxn_time_seconds_column]
         count = row[config.csv_max_interval_column]
         ax.scatter(
             t,
@@ -155,7 +155,7 @@ def plot_maxn_timeline(
         )
 
     # Styling
-    ax.set_xlabel("Time (seconds from SamplingStart)", fontsize=12)
+    ax.set_xlabel("Time (seconds from video start)", fontsize=12)
     ax.set_ylabel("Fish Count per Frame", fontsize=12)
     ax.set_title(f"MaxN Timeline — {drop_id}", fontsize=14, fontweight="bold")
     ax.set_xlim(0, max_time + 1)

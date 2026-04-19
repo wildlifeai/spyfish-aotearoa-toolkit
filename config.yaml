@@ -14,10 +14,11 @@ csv_mapping:
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
   # Selection CSV columns
-  clip_start_column: "ClipStartRelative"
-  clip_end_column: "ClipEndRelative"
-  clip_max_time_column: "TimeOfMaxnMs"
-  maxn_time_ms_column: "time_of_maxn_ms"
+  # All time columns are absolute seconds from frame 0 of the source video file.
+  clip_start_absolute_column: "ClipStartAbsoluteSeconds"
+  clip_end_absolute_column: "ClipEndAbsoluteSeconds"
+  clip_max_time_column: "TimeOfMaxAbsoluteSeconds"
+  maxn_time_seconds_column: "TimeOfMaxAbsoluteSeconds"
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
@@ -25,24 +26,24 @@ csv_mapping:
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
-  time_seconds_column: "TimeSeconds"
+  time_seconds_column: "TimeAbsoluteSeconds"
 
 # Centralized path and storage configuration
 paths:
   # Base directory for all project data
   base_dir: "process_files"
-  # S3 Storage configuration
-  bucket_name: "marine-buv"
-  # Path to orchestration files (local only, not synced to S3)
-  orchestration:
-    pipeline_targets_csv: process_files/orchestration/pipeline_targets.csv
-    test_deployment_csv: process_files/orchestration/test_deployment_metadata.csv
+  deployment_targets_csv: process_files/deployment_targets.csv
+  test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
+  # Legacy directories (at project root, synced to S3)
+  legacy:
+    zooniverse: "legacy/zooniverse"
+    experts: "legacy/experts"
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
   # Metadata paths (relative to bucket root)
   metadata:
-    root: "spyfish_metadata"
+    root: "metadata"
     sharepoint_dir: "sharepoint_lists"
     status_dir: "status"
     files:
@@ -62,22 +63,20 @@ paths:
   sub_dirs:
     media: "media"
     annotations: "annotations"
-    data_quality: "data_quality"
+    deployment_data: "deployment_data"
     db: "db"
     logs: "logs"
     training: "training"
     models: "models"
     base_model: "base_model"
     pipeline_model: "pipeline_model"
-    trained: "trained"
-    biigle_images: "media/biigle_images"
-    biigle_cache: "biigle_cache"
+    archived_models: "archived_models"
 
 
 ml_inference:
   limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
-  frame_skip: 10   # How often the ML model infers. 10 means it will predict on every 10th frame in the video.
+  ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
   confidence_threshold: 0.25      # Base YOLO inference threshold
   maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
@@ -87,33 +86,41 @@ ml_inference:
     interval_seconds: 10
     annotated_by_prefix: "ml"
 
-zooniverse_extraction:
-  clip_length: 10.0
-  project_id: 14054 # spyfish 14054      # test: 32041
-  # TODO: what are these 2 things about
-  health_check_count: 6 # Number of health checks to perform
-  video_start_threshold_seconds: 120 # Number of seconds to sample from the start of the video to do the start of the video health check
-  clip_cap: 180 # Maximum number of clips to extract per video
-  size_limit_mb: 12.0 # Zooniverse upload limit — CRF is calibrated to stay under this
-  force_binary_strategy: false # If true, use binary strategy regardless of species count
-  sample_all_clips: false # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
-  min_votes: 3            # Min classifiers agreeing on a species to include in Zooniverse MaxN CSV
-  max_frames_per_run: 3   # Max frames extracted per run of identical MaxN count
+extraction:
+  clip_length: 10.0        # Length of each extracted clip in seconds
+  clip_cap: 180            # Maximum number of clips to extract per video
+  video_start_threshold_seconds: 120 # Seconds from video start used for start-of-video health check clips
+  force_binary_strategy: false       # If true, use binary strategy regardless of species count
+  sample_all_clips: false            # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
+  frame_multiplier: 2                # Multiplies export counts and divides temporal_spacing for denser frame coverage
   binary_strategy:
-    maxn_clips: 30
-    confusing_clips: 60
-    empty_clips: 10
-    start_clips: 3
-    temporal_spacing_seconds: 10
+    maxn_export: 30          # Clips at highest fish-count moments
+    confusing_export: 60     # Clips with high count but low confidence (uncertain detections)
+    empty_export: 10         # Clips with zero detections (false negative check)
+    start_export: 3          # Clips from the start of the video (health check)
+    temporal_spacing_seconds: 10  # Minimum seconds between selected clips
   multiclass_strategy:
-    per_species_maxn_clips: 5
-    per_species_confusing_clips: 10
-    per_video_empty_clips: 3
-    per_video_start_clips: 2
-    temporal_spacing_seconds: 10
+    per_species_maxn_export: 5       # MaxN clips per species
+    per_species_confusing_export: 10 # Confusing clips per species
+    per_video_empty_export: 3        # Empty clips per video
+    per_video_start_export: 2        # Start clips per video
+    temporal_spacing_seconds: 10     # Minimum seconds between selected clips
+
+zooniverse:
+  project_id: 14054          # Upload target — single project only
+  source_project_ids:        # All projects to fetch classifications FROM
+    - 14054                  # spyfish-aotearoa main
+    - 30327                  # spyfish-aotearoa-ey (EY clone workflow)
+  size_limit_mb: 12.0  # Zooniverse upload limit — CRF is calibrated to stay under this
+  min_clips_per_video: 30  # Minimum clips per video — if ML strategy selects fewer, top up with evenly-spaced health checks
+  min_votes: 3           # Min classifiers agreeing on a species to count as a valid detection
+  max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
+
+deployment_validation:
+  buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
+  sampling_end_buffer_seconds: 120  # Sampling can end up to 2 min before the full duration — still valid
 
 orchestrator:
-  is_test_run: true
   log_output: "console"
 
 ffmpeg:
@@ -124,7 +131,7 @@ ffmpeg:
 
 biigle:
   project_id:  4081        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
-  disk_id: 134             #  134 doc, 98 kalindi, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
+  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
@@ -132,8 +139,6 @@ biigle:
   volume_report_type_image: 10                   # TODO Volume overview report
   # Done labels — whole-file labels that signal a volume is ready for ingestion
   done_labels: ["Done Volume", "Done QA Review"]
-  # S3 paths — appended with {survey_id}/{drop_id}/ at runtime
-  s3_images_prefix: "biigle_images"  # Uses sub_dirs.biigle_images relative to base_dir
   # Default fish label for ML annotations uploaded to Biigle
   # This is the exact fallback if a species is not found in label_mapping below.
   default_fish_label_id: 531298   # "Fish - review required" label
@@ -175,7 +180,7 @@ validation_patterns:
 
 validation_rules:
   deployments:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
+    file_name: "metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID","SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     formats: ["DropID"]
@@ -207,7 +212,7 @@ validation_rules:
         range: [170, 178.5]
         allowed_values: [0]
   surveys:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Metadata.csv"
     required: ["SurveyID"]
     unique: ["SurveyID"]
     info_columns: ["SurveyName"]
@@ -215,7 +220,7 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   sites:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
+    file_name: "metadata/sharepoint_lists/BUV Survey Sites.csv"
     required: ["SiteID", "LinkToMarineReserve"]
     unique: ["SiteID"]
     info_columns: ["SiteName", "LinkToMarineReserve"]
@@ -223,14 +228,14 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   species:
-    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
+    file_name: "metadata/sharepoint_lists/BUV Species.csv"
     required: ["AphiaID", "CommonName", "ScientificName"]
     unique: ["AphiaID", "ScientificName", "CommonName"]
     info_columns: ["AphiaID", "CommonName", "ScientificName"]
     foreign_keys: {}
     relationships: []
   reserves:
-    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
+    file_name: "metadata/sharepoint_lists/Marine Reserves.csv"
     required: []
     unique: []
     info_columns: []

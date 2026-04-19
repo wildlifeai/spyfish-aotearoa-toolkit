@@ -14,84 +14,35 @@ class ZooniverseConfig(BaseConfig):
         return os.getenv("ZOONIVERSE_PASSWORD")
 
     @property
-    def extraction(self) -> dict:
-        return get_required(self._yaml_config, "zooniverse_extraction", "")
+    def _zooniverse(self) -> dict:
+        return get_required(self._yaml_config, "zooniverse", "")
 
     @property
     def zooniverse_project_id(self) -> int:
-        return int(get_required(self.extraction, "project_id", "zooniverse_extraction"))
+        """Upload target — single project."""
+        return int(get_required(self._zooniverse, "project_id", "zooniverse"))
 
     @property
-    def clip_length(self) -> float:
-        return float(
-            get_required(self.extraction, "clip_length", "zooniverse_extraction")
-        )
-
-    @property
-    def health_check_count(self) -> int:
-        return int(
-            get_required(self.extraction, "health_check_count", "zooniverse_extraction")
-        )
-
-    @property
-    def video_start_threshold(self) -> int:
-        return int(
-            get_required(
-                self.extraction,
-                "video_start_threshold_seconds",
-                "zooniverse_extraction",
-            )
-        )
-
-    @property
-    def clip_cap(self) -> int:
-        return int(get_required(self.extraction, "clip_cap", "zooniverse_extraction"))
+    def zooniverse_source_project_ids(self) -> list[int]:
+        """All projects to fetch classifications from (can be multiple)."""
+        ids = get_required(self._zooniverse, "source_project_ids", "zooniverse")
+        return [int(i) for i in ids]
 
     @property
     def size_limit_mb(self) -> float:
-        return float(get_required(self.extraction, "size_limit_mb", "zooniverse_extraction"))
+        return float(get_required(self._zooniverse, "size_limit_mb", "zooniverse"))
 
     @property
-    def force_binary_strategy(self) -> bool:
-        return bool(
-            get_required(
-                self.extraction, "force_binary_strategy", "zooniverse_extraction"
-            )
-        )
-
-    @property
-    def sample_all_clips(self) -> bool:
-        return bool(
-            get_required(
-                self.extraction, "sample_all_clips", "zooniverse_extraction"
-            )
-        )
-
-    @property
-    def temporal_spacing(self) -> int:
-        return int(
-            get_required(
-                self.extraction, "temporal_spacing_seconds", "zooniverse_extraction"
-            )
-        )
+    def min_clips_per_video(self) -> int:
+        return int(get_required(self._zooniverse, "min_clips_per_video", "zooniverse"))
 
     @property
     def zooniverse_min_votes(self) -> int:
-        return int(get_required(self.extraction, "min_votes", "zooniverse_extraction"))
+        return int(get_required(self._zooniverse, "min_votes", "zooniverse"))
 
     @property
     def zooniverse_max_frames_per_run(self) -> int:
-        return int(get_required(self.extraction, "max_frames_per_run", "zooniverse_extraction"))
-
-    @property
-    def binary_strategy(self) -> dict:
-        return get_required(self.extraction, "binary_strategy", "zooniverse_extraction")
-
-    @property
-    def multiclass_strategy(self) -> dict:
-        return get_required(
-            self.extraction, "multiclass_strategy", "zooniverse_extraction"
-        )
+        return int(get_required(self._zooniverse, "max_frames_per_run", "zooniverse"))
 
 
 zooniverse_config = ZooniverseConfig()

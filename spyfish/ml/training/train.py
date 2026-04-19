@@ -255,9 +255,6 @@ def main():
     )
     parser.add_argument("--binary-only", action="store_true")
     parser.add_argument("--species-only", action="store_true")
-    parser.add_argument(
-        "--no-upload", action="store_true", help="Skip S3 upload of trained weights"
-    )
     args = parser.parse_args()
 
     train_binary = not args.species_only

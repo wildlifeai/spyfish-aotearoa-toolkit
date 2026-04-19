@@ -162,7 +162,7 @@ def main(args):
     sampling_start = float(sampling_start)
     sampling_end = float(sampling_end)
     model_path = args.get("model_path")
-    vid_stride = int(args.get("frame_skip", config.frame_skip))
+    ml_fps = float(args.get("ml_fps", config.ml_fps))
     imgsz = int(args.get("imgsz", config.imgsz))
     conf = float(args.get("confidence_threshold", config.confidence_threshold))
     output_csv = args.get("output_csv")
@@ -170,10 +170,12 @@ def main(args):
     logging.info(f"Starting YOLO inference on {drop_id}")
     logging.info(f"Video Source: {video_url}")
     logging.info(f"Model: {model_path}")
-    logging.info(f"Frame Skip: {vid_stride}, Confidence: {conf}")
 
     true_fps = get_video_fps(video_url)
-    logging.info(f"Actual Video FPS: {true_fps:.2f}, Stride: {vid_stride}")
+    vid_stride = max(1, round(true_fps / ml_fps))
+    logging.info(
+        f"Video FPS: {true_fps:.2f}, target ML FPS: {ml_fps}, stride: {vid_stride}, Confidence: {conf}"
+    )
 
     # Launch modularized inference logic
     run_yolo_inference(
@@ -188,5 +190,3 @@ def main(args):
         sampling_start,
         sampling_end,
     )
-
-

@@ -221,7 +221,7 @@ def apply_floor(df: pd.DataFrame, floor_pct: float) -> pd.DataFrame:
 
 
 def prepare_from_annotations(
-    data_quality_dir: Optional[Path] = None,
+    deployment_data_dir: Optional[Path] = None,
     ceiling_pct: Optional[float] = None,
     floor_pct: Optional[float] = None,
     ceiling_max_iterations: Optional[int] = None,
@@ -229,11 +229,11 @@ def prepare_from_annotations(
     """
     Load expert annotations from local CSV files, apply ceiling + floor balancing.
 
-    Globs for *_biigle_expert_maxn.csv in process_files/data_quality/.
+    Globs for *_biigle_expert_maxn.csv under deployment_data_dir.
     This function is 100% offline and does NOT use the database.
 
     Args:
-        data_quality_dir: Root directory to search for expert CSVs. Defaults to config.data_quality_dir.
+        deployment_data_dir: Root directory to search for expert CSVs. Defaults to config.deployment_data_dir.
         ceiling_pct: Max per-species fraction. Defaults to config training.class_ceiling_pct.
         floor_pct: Min per-species fraction. Defaults to config training.class_floor_pct.
         ceiling_max_iterations: Safety cap. Defaults to config training.ceiling_max_iterations.
@@ -246,17 +246,18 @@ def prepare_from_annotations(
     ceiling_max_iterations = (
         ceiling_max_iterations or config.training_ceiling_max_iterations
     )
-    data_quality_dir = data_quality_dir or config.data_quality_dir
+    deployment_data_dir = deployment_data_dir or config.deployment_data_dir
 
-    logging.info(f"Loading expert MaxN annotations from {data_quality_dir}...")
+    logging.info(f"Loading expert MaxN annotations from {deployment_data_dir}...")
+    maxn_glob = f"**/annotations/*{config.biigle_expert_maxn_suffix}"
     all_dfs = []
-    for csv_path in data_quality_dir.glob("**/annotations/*_biigle_expert_maxn.csv"):
+    for csv_path in deployment_data_dir.glob(maxn_glob):
         logging.debug(f"  Found expert MaxN: {csv_path}")
         all_dfs.append(pd.read_csv(csv_path))
 
     if not all_dfs:
         raise RuntimeError(
-            f"No expert MaxN CSVs found in {data_quality_dir}. "
+            f"No expert MaxN CSVs found in {deployment_data_dir}. "
             "Run sync_biigle_annotations first."
         )
 
@@ -384,9 +385,13 @@ def copy_split_files(
 
     for drop_id in drop_ids:
         # Find all label files that belong to this drop (stems start with drop_id)
-        drop_labels = [p for p in labels_dir.glob("*.txt") if p.stem.startswith(drop_id)]
+        drop_labels = [
+            p for p in labels_dir.glob("*.txt") if p.stem.startswith(drop_id)
+        ]
         if not drop_labels:
-            logging.warning(f"No label files found for {drop_id} in {labels_dir} — skipping.")
+            logging.warning(
+                f"No label files found for {drop_id} in {labels_dir} — skipping."
+            )
             continue
 
         for lbl_path in drop_labels:

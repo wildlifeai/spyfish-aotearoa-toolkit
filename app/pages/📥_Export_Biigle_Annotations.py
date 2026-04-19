@@ -64,7 +64,6 @@ with st.form("biigle_form"):
         ),
     ).strip()
 
-    use_cache = st.checkbox("Use cached report (if available)", value=True)
     submitted = st.form_submit_button("Fetch annotations", type="primary")
 
 # ── Fetch & display ──────────────────────────────────────────────────────────
@@ -80,7 +79,6 @@ if submitted:
             processed = parser.process_video_annotations(
                 volume_id=int(volume_id_str),
                 resource=resource,
-                use_cache=use_cache,
             )
 
         if not processed:
@@ -90,11 +88,8 @@ if submitted:
         max_n_df = processed.get("max_n_df")
         max_n_30s_df = processed.get("max_n_30s_df")
         sizes_df = processed.get("sizes_df")
-        maxn_csv = processed.get("maxn_csv_path", "")
 
         st.success(f"Annotations loaded from {resource} {volume_id_str}.")
-        if maxn_csv:
-            st.caption(f"MaxN data cached at: `{maxn_csv}`")
 
         def _section(df: pd.DataFrame | None, label: str, fname: str):
             st.subheader(label)

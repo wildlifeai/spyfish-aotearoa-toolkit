@@ -11,9 +11,6 @@ extract_frames_from_selections uses stored times directly (no sampling_start add
 
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
-import pytest
-
 from spyfish.config.wrapper import config
 
 
@@ -35,17 +32,18 @@ def test_health_check_times_are_relative_to_sampling_start(
     # Fixed times are 10, 20, ... (< sampling_start=600).
     sampling_start = 600  # 10 minutes of pre-deployment video before sampling starts
     sampling_end = 660
-    duration = sampling_end - sampling_start  # 60s sampling window
     clip_length = 5
-    health_check_count = 6  # interval_step = 60/6 = 10s
+    min_clips = 6  # top-up to at least 6 clips
 
     # Wire up config mock with the column names from the real config and test values
+    mock_config.sample_all_clips = False
+    mock_config.clip_cap = None
     mock_config.clip_length = clip_length
-    mock_config.health_check_count = health_check_count
+    mock_config.min_clips_per_video = min_clips
     mock_config.csv_time_seconds_column = config.csv_time_seconds_column
     mock_config.csv_clip_max_time_column = config.csv_clip_max_time_column
-    mock_config.csv_clip_start_column = config.csv_clip_start_column
-    mock_config.csv_clip_end_column = config.csv_clip_end_column
+    mock_config.csv_clip_start_absolute_column = config.csv_clip_start_absolute_column
+    mock_config.csv_clip_end_absolute_column = config.csv_clip_end_absolute_column
     mock_config.csv_sampling_start_column = config.csv_sampling_start_column
     mock_config.csv_scientific_name_column = config.csv_scientific_name_column
     mock_config.csv_max_interval_column = config.csv_max_interval_column
@@ -69,14 +67,12 @@ def test_health_check_times_are_relative_to_sampling_start(
         f"{config.drop_id_column},{config.csv_scientific_name_column},"
         f"{config.csv_maxn_time_column},{config.csv_max_interval_column},"
         f"{config.csv_annotated_by_column},{config.csv_interval_annotation_column},"
-        f"{config.csv_confidence_agreement_column},{config.csv_maxn_time_ms_column}\n"
+        f"{config.csv_confidence_agreement_column},{config.csv_maxn_time_seconds_column}\n"
     )
     selections_csv = tmp_path / "selections.csv"
     drop_id = "KSF_20240124_BUV_KSF_085_01"
 
-    result = process_zooniverse_clips(
-        str(maxn_csv), str(selections_csv), drop_id, mock_config
-    )
+    result = process_zooniverse_clips(str(maxn_csv), str(selections_csv), drop_id)
 
     assert not result.empty, "Expected health check clips to be generated"
 

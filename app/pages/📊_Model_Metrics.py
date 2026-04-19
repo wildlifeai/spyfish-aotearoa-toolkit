@@ -206,8 +206,7 @@ def main():
     )
 
     training_cfg = config.get_section("training")
-    paths_cfg = config.get_section("paths")
-    bucket = paths_cfg.get("bucket_name")
+    bucket = config.s3_bucket
     results_prefix = config.training_results_s3_prefix
     local_results_root = config.training_results_dir
 
