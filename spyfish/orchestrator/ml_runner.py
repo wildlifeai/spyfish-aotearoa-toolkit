@@ -5,7 +5,7 @@ from typing import List
 
 import pandas as pd
 
-from spyfish.config.base import MlStatus, get_required
+from spyfish.config.base import MlStatus, VideoPresence, get_required
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.ml.run_inference import main as run_inference_main
@@ -62,11 +62,10 @@ class MLRunner:
             if len(valid_indices) >= self.limit:
                 break
 
-            storage_class = df.at[idx, "video_storage_class"]
-            if storage_class in {"GLACIER", "DEEP_ARCHIVE"}:
+            if df.at[idx, "video_presence"] == VideoPresence.ARCHIVED:
                 drop_id = df.at[idx, "drop_id"]
                 logging.warning(
-                    f"Skipping {drop_id}: video in {storage_class} — "
+                    f"Skipping {drop_id}: video in DEEP_ARCHIVE — "
                     f"restore with `aws s3api restore-object` before ML can run."
                 )
                 continue

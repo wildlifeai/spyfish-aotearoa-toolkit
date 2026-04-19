@@ -260,7 +260,11 @@ def _sync_deployments_to_db(
         # For bad deployments: use NO_VIDEO_BAD_DEP only if the video is truly absent;
         # if a video was uploaded for a bad deployment, record it as PRESENT.
         if video_path and video_path in known_files:
-            video_presence = VideoPresence.PRESENT
+            storage_class = media_file_info.get(video_path)
+            if storage_class == "DEEP_ARCHIVE":
+                video_presence = VideoPresence.ARCHIVED
+            else:
+                video_presence = VideoPresence.PRESENT
         elif is_bad_deployment:
             video_presence = VideoPresence.NO_VIDEO_BAD_DEP
         else:
@@ -278,15 +282,12 @@ def _sync_deployments_to_db(
         else:
             ml_status = MlStatus.PENDING
 
-        video_storage_class = media_file_info.get(video_path) if video_path else None
-
         db.add_or_update_deployment(
             drop_id=drop_id,
             ingest_status=ingest_status,
             ml_status=ml_status,
             video_path=video_path,
             video_presence=video_presence,
-            video_storage_class=video_storage_class,
             is_bad_deployment=is_bad_deployment,
             sampling_start=sampling_start,
             sampling_end=sampling_end,

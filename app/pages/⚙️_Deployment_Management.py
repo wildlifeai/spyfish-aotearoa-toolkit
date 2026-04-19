@@ -106,7 +106,6 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         "citsci_status",
         "biigle_status",
         "video_status",
-        "video_storage_class",
         "complete",
     ]
     display_cols = [c for c in display_cols if c in df.columns]
@@ -131,9 +130,6 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
             "ml_status": st.column_config.TextColumn("ML", width="small"),
             "citsci_status": st.column_config.TextColumn("CitSci", width="small"),
             "biigle_status": st.column_config.TextColumn("Biigle", width="small"),
-            "video_storage_class": st.column_config.TextColumn(
-                "Storage", width="small"
-            ),
             "ml_annotations": st.column_config.NumberColumn("ML", width="small"),
             "citsci_annotations": st.column_config.NumberColumn(
                 "CitSci", width="small"

@@ -83,7 +83,8 @@ class VideoPresence:
     current S3 state — if the video disappears from S3, it reverts to ABSENT.
     """
 
-    PRESENT = "present"  # Video found in S3 on most recent ingest
+    PRESENT = "present"  # Video in S3 with a directly-downloadable storage class
+    ARCHIVED = "archived"  # Video in S3 but in DEEP_ARCHIVE — needs restore
     ABSENT = "absent"  # Video not found in S3
     NO_VIDEO_BAD_DEP = "no_video_bad_dep"  # Bad deployment — no video expected
 

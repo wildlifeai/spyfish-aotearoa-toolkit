@@ -10,7 +10,7 @@ def _make_records(n: int) -> list[dict]:
             "video_path": f"path/{i+1}.mp4",
             "sampling_start": 0,
             "sampling_end": 100,
-            "video_storage_class": "STANDARD",
+            "video_presence": "present",
         }
         for i in range(n)
     ]
@@ -29,7 +29,7 @@ def test_get_inference_targets(mock_s3_class, mock_db_class):
             "video_path": "path/1.mp4",
             "sampling_start": 120,
             "sampling_end": 100,
-            "video_storage_class": "STANDARD",
+            "video_presence": "present",
         }
     ]
 

@@ -69,7 +69,6 @@ class DatabaseManager:
                     citsci_annotations INTEGER DEFAULT 0,
                     expert_annotations INTEGER DEFAULT 0,
                     biigle_volume_id TEXT,
-                    video_storage_class TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -208,7 +207,6 @@ class DatabaseManager:
         ml_status: str = MlStatus.PENDING,
         video_path: str = "",
         video_presence: str = VideoPresence.ABSENT,
-        video_storage_class: Optional[str] = None,
         is_bad_deployment: bool = False,
         sampling_start: Optional[int] = None,
         sampling_end: Optional[int] = None,
@@ -219,8 +217,7 @@ class DatabaseManager:
         INSERT-only (ignored on conflict): ml_status, and the citsci/biigle/
         reporting status columns (set by SQL defaults on insert only).
         UPDATE-on-conflict: ingest_status, video_path, video_presence,
-        video_storage_class, is_bad_deployment, sampling_start, sampling_end,
-        biigle_volume_id.
+        is_bad_deployment, sampling_start, sampling_end, biigle_volume_id.
         Annotation counts (ml/citsci/expert) are owned by sync_annotation_counts.
         """
         with self.get_connection() as conn:
@@ -228,16 +225,15 @@ class DatabaseManager:
             cursor.execute(
                 """
                 INSERT INTO deployments (
-                    drop_id, video_path, video_presence, video_storage_class,
+                    drop_id, video_path, video_presence,
                     ingest_status, ml_status,
                     is_bad_deployment, sampling_start, sampling_end,
                     biigle_volume_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
                     video_presence=excluded.video_presence,
-                    video_storage_class=excluded.video_storage_class,
                     ingest_status=excluded.ingest_status,
                     is_bad_deployment=excluded.is_bad_deployment,
                     sampling_start=excluded.sampling_start,
@@ -248,7 +244,6 @@ class DatabaseManager:
                     drop_id,
                     video_path,
                     video_presence,
-                    video_storage_class,
                     ingest_status,
                     ml_status,
                     is_bad_deployment,
@@ -350,7 +345,6 @@ class DatabaseManager:
             "ingest_status",
             "video_path",
             "video_presence",
-            "video_storage_class",
             "priority",
             "sampling_start",
             "sampling_end",
