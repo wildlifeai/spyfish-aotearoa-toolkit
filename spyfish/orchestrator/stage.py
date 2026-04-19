@@ -97,11 +97,13 @@ class StageRunner:
         return parser
 
     def _is_run_all(self, args: argparse.Namespace) -> bool:
-        """True when no run_in_all stage flag was explicitly set."""
+        """True when no stage flag was explicitly set.
+
+        Any explicit flag — including off-happy-path ones like --legacy or
+        --check-arrivals — scopes the run to just the chosen stages.
+        """
         return not any(
-            getattr(args, s.flag.replace("-", "_"), False)
-            for s in self.stages
-            if s.run_in_all
+            getattr(args, s.flag.replace("-", "_"), False) for s in self.stages
         )
 
     def run(self, args: argparse.Namespace) -> None:

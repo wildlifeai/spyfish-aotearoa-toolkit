@@ -2,7 +2,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-from utils import check_password, render_sidebar_refresh, sync_db_if_needed
+from utils import render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.database.manager import DatabaseManager
 
@@ -86,8 +86,6 @@ def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None)
 
 def main():
     st.set_page_config(page_title="Error Review", page_icon="🔍", layout="wide")
-    if not check_password():
-        st.stop()
 
     # --- Sidebar ---
     render_sidebar_refresh()

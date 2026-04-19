@@ -17,7 +17,13 @@ class ClipSelector:
         """Adds an interval to the selection list if not already covered."""
         time_col = config.csv_time_seconds_column
         interval_start = row[time_col]
-        clip_start_absolute = (interval_start // self.clip_length) * self.clip_length
+
+        if interval_start < self.sampling_start:
+            return False
+
+        clip_start_absolute = (
+            (interval_start - self.sampling_start) // self.clip_length
+        ) * self.clip_length + self.sampling_start
 
         if clip_start_absolute in self.selected_intervals:
             return False
@@ -47,7 +53,9 @@ class ClipSelector:
         """True if the candidate is far enough from every already-selected clip."""
         if spacing_seconds <= 0:
             return True
-        candidate_clip_start = (candidate_sec // self.clip_length) * self.clip_length
+        candidate_clip_start = (
+            (candidate_sec - self.sampling_start) // self.clip_length
+        ) * self.clip_length + self.sampling_start
         for s in self.selected_intervals:
             if abs(candidate_clip_start - s) < spacing_seconds:
                 return False

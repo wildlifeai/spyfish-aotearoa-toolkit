@@ -279,8 +279,8 @@ def _absolute_seconds(
     Frame subjects use the pre-baked TimeOfMax. Clip subjects offset the
     annotation_seconds (which is relative to clip start) by upl_seconds.
     """
-    if subject_type == "frame" and time_of_max_seconds is not None:
-        return time_of_max_seconds
+    if subject_type == "frame":
+        return time_of_max_seconds if time_of_max_seconds is not None else upl_seconds
     if upl_seconds is not None and annotation_seconds is not None:
         return upl_seconds + annotation_seconds
     return annotation_seconds

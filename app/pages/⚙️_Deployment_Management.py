@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from utils import check_password, render_sidebar_refresh, sync_db_if_needed
+from utils import render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.config.base import (
     BiigleStatus,
@@ -365,8 +365,6 @@ def get_all_annotations_export(_adb):
 
 def main():
     st.set_page_config(page_title="Deployment Management", page_icon="⚙️", layout="wide")
-    if not check_password():
-        st.stop()
 
     render_sidebar_refresh()
 

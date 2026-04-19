@@ -27,7 +27,7 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
 
     Expected CSV format (all columns except DropID are optional):
         DropID,ml_status,priority
-        KSF_20240124_BUV_KSF_085_01,ready,10
+        KSF_20240124_BUV_KSF_085_01,ml_ready,10
         KSF_20240124_BUV_KSF_085_02,,5
 
     Row order implies priority — first row has highest priority. If a 'priority'
