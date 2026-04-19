@@ -38,8 +38,12 @@ def check_pending_arrivals(known_files: Optional[Set[str]] = None):
 
     if known_files is None:
         storage = S3Handler(bucket=config.s3_bucket)
-        logging.info("Downloading master file list from S3 bucket (prefix: media/)...")
-        known_files = set(storage.get_file_paths_set_from_s3(prefix="media/"))
+        logging.info(
+            f"Downloading master file list from S3 bucket (prefix: {config.media_s3_prefix})..."
+        )
+        known_files = set(
+            storage.get_file_paths_set_from_s3(prefix=config.media_s3_prefix)
+        )
 
     updated_count = 0
     for drop in pending:
@@ -81,7 +85,9 @@ def run_ingestion():
     storage = S3Handler(bucket=config.s3_bucket)
 
     logging.info("Fetching known media files and master deployments list from S3...")
-    media_objects = storage.get_objects_from_s3(prefix="media/", keys_only=False)
+    media_objects = storage.get_objects_from_s3(
+        prefix=config.media_s3_prefix, keys_only=False
+    )
     known_files = {obj["Key"] for obj in media_objects}
     media_file_info = {
         obj["Key"]: obj.get("StorageClass", "STANDARD") for obj in media_objects
@@ -134,11 +140,6 @@ def run_ingestion():
     db.clear_validation_errors()
     db.add_validation_errors(structured_errors)
 
-    # Note: we intentionally do NOT load the legacy annotations CSV here to
-    # write expert_annotations counts. That's `ingest_legacy_expert_annotations()`'s
-    # job — it runs right after this under the same --ingest flag, inserts into
-    # spyfish_annotations.db, and calls sync_annotation_counts() which is the
-    # sole authority on the annotation count columns.
     try:
         sites_df = storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
         db.upsert_sites(sites_df)
@@ -146,6 +147,23 @@ def run_ingestion():
         logging.warning(
             f"Failed to load sites CSV from S3: {e}. Site metadata will not be updated in DB."
         )
+
+    if not config.class_map_path.exists():
+        try:
+            from spyfish.biigle.class_map import (
+                build_class_map_from_species,
+                save_class_map,
+            )
+
+            species_df = storage.read_df_from_s3_csv(config.s3_sharepoint_species_csv)
+            save_class_map(
+                build_class_map_from_species(species_df), config.class_map_path
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to seed class_map.json from species CSV: {e}. "
+                f"Run `python -m spyfish.biigle.class_map` to retry."
+            )
 
     _sync_deployments_to_db(
         deployments_df,

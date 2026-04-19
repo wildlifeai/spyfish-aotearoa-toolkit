@@ -1484,12 +1484,12 @@ Run with `--retrain` (typically after `--biigle-sync`).
 For BIIGLE volumes that were created manually (not through the pipeline), use:
 
 ```bash
-python export_biigle_image_labels.py --volume-id 12345 --output-dir process_files/old_labels
+python -m spyfish.biigle.biigle_to_yolo download-volume --volume-id 12345 --output-dir process_files/old_labels
 ```
 
 This downloads the annotation CSV and converts to YOLO `.txt` label files alongside a `class_map.json`. Use it to incorporate historical annotation data into a training run.
 
-> **TODO:** `export_biigle_image_labels.py` currently writes YOLO labels only — it does not write to `spyfish_annotations.db`. Clarify whether legacy volume annotations should also be ingested into the annotations DB for reporting/auditing, or whether YOLO labels for training is the only use case.
+> **TODO:** The `download-volume` subcommand currently writes YOLO labels only — it does not write to `spyfish_annotations.db`. Clarify whether legacy volume annotations should also be ingested into the annotations DB for reporting/auditing, or whether YOLO labels for training is the only use case.
 
 ---
 

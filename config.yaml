@@ -71,7 +71,6 @@ paths:
     base_model: "base_model"
     pipeline_model: "pipeline_model"
     archived_models: "archived_models"
-    biigle_images: "media/biigle_images"
 
 
 ml_inference:
@@ -140,8 +139,6 @@ biigle:
   volume_report_type_image: 10                   # TODO Volume overview report
   # Done labels — whole-file labels that signal a volume is ready for ingestion
   done_labels: ["Done Volume", "Done QA Review"]
-  # S3 paths — appended with {survey_id}/{drop_id}/ at runtime
-  s3_images_prefix: "biigle_images"  # Uses sub_dirs.biigle_images relative to base_dir
   # Default fish label for ML annotations uploaded to Biigle
   # This is the exact fallback if a species is not found in label_mapping below.
   default_fish_label_id: 531298   # "Fish - review required" label

@@ -109,5 +109,9 @@ class MLConfig(BaseConfig):
         return self.local_training_dir / "results"
 
     @property
+    def class_map_path(self) -> Path:
+        return self.local_training_dir / "class_map.json"
+
+    @property
     def training_results_s3_prefix(self) -> str:
         return self.training_results_dir.relative_to(self.project_root).as_posix()

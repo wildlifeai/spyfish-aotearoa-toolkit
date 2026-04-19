@@ -277,7 +277,7 @@ def parse_legacy_classifications(
     return df
 
 
-# Mirrors of helpers in parse_zooniverse_classifications.py — duplicated so
+# Mirrors of helpers in spyfish/zooniverse/live_extract.py — duplicated so
 # legacy is self-contained. Update both copies together if the MaxN format
 # changes.
 

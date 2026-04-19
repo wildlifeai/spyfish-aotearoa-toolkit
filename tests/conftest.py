@@ -113,7 +113,6 @@ paths:
     base_model: "base_model"
     pipeline_model: "pipeline_model"
     archived_models: "archived_models"
-    biigle_images: "media/biigle_images"
 
 ml_inference:
   limit_processing: 1
@@ -172,7 +171,6 @@ biigle:
   volume_report_type_video: 10
   volume_report_type_image: 10
   done_labels: ["Done Volume", "Done QA Review"]
-  s3_images_prefix: "biigle_images"
   default_fish_label_id: 1
   default_label_tree_id: 1
   label_mapping: {}

@@ -35,7 +35,7 @@ def upload_frames_to_s3(
         frames_df: DataFrame with a 'FramePath' column (output of extract_frames_from_selections).
                    Rows with None FramePath (extraction failures) are skipped.
         s3_frames_prefix: S3 key prefix for the upload destination, e.g.
-                          "biigle_frames/KSF_20240124_BUV_KSF_085_01/"
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/" pragma: allowlist secret
 
     Returns:
         List of uploaded filenames (basename only, as used in the Biigle volume file list).
@@ -94,7 +94,7 @@ def create_biigle_volume(
     Args:
         drop_id: Deployment identifier, used as the volume name.
         s3_frames_prefix: S3 key prefix matching what was uploaded (e.g.
-                          "biigle_frames/KSF_20240124_BUV_KSF_085_01/").
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/").
         file_names: List of JPEG filenames within the S3 prefix (basenames only).
         project_id: Biigle project ID. Defaults to config.biigle_project_id.
 
@@ -231,8 +231,6 @@ def upload_frames_to_biigle(
     Args:
         drop_id: Deployment identifier.
         frames_df: DataFrame with 'FramePath' column (from extract_frames_from_selections).
-        s3_frames_prefix: S3 key prefix for the frame folder, e.g.
-                          "biigle_frames/KSF_20240124_BUV_KSF_085_01/"
         project_id: Biigle project ID. Defaults to config.biigle_project_id.
 
     Returns:
@@ -240,9 +238,7 @@ def upload_frames_to_biigle(
     """
     logging.info(f"Starting Biigle upload for drop {drop_id}")
 
-    # Build S3 prefix: {base_prefix}/{survey_id}/{drop_id}/
-    survey_id = config.get_survey_id_from_drop(drop_id)
-    s3_prefix = f"{config.biigle_s3_images_prefix}/{survey_id}/{drop_id}/"
+    s3_prefix = config.get_frames_s3_prefix(drop_id)
 
     # Verify COCO JSON exists before committing any uploads — a missing file means
     # frame extraction failed and the upload should not proceed at all.

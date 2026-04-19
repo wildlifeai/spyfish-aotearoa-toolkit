@@ -154,8 +154,9 @@ class PathsConfig(BaseConfig):
         return self.models_root_dir / self._sub("archived_models")
 
     @property
-    def biigle_s3_images_prefix(self) -> str:
-        return f"{self.base_dir}/{self._sub('biigle_images')}"
+    def media_s3_prefix(self) -> str:
+        """S3 prefix for raw videos; lives at bucket root, independent of base_dir."""
+        return f"{self._sub('media')}/"
 
     @property
     def s3_deployment_data_dir(self) -> str:
@@ -274,6 +275,12 @@ class PathsConfig(BaseConfig):
     def get_drop_annotations_dir(self, drop_id: str) -> Path:
         return self.get_drop_dir(drop_id) / "annotations"
 
+    def get_frames_s3_prefix(self, drop_id: str) -> str:
+        """S3 prefix for a drop's frames. Mirrors local `get_frames_dir(drop_id)`."""
+        validated = self.validate_drop_id(drop_id)
+        survey_id = self.get_survey_id_from_drop(validated)
+        return f"{self.s3_deployment_data_dir}/{survey_id}/{validated}/frames/"
+
     def get_video_path(self, drop_id: str) -> Path:
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
 
@@ -299,6 +306,21 @@ class PathsConfig(BaseConfig):
         return (
             self.get_drop_annotations_dir(drop_id)
             / f"{self.validate_drop_id(drop_id)}_biigle_frames_selection.csv"
+        )
+
+    biigle_expert_raw_suffix = "_biigle_expert_raw.csv"
+    biigle_expert_maxn_suffix = "_biigle_expert_maxn.csv"
+
+    def get_biigle_expert_raw_csv_path(self, drop_id: str) -> Path:
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_raw_suffix}"
+        )
+
+    def get_biigle_expert_maxn_csv_path(self, drop_id: str) -> Path:
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_maxn_suffix}"
         )
 
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:

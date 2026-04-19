@@ -573,7 +573,7 @@ def get_all_db_drop_ids() -> list[str]:
 
 def ingest_zooniverse_annotations(drop_id: str) -> int:
     """
-    Read the per-drop Zooniverse MaxN CSV (written by parse_zooniverse_classifications.py)
+    Read the per-drop Zooniverse MaxN CSV (written by spyfish.zooniverse.live_extract)
     and store annotations in spyfish_annotations.db with annotated_by='citsci'.
 
     Clears any previous citsci annotations for this drop before writing,
@@ -632,12 +632,12 @@ def sync_zooniverse_drop(drop_id: str) -> str | None:
     """
     Pipeline entry point for zooniverse-sync (citsci_status: frames_uploaded → complete).
 
-    Checks whether parse_zooniverse_classifications.py has written a MaxN CSV
+    Checks whether spyfish.zooniverse.live_extract has written a MaxN CSV
     for this drop. If found, ingests it into the annotations DB and signals
     the pipeline to advance. Returns None if the CSV isn't ready yet.
 
     TODO: Integrate Caesar completion check so this step auto-detects subject
-    retirement without requiring parse_zooniverse_classifications.py to be
+    retirement without requiring spyfish.zooniverse.live_extract to be
     run separately first.
     """
     from spyfish.config.base import CitSciStatus
@@ -646,7 +646,7 @@ def sync_zooniverse_drop(drop_id: str) -> str | None:
     if count == 0:
         logging.info(
             f"zooniverse-sync: No MaxN CSV ready for {drop_id}. "
-            "Run parse_zooniverse_classifications.py once volunteers are done. "
+            "Run `python -m spyfish.zooniverse.live_extract` once volunteers are done. "
             "Leaving at frames_uploaded."
         )
         return None

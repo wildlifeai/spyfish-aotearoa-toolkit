@@ -154,9 +154,8 @@ def sync_biigle_annotations():
                 continue
 
             # Save raw Biigle report (used by YOLO label generation)
-            drop_ann_dir = config.get_drop_annotations_dir(drop_id)
-            drop_ann_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = drop_ann_dir / f"{drop_id}_biigle_expert_raw.csv"
+            config.get_drop_annotations_dir(drop_id).mkdir(parents=True, exist_ok=True)
+            raw_path = config.get_biigle_expert_raw_csv_path(drop_id)
             fish_annotations_df.to_csv(raw_path, index=False)
             logging.info(f"  Raw expert annotations → {raw_path}")
 
@@ -188,7 +187,7 @@ def sync_biigle_annotations():
                     "confidence_agreement": config.csv_confidence_agreement_column,
                 }
             )
-            maxn_path = drop_ann_dir / f"{drop_id}_biigle_expert_maxn.csv"
+            maxn_path = config.get_biigle_expert_maxn_csv_path(drop_id)
             maxn_df.to_csv(maxn_path, index=False)
             logging.info(f"  Expert MaxN → {maxn_path}")
 

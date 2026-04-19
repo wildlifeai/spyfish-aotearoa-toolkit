@@ -56,8 +56,6 @@ class MLRunner:
         os.makedirs(actual_video_dir, exist_ok=True)
 
         # Download in priority order, stopping once we have `self.limit` successes.
-        # Earlier this used `.head(self.limit)` before the loop, which meant failed
-        # downloads reduced the actual count below the limit with no warning.
         valid_indices = []
         local_filepaths = []
         for idx, path in df["video_path"].items():
@@ -87,6 +85,7 @@ class MLRunner:
                 logging.error(f"Failed to download video {s3_uri}: {e}")
                 continue
 
+        # Keep only the rows where the video is actually available locally
         df = df.loc[valid_indices].copy()
 
         if df.empty:
@@ -94,6 +93,8 @@ class MLRunner:
             return []
 
         df["VideoURL"] = local_filepaths
+
+        # Return list of records for inference (using DB key names: drop_id, sampling_start, sampling_end)
         return df.to_dict("records")
 
     def run_inference_loop(self, targets: List[dict]) -> List[str]:

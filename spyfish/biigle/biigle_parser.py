@@ -147,12 +147,12 @@ class BiigleParser:
             d_maxn = max_n_df[max_n_df[config.drop_id_column] == d_id]
 
             if not d_raw.empty:
-                raw_path = drop_ann_dir / f"{d_id}_biigle_expert_raw.csv"
+                raw_path = config.get_biigle_expert_raw_csv_path(d_id)
                 d_raw.to_csv(raw_path, index=False)
                 logging.info(f"Exported expert raw annotations → {raw_path}")
 
             if not d_maxn.empty:
-                maxn_path = drop_ann_dir / f"{d_id}_biigle_expert_maxn.csv"
+                maxn_path = config.get_biigle_expert_maxn_csv_path(d_id)
                 # Standardize to mirror DB export
                 d_maxn_formatted = self.format_count_annotations_output(d_maxn)
                 d_maxn_formatted.to_csv(maxn_path, index=False)

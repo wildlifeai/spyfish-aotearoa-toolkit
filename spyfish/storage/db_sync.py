@@ -98,8 +98,8 @@ def sync_annotations() -> bool:
     and raw BUV footage already lives in media/ on S3.
     """
     s3 = S3Handler()
-    local_dq_dir = config.data_quality_dir
-    s3_prefix = config.s3_data_quality_dir
+    local_dq_dir = config.deployment_data_dir
+    s3_prefix = config.s3_deployment_data_dir
 
     # Start with global exclude
     filters = ["--exclude", "*"]

@@ -142,7 +142,7 @@ class CitSciStatus:
     #   - zooniverse-sync      : frames_uploaded → complete             (bypass gate)
     # The "bypass" transitions are kept in VALID_TRANSITIONS so the pipeline runs
     # today. sync_zooniverse_drop() only reads the bundled {drop_id}_zooniverse_maxn.csv
-    # written by the standalone parse_zooniverse_classifications.py and ingests it
+    # written by spyfish.zooniverse.live_extract and ingests it
     # as citsci annotations — it does not distinguish clip vs frame subject retirement.
     #
     # When the Caesar retirement check is wired up, advance through the gates:
