@@ -117,11 +117,7 @@ paths:
 ml_inference:
   limit_processing: 1
   log_interval_frames: 10
-<<<<<<< HEAD
-  frame_skip: 15
-=======
   ml_fps: 3
->>>>>>> ac212b03c416c95d0df6a231976737b835ac55db
   imgsz: 640
   confidence_threshold: 0.25
   maxn_confidence_threshold: 0.50
