@@ -118,7 +118,7 @@ zooniverse:
 
 deployment_validation:
   buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
-  sampling_end_buffer_seconds: 120  # Sampling can end up to 2 min before the full duration — still valid
+  sampling_end_buffer_seconds: 0  # Sampling can end up to 2 min before the full duration — still valid
 
 orchestrator:
   log_output: "console"

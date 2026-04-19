@@ -13,6 +13,12 @@ class ClipSelector:
         self.selected_intervals = set()
         self.selections_rows = []
 
+    def _bucket(self, t: float) -> float:
+        """Map a timestamp to its clip-bucket start, aligned from sampling_start."""
+        return (
+            (t - self.sampling_start) // self.clip_length
+        ) * self.clip_length + self.sampling_start
+
     def add_interval(self, row, reason, species="All"):
         """Adds an interval to the selection list if not already covered."""
         time_col = config.csv_time_seconds_column
@@ -21,9 +27,7 @@ class ClipSelector:
         if interval_start < self.sampling_start:
             return False
 
-        clip_start_absolute = (
-            (interval_start - self.sampling_start) // self.clip_length
-        ) * self.clip_length + self.sampling_start
+        clip_start_absolute = self._bucket(interval_start)
 
         if clip_start_absolute in self.selected_intervals:
             return False
@@ -53,9 +57,7 @@ class ClipSelector:
         """True if the candidate is far enough from every already-selected clip."""
         if spacing_seconds <= 0:
             return True
-        candidate_clip_start = (
-            (candidate_sec - self.sampling_start) // self.clip_length
-        ) * self.clip_length + self.sampling_start
+        candidate_clip_start = self._bucket(candidate_sec)
         for s in self.selected_intervals:
             if abs(candidate_clip_start - s) < spacing_seconds:
                 return False
