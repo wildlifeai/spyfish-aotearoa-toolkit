@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 
 import pandas as pd
 
@@ -14,21 +14,26 @@ from spyfish.storage.s3_handler import S3Handler
 from spyfish.validation.data_validator import DataValidator
 
 
-def check_pending_arrivals(known_files: Optional[Set[str]] = None):
+def check_pending_arrivals(
+    known_files: Optional[Set[str]] = None,
+    media_file_info: Optional[Dict[str, str]] = None,
+):
     """
-    Checks S3 for videos of deployments with ml_status='pending' and video_presence='absent'.
-    Advances ml_status to 'ready' when the video is confirmed in S3.
+    Advances ml_status for drops waiting on video arrival or DEEP_ARCHIVE restore.
 
-    Args:
-        known_files: Optional pre-fetched set of S3 'media/' file paths.
-                    If None, it will be fetched from S3.
+    Picks up any drop with ml_status='pending' and video_presence in (absent, archived).
+    For each, re-checks S3:
+      - not present → leave as-is
+      - present + DEEP_ARCHIVE → video_presence=archived (no ml advance)
+      - present + downloadable → video_presence=present, advance ml_status to ready.
     """
     db = DatabaseManager()
-    pending = db.get_deployments_eligible(
-        "ml_status",
-        [MlStatus.PENDING],
-        prerequisites={"video_presence": VideoPresence.ABSENT},
-    )
+    pending_all = db.get_deployments_eligible("ml_status", [MlStatus.PENDING])
+    pending = [
+        d
+        for d in pending_all
+        if d.get("video_presence") in (VideoPresence.ABSENT, VideoPresence.ARCHIVED)
+    ]
 
     if not pending:
         logging.info("No pending-arrival drops found.")
@@ -36,27 +41,41 @@ def check_pending_arrivals(known_files: Optional[Set[str]] = None):
 
     logging.info(f"Checking S3 for {len(pending)} pending drops...")
 
-    if known_files is None:
+    if known_files is None or media_file_info is None:
         storage = S3Handler(bucket=config.s3_bucket)
         logging.info(
             f"Downloading master file list from S3 bucket (prefix: {config.media_s3_prefix})..."
         )
-        known_files = set(
-            storage.get_file_paths_set_from_s3(prefix=config.media_s3_prefix)
+        media_objects = storage.get_objects_from_s3(
+            prefix=config.media_s3_prefix, keys_only=False
         )
+        known_files = {obj["Key"] for obj in media_objects}
+        media_file_info = {
+            obj["Key"]: obj.get("StorageClass", "STANDARD") for obj in media_objects
+        }
 
     updated_count = 0
     for drop in pending:
         drop_id = drop["drop_id"]
         video_path = drop["video_path"]
+        current_presence = drop.get("video_presence")
 
-        if video_path and video_path in known_files:
-            logging.info(
-                f"✅ Video confirmed for {drop_id}. Advancing ml_status → ready."
-            )
-            db.update_deployment_fields(drop_id, video_presence=VideoPresence.PRESENT)
-            db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.READY)
-            updated_count += 1
+        if not (video_path and video_path in known_files):
+            continue
+
+        storage_class = media_file_info.get(video_path)
+        if storage_class == "DEEP_ARCHIVE":
+            if current_presence != VideoPresence.ARCHIVED:
+                db.update_deployment_fields(
+                    drop_id, video_presence=VideoPresence.ARCHIVED
+                )
+                logging.info(f"{drop_id}: video in DEEP_ARCHIVE — marked archived.")
+            continue
+
+        logging.info(f"✅ Video confirmed for {drop_id}. Advancing ml_status → ready.")
+        db.update_deployment_fields(drop_id, video_presence=VideoPresence.PRESENT)
+        db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.READY)
+        updated_count += 1
 
     logging.info(
         f"Arrival check complete. Advanced {updated_count} drops to ml_status=ready."
@@ -177,8 +196,8 @@ def run_ingestion():
         f"Ingestion complete. Synchronized {len(deployments_df)} records into the pipeline database."
     )
 
-    # After ingestion, check for video arrivals
-    check_pending_arrivals(known_files=known_files)
+    # After ingestion, check for video arrivals and DEEP_ARCHIVE restores
+    check_pending_arrivals(known_files=known_files, media_file_info=media_file_info)
 
 
 def _sync_deployments_to_db(

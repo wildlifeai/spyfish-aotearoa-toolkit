@@ -450,16 +450,16 @@ marine-buv/   (production, DOC-managed)
 ├── media/
 │   └── {SurveyID}/{DropID}/{DropID}.mp4        # Raw concatenated videos
 │
-├── biigle_images/
-│   └── {SurveyID}/{DropID}/                    # JPEG frames served to BIIGLE (disk 134)
-│
 └── process_files/                              # Synced from local after each run
-    ├── spyfish_pipeline.db
-    ├── spyfish_annotations.db
-    ├── annotations/{DropID}/                   # MaxN CSVs, raw CSVs
-    ├── data_quality/{DropID}/                  # Clips, frames, selections
+    ├── db/                                     # spyfish_pipeline.db, spyfish_annotations.db
+    ├── deployment_data/
+    │   └── {SurveyID}/{DropID}/
+    │       ├── annotations/                    # MaxN CSVs, raw CSVs, selections, COCO JSON
+    │       ├── clips/                          # 10s MP4 clips for Zooniverse
+    │       ├── frames/                         # JPEG frames (Zooniverse + BIIGLE disk 134)
+    │       └── qa_frames/                      # ML-annotated frames with boxes for QA
     ├── models/                                 # YOLO weights
-    └── training/                              # Retraining results
+    └── training/                               # Retraining results
 ```
 
 ### File artifacts per deployment
@@ -480,13 +480,17 @@ annotations/{DropID}/
     TimeOfMaxAbsSeconds, ScientificName, SelectionReason, MaxInterval, ConfidenceAgreement
     (ClipStart/End = relative to SamplingStart; TimeOfMaxAbsSeconds = absolute)
 
-data_quality/{DropID}/
-  clips/                                 10s MP4 clips for Zooniverse
-  frames/                                JPEG frames for Zooniverse
-  biigle_frames/                         JPEG frames for BIIGLE (denser selection)
-  {DropID}_selections.csv                Clip selection manifest
-  {DropID}_biigle_selections.csv         Frame selection manifest (BIIGLE)
-  {DropID}_coco_annotations.json         COCO-format bounding boxes from ML
+deployment_data/{SurveyID}/{DropID}/
+  annotations/
+    {DropID}_{model}_raw.csv             Raw YOLO detections
+    {DropID}_ml_{model}_maxn.csv         ML MaxN aggregations
+    {DropID}_zooniverse_maxn.csv         Volunteer MaxN
+    {DropID}_frames_selection.csv        Clip/frame selection manifest
+    {DropID}_biigle_frames_selection.csv BIIGLE frame selection manifest
+    {DropID}_coco_annotations.json       COCO-format bounding boxes from ML
+  clips/                                 10s MP4 clips (Zooniverse)
+  frames/                                JPEG frames (Zooniverse + BIIGLE disk 134)
+  qa_frames/                             JPEG frames with ML boxes drawn (for review)
 
 models/
   pipeline_model/                        Active production YOLO weights
@@ -499,7 +503,7 @@ zooniverse/
   zooniverse_review.csv                  Audit log of all aggregated subjects (every run)
   zooniverse_nothing_here_sample.csv     Sampled NOTHINGHERE subjects for review
 
-S3: biigle_images/{SurveyID}/{DropID}/   JPEG frames served to BIIGLE (disk 134)
+S3: process_files/deployment_data/{SurveyID}/{DropID}/frames/   JPEGs served to BIIGLE (disk 134)
 ```
 
 ---
@@ -519,7 +523,6 @@ erDiagram
         text reporting_status
         text video_presence
         text video_path
-        text video_storage_class
         int sampling_start
         int sampling_end
         bool is_bad_deployment
@@ -581,9 +584,8 @@ erDiagram
 | `citsci_status`       | TEXT      | Citizen science section: `citsci_pending`, `citsci_clips_uploaded`, `citsci_frames_uploaded`, `citsci_complete`, `citsci_error` |
 | `biigle_status`       | TEXT      | BIIGLE section: `expert_pending`, `expert_uploaded`, `expert_complete`, `expert_error`  |
 | `reporting_status`    | TEXT      | Reporting section: `reporting_pending`, `reporting_complete`, `reporting_error`         |
-| `video_presence`      | TEXT      | `present`, `absent`, `no_video_bad_dep`                                                |
+| `video_presence`      | TEXT      | `present`, `archived` (DEEP_ARCHIVE — needs restore), `absent`, `no_video_bad_dep`     |
 | `video_path`          | TEXT      | S3 key of the deployment video                                                         |
-| `video_storage_class` | TEXT      | AWS S3 storage class (`STANDARD`, `GLACIER`, `DEEP_ARCHIVE`, etc.)                    |
 | `sampling_start`      | INTEGER   | Start of valid sampling window (seconds) — from PowerApps metadata                    |
 | `sampling_end`        | INTEGER   | End of valid sampling window (seconds)                                                 |
 | `is_bad_deployment`   | BOOLEAN   | Flagged as problematic in source CSV; still tracked through pipeline                  |
@@ -864,7 +866,7 @@ Required secrets:
 
 ### S3 access
 
-The production S3 bucket (`marine-buv`) is DOC-managed. S3 operations never use `--delete` — the bucket is treated as a permanent backup of record. Frames uploaded to `biigle_images/` are served directly to BIIGLE via a configured S3 disk mount.
+The production S3 bucket (`marine-buv`) is DOC-managed. S3 operations never use `--delete` — the bucket is treated as a permanent backup of record. Frames uploaded to `process_files/deployment_data/{SurveyID}/{DropID}/frames/` are served directly to BIIGLE via a configured S3 disk mount (disk 134).
 
 ### Path safety
 
@@ -972,7 +974,7 @@ Sequenced by dependency, not assigned dates.
 ### Zooniverse volunteer sync — step 5b pipeline wiring
 
 > **⚠️ TODO — NEEDS TESTING & CLEANUP**
-> The Zooniverse parse pipeline (`parse_zooniverse_classifications.py` + `spyfish/zooniverse/parse_classifications.py`) has been substantially reworked but has **not been tested end-to-end against real Zooniverse data** since the refactor. Before treating any output as production-ready:
+> The Zooniverse parse pipeline (`python -m spyfish.zooniverse.live_extract` + `spyfish/zooniverse/parse_classifications.py`) has been substantially reworked but has **not been tested end-to-end against real Zooniverse data** since the refactor. Before treating any output as production-ready:
 >
 > - Run against real classifications from the API and verify MaxN CSVs are correct
 > - Run against legacy CSV backfill with and without subjects CSVs
@@ -981,12 +983,12 @@ Sequenced by dependency, not assigned dates.
 > - Check that `suspicious_minority_find` logic still works correctly
 > - Verify legacy filename resolution still handles date-pattern filenames (e.g. `AHE_062_25_04_2022`)
 
-Classification parsing is implemented in `parse_zooniverse_classifications.py` (standalone script) and `spyfish/zooniverse/parse_classifications.py` (reusable module). It is **not yet wired into `run_pipeline.py`** as a `--zooniverse-sync` stage.
+Classification parsing is implemented in `python -m spyfish.zooniverse.live_extract` (standalone script) and `spyfish/zooniverse/parse_classifications.py` (reusable module). It is **not yet wired into `run_pipeline.py`** as a `--zooniverse-sync` stage.
 
 **What is built:**
 
 - Fetch from Panoptes API across multiple source projects (`source_project_ids` in config)
-- Bulk backfill from downloaded Zooniverse export CSVs (`--from-csv`)
+- Bulk backfill from downloaded Zooniverse export CSVs (via `run_pipeline.py --legacy`, handled by `spyfish/zooniverse/legacy_extract.py`)
 - Parse annotations: species, count (with bucket handling: "2030"→25, "3040"→35), timestamp
 - Aggregate by (subject, species) with `min_votes` threshold
 - Write per-drop MaxN CSVs (`{drop_id}_zooniverse_maxn.csv`) in the same 8-column schema as ML MaxN CSVs (`DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy, IntervalAnnotation, ConfidenceAgreement, TimeOfMaxAbsSeconds`)
@@ -999,7 +1001,7 @@ Classification parsing is implemented in `parse_zooniverse_classifications.py` (
 - Wire into `run_pipeline.py` as `--zooniverse-sync`: check subject set completion, parse if done, advance `citsci_status` to `citsci_complete`
 - Deduplication of identical MaxN runs at frame extraction step (currently deferred)
 
-**Current workaround:** run `parse_zooniverse_classifications.py` manually, then advance drops with `set_status`.
+**Current workaround:** run `python -m spyfish.zooniverse.live_extract` manually, then advance drops with `set_status`.
 
 ### PowerBI — annotation data feed is manual
 
@@ -1106,7 +1108,7 @@ python run_pipeline.py --biigle-sync --retrain
 | `--ml`                | Steps 2+3 | `ml_status`        | `ml_ready → ml_running → ml_complete` (or `ml_error`)                                           |
 | `--zooniverse-clips`  | Step 4    | `citsci_status`    | `citsci_pending → citsci_clips_uploaded` (requires `ml_status=ml_complete`)                     |
 | `--zooniverse-images` | Step 5    | `citsci_status`    | `citsci_clips_uploaded → citsci_frames_uploaded`                                                |
-| `--zooniverse-sync`   | Step 5b   | `citsci_status`    | `citsci_frames_uploaded → citsci_complete` — **not yet wired in, use `parse_zooniverse_classifications.py`** |
+| `--zooniverse-sync`   | Step 5b   | `citsci_status`    | `citsci_frames_uploaded → citsci_complete` — **not yet wired in, use `python -m spyfish.zooniverse.live_extract`** |
 | `--biigle-upload`     | Step 6    | `biigle_status`    | `expert_pending → expert_uploaded` (requires `citsci_status=citsci_complete` OR `ml_status=ml_complete`) |
 | `--biigle-sync`       | Step 7    | `biigle_status`    | `expert_uploaded → expert_complete`                                                             |
 | `--retrain`           | Step 8    | —                  | Retrain YOLO model on expert annotations                                                        |
@@ -1130,22 +1132,18 @@ Run `--biigle-upload` without any `--zooniverse-*` flags. The callable `prerequi
 ### Zooniverse classification sync (standalone)
 
 ```bash
-# Incremental fetch from API (uses last_run.json for since-date)
-python parse_zooniverse_classifications.py
+# Incremental fetch from API (uses DB `zooniverse_last_run_at` for since-date)
+python -m spyfish.zooniverse.live_extract
 
-# Full backfill from API
-python parse_zooniverse_classifications.py --since all
+# Explicit --since (ISO date, 'auto', or 'all')
+python -m spyfish.zooniverse.live_extract --since 2024-06-01
+python -m spyfish.zooniverse.live_extract --since all
 
-# Load from downloaded Zooniverse export CSVs (completion gate uses legacy_subjects/ automatically)
-python parse_zooniverse_classifications.py --from-csv
-
-# CSV backfill with explicit subjects CSV for completion gate
-python parse_zooniverse_classifications.py --from-csv path/to/classifications.csv \
-    --subjects-csv path/to/subjects.csv
-
-# Test with a small slice
-python parse_zooniverse_classifications.py --from-csv path/to/file.csv --limit 1000
+# Test with the last N classifications only
+python -m spyfish.zooniverse.live_extract --limit 1000
 ```
+
+For historical backfill from downloaded export CSVs, use `run_pipeline.py --legacy` (reads `process_files/zooniverse/legacy_classifications/*.csv`).
 
 After running, manually advance fully-parsed drops using `set_status --citsci-status complete` until `--zooniverse-sync` is wired into the pipeline.
 
@@ -1358,9 +1356,9 @@ class DropStage:
 
 ### `spyfish/orchestrator/ingest.py` — Step 1
 
-`**run_ingestion()**`: Downloads the deployments metadata CSV from S3, validates, upserts all records. Sets `ingest_status` (`ok` / `excluded` / `validation_error`), `video_presence` (`present` / `absent` / `no_video_bad_dep`), and `video_storage_class` (from `list_objects_v2` `StorageClass` field — no extra API call). New records with `ingest_status=ok` and `video_presence=present` start with `ml_status=ml_ready`; all others start at `ml_pending`. All other section statuses start at their respective `pending` values.
+`**run_ingestion()**`: Downloads the deployments metadata CSV from S3, validates, upserts all records. Sets `ingest_status` (`ok` / `excluded` / `validation_error`) and `video_presence` (`present` / `archived` / `absent` / `no_video_bad_dep` — `archived` maps from `DEEP_ARCHIVE` storage class, which requires an explicit restore before download). New records with `ingest_status=ok` and `video_presence=present` start with `ml_status=ml_ready`; all others start at `ml_pending`. All other section statuses start at their respective `pending` values.
 
-Single S3 scan: `storage.get_objects_from_s3(prefix="media/", keys_only=False)` returns the full object list including `StorageClass`. Both `known_files` (set for O(1) membership checks) and `media_file_info` (dict for storage class lookup) are built from this one response.
+Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys_only=False)` returns the full object list including `StorageClass`. Both `known_files` (set for O(1) membership checks) and `media_file_info` (dict used to map StorageClass → `archived` vs `present`) are built from this one response.
 
 `**check_pending_arrivals(known_files)**`: Queries `get_deployments_eligible("ml_status", [ml_pending], prerequisites={"video_presence": "absent"})`. For each drop, checks whether the video is now in S3 and if so sets `video_presence=present` and advances `ml_status` to `ml_ready`.
 
@@ -1437,7 +1435,7 @@ Single S3 scan: `storage.get_objects_from_s3(prefix="media/", keys_only=False)` 
 - `get_pending_volumes()` — volumes not yet marked Done
 - `finalize_volume(volume_id)` — mark done
 
-`**upload_frames_to_biigle(drop_id, frames_df)**` (`upload_frames.py`): Uploads JPEGs to S3 at `biigle_images/{SurveyID}/{DropID}/`, creates BIIGLE volume pointing to that S3 folder via the configured S3 disk (production disk ID: **134**), polls for readiness, stores `volume_id` in DB.
+`**upload_frames_to_biigle(drop_id, frames_df)**` (`upload_frames.py`): Uploads JPEGs to S3 at `process_files/deployment_data/{SurveyID}/{DropID}/frames/` (via `config.get_frames_s3_prefix(drop_id)`), creates BIIGLE volume pointing to that S3 folder via the configured S3 disk (production disk ID: **134**), polls for readiness, stores `volume_id` in DB.
 
 **Label defaults:** All ML-detected bounding boxes are uploaded with the "Fish - review required" label (`default_fish_label_id: 531298` in config). To map specific species to specific BIIGLE labels, add entries to `label_mapping` in `config.yaml`.
 
@@ -1641,16 +1639,10 @@ process_files/zooniverse/
 
 ```bash
 # Backfill from all CSVs in legacy_classifications/ (subjects auto-detected from legacy_subjects/)
-python parse_zooniverse_classifications.py --from-csv
-
-# Or point to specific files
-python parse_zooniverse_classifications.py \
-    --from-csv path/to/classifications.csv \
-    --subjects-csv path/to/subjects.csv
-
-# Test with a small slice first
-python parse_zooniverse_classifications.py --from-csv --limit 500
+python run_pipeline.py --legacy
 ```
+
+Legacy backfill logic lives in `spyfish/zooniverse/legacy_extract.py` (entry: `run_legacy_zooniverse_backfill()`). It's deliberately separate from live `live_extract.py` so filename-format drift can be patched in one place without affecting live parsing.
 
 The completion gate will use the subjects CSV to ensure only fully-retired subject sets are exported. If no subjects CSV is found, it logs a warning and exports all matched drop_ids (useful for quick exploratory runs).
 
@@ -1667,14 +1659,14 @@ python -m spyfish.database.set_status AHE_20250513_BUV_AHE_057_01 --citsci-statu
 For BIIGLE volumes that were created manually (e.g. from pre-pipeline annotation campaigns) and don't have a corresponding pipeline record:
 
 ```bash
-python export_biigle_image_labels.py \
+python -m spyfish.biigle.biigle_to_yolo download-volume \
     --volume-id 12345 \
     --output-dir process_files/old_labels
 ```
 
 This downloads the raw annotation CSV from BIIGLE, converts bounding boxes to YOLO `.txt` label files, and writes a `class_map.json`. The output can be used directly as training data alongside pipeline-generated labels.
 
-> **TODO:** `export_biigle_image_labels.py` currently writes YOLO labels only — does not write to `spyfish_annotations.db`. Decide whether legacy annotations should also be ingested into the annotations DB for species reporting, or whether training data is the only use case.
+> **TODO:** `download-volume` currently writes YOLO labels only — does not write to `spyfish_annotations.db`. See `claude_docs/todo.md` for the per-row drop_id resolution plan.
 
 ### Legacy expert annotations (pre-BIIGLE)
 
