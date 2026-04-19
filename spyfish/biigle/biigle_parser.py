@@ -14,7 +14,6 @@ import io
 import logging
 import math
 import zipfile
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -33,65 +32,26 @@ class BiigleParser:
         self,
         email: Optional[str] = None,
         token: Optional[str] = None,
-        cache_dir: Optional[str] = None,
-        drop_id: Optional[str] = None,
     ):
         self.biigle_handler = BiigleHandler(email=email, token=token)
-        if cache_dir:
-            self.cache_dir = Path(cache_dir)
-        elif drop_id:
-            self.cache_dir = config.get_biigle_cache_dir(drop_id)
-        else:
-            # No drop context — use a shared root-level biigle cache
-            self.cache_dir = config.shared_biigle_cache_dir
 
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        logging.info(f"Biigle cache directory: {self.cache_dir}")
-
-    # ── Caching ───────────────────────────────────────────────────────────────
-
-    def _get_cached_zip_path(self, resource: str, resource_id: int) -> Path:
-        return self.cache_dir / f"{resource_id}_{resource}_report.zip"
-
-    def _export_report_with_cache(
+    def _export_report(
         self,
         resource: str,
         resource_id: int,
         type_id: int = config.annotation_report_type_video,
-        use_cache: bool = True,
     ) -> pd.DataFrame:
-        """Export report from Biigle API with optional local ZIP cache."""
-        cache_path = self._get_cached_zip_path(resource, resource_id)
-
-        zip_bytes: Optional[bytes] = None
-        if use_cache and cache_path.exists():
-            candidate = cache_path.read_bytes()
-            if not zipfile.is_zipfile(io.BytesIO(candidate)):
-                logging.warning(
-                    f"Cached ZIP at {cache_path} failed integrity check — deleting and re-downloading."
-                )
-                cache_path.unlink()
-            else:
-                logging.info(f"Using cached report: {cache_path}")
-                zip_bytes = candidate
-
-        if zip_bytes is None:
-            logging.info(
-                f"Downloading report from Biigle API ({resource} {resource_id})"
+        """Download an annotation report from the Biigle API."""
+        logging.info(f"Downloading report from Biigle API ({resource} {resource_id})")
+        report_id = self.biigle_handler.create_report(
+            resource, resource_id, type_id  # type: ignore
+        )
+        zip_bytes = self.biigle_handler.download_report_zip_bytes(report_id)
+        if not zipfile.is_zipfile(io.BytesIO(zip_bytes)):
+            raise ValueError(
+                f"Downloaded report for {resource} {resource_id} is not a valid ZIP "
+                f"({len(zip_bytes)} bytes)."
             )
-            report_id = self.biigle_handler.create_report(
-                resource, resource_id, type_id  # type: ignore
-            )
-            zip_bytes = self.biigle_handler.download_report_zip_bytes(report_id)
-            if not zipfile.is_zipfile(io.BytesIO(zip_bytes)):
-                raise ValueError(
-                    f"Downloaded report for {resource} {resource_id} is not a valid ZIP "
-                    f"({len(zip_bytes)} bytes). Not caching — retry to force a fresh download."
-                )
-            if use_cache:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_bytes(zip_bytes)
-                logging.info(f"Cached report: {cache_path}")
 
         allow_nested = resource == "projects"
         dfs = self.biigle_handler.read_csvs_from_zip_bytes(
@@ -110,18 +70,12 @@ class BiigleParser:
         self,
         volume_id: int,
         type_id: int,
-        use_cache: bool = True,
     ) -> pd.DataFrame:
-        """Download the annotation report for a volume and return it as a DataFrame.
-
-        Public entry point for callers that only need the raw annotations DataFrame,
-        without the full MaxN/size processing of process_video_annotations().
-        """
-        return self._export_report_with_cache(
+        """Download the annotation report for a volume and return it as a DataFrame."""
+        return self._export_report(
             resource="volumes",
             resource_id=volume_id,
             type_id=type_id,
-            use_cache=use_cache,
         )
 
     # ── Main processing ───────────────────────────────────────────────────────
@@ -131,38 +85,23 @@ class BiigleParser:
         volume_id: int,
         resource: str,
         type_id: int = config.annotation_report_type_video,
-        local_csv_path: Optional[str] = None,
-        use_cache: bool = True,
     ) -> dict:
         """
         Download and process video annotations from Biigle.
 
         Args:
             volume_id: Volume or project ID.
-            resource: "volumes", "projects", or "local" (use local_csv_path).
-            type_id: Biigle annotation report type ID.
-            local_csv_path: Path to a local CSV (only used when resource="local").
-            use_cache: Cache downloaded ZIP files locally to avoid repeated API calls.
+            resource: "volumes" or "projects".
+            type_id: Biigle annotation report type ID (default: video annotations).
 
         Returns:
-            Dict with keys:
-                raw_annotations_df, max_n_30s_df, max_n_df, sizes_df, maxn_csv_path
+            Dict with keys: raw_annotations_df, max_n_30s_df, max_n_df, sizes_df.
         """
-        if resource == "local":
-            if not local_csv_path:
-                raise ValueError("local_csv_path required when resource='local'")
-            p = Path(local_csv_path)
-            if not p.exists():
-                raise FileNotFoundError(f"Local CSV not found: {p}")
-            logging.info(f"Loading annotations from local CSV: {p}")
-            annotations_df = pd.read_csv(p)
-        else:
-            annotations_df = self._export_report_with_cache(
-                resource=resource,
-                resource_id=volume_id,
-                type_id=type_id,
-                use_cache=use_cache,
-            )
+        annotations_df = self._export_report(
+            resource=resource,
+            resource_id=volume_id,
+            type_id=type_id,
+        )
 
         if annotations_df.empty:
             logging.info(f"No annotations found for {resource} {volume_id}.")
@@ -195,13 +134,7 @@ class BiigleParser:
         max_n_df = self.process_max_count(max_n_30s_df)
         sizes_df = self.process_sizes(annotations_df)
 
-        # 1. Save maxn CSV to cache
-        maxn_csv_path = self.cache_dir / f"{volume_id}_{resource}_maxn.csv"
-        max_n_df.to_csv(maxn_csv_path, index=False)
-        logging.info(f"Saved MaxN data → {maxn_csv_path}")
-
-        # 2. Side-car export to drop-specific annotations folder
-        # We find uniquely active drops in this report
+        # Export per-drop annotation CSVs
         unique_drops = annotations_df[config.drop_id_column].unique()
         for d_id in unique_drops:
             drop_ann_dir = config.get_drop_annotations_dir(d_id)
@@ -214,12 +147,12 @@ class BiigleParser:
             d_maxn = max_n_df[max_n_df[config.drop_id_column] == d_id]
 
             if not d_raw.empty:
-                raw_path = drop_ann_dir / f"{d_id}_biigle_expert_raw.csv"
+                raw_path = config.get_biigle_expert_raw_csv_path(d_id)
                 d_raw.to_csv(raw_path, index=False)
                 logging.info(f"Exported expert raw annotations → {raw_path}")
 
             if not d_maxn.empty:
-                maxn_path = drop_ann_dir / f"{d_id}_biigle_expert_maxn.csv"
+                maxn_path = config.get_biigle_expert_maxn_csv_path(d_id)
                 # Standardize to mirror DB export
                 d_maxn_formatted = self.format_count_annotations_output(d_maxn)
                 d_maxn_formatted.to_csv(maxn_path, index=False)
@@ -230,7 +163,6 @@ class BiigleParser:
             "max_n_30s_df": max_n_30s_df,
             "max_n_df": max_n_df,
             "sizes_df": sizes_df,
-            "maxn_csv_path": str(maxn_csv_path),
         }
 
     # ── Aggregation helpers ───────────────────────────────────────────────────

@@ -1,4 +1,6 @@
 import logging
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -19,7 +21,11 @@ def ingest_legacy_expert_annotations():
     bucket = config.s3_bucket
     s3_key = config.s3_sharepoint_annotations_legacy_experts_csv
 
-    local_csv = config.project_root / "temp_legacy_annotations.csv"
+    # Use a per-run temp file so concurrent pipeline invocations don't collide.
+    with tempfile.NamedTemporaryFile(
+        prefix="legacy_annotations_", suffix=".csv", delete=False
+    ) as tmp:
+        local_csv = Path(tmp.name)
 
     try:
         # 1. Download from S3

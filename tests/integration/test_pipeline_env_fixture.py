@@ -6,8 +6,8 @@ These are not pipeline logic tests — they confirm that:
   - All databases are created and seeded with the expected deployments
   - Video files exist and are readable by cv2
   - Raw ML CSVs are written with the expected schema
-  - The stuck (PROCESSING_ML) deployment has no ML CSV on disk
-  - The ML_COMPLETE deployment has a MaxN CSV and annotations pre-seeded
+  - The stuck (ml_status=running) deployment has no ML CSV on disk
+  - The ml_status=complete deployment has a MaxN CSV and annotations pre-seeded
 
 Import these constants in integration tests that need the canonical drop IDs:
 
@@ -17,7 +17,7 @@ Import these constants in integration tests that need the canonical drop IDs:
 import cv2
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import MlStatus
 from spyfish.config.wrapper import config
 from spyfish.ml.process_ml_annotations import process_maxn
 from tests.conftest import (
@@ -42,7 +42,6 @@ def test_config_yaml_written_to_disk(pipeline_env):
 
 def test_config_singleton_uses_test_config(pipeline_env):
     """config.* properties must reflect the test config, not the production one."""
-    # S3_BUCKET is set to "marine-buv-test" by the pipeline_env fixture via monkeypatch.setenv
     assert config.s3_bucket == "marine-buv-test"
 
 
@@ -65,28 +64,28 @@ def test_deployments_seeded_with_correct_statuses(pipeline_env):
 
     normal = db.get_deployment(DROP_NORMAL)
     assert normal is not None
-    assert normal["status"] == PipelineStatus.READY_FOR_ML
+    assert normal["ml_status"] == MlStatus.READY
     assert normal["sampling_start"] == 1
     assert normal["sampling_end"] == 5
 
     stuck = db.get_deployment(DROP_STUCK)
     assert stuck is not None
-    assert stuck["status"] == PipelineStatus.PROCESSING_ML
+    assert stuck["ml_status"] == MlStatus.RUNNING
 
     ml_done = db.get_deployment(DROP_ML_COMPLETE)
     assert ml_done is not None
-    assert ml_done["status"] == PipelineStatus.ML_COMPLETE
+    assert ml_done["ml_status"] == MlStatus.COMPLETE
     assert ml_done["ml_annotations"] == 3
 
 
-def test_get_deployments_by_status(pipeline_env):
+def test_get_deployments_eligible(pipeline_env):
     db = pipeline_env.db
-    ready = db.get_deployments_by_status(PipelineStatus.READY_FOR_ML)
-    stuck = db.get_deployments_by_status(PipelineStatus.PROCESSING_ML)
-    done = db.get_deployments_by_status(PipelineStatus.ML_COMPLETE)
+    ready = db.get_deployments_eligible("ml_status", [MlStatus.READY])
+    running = db.get_deployments_eligible("ml_status", [MlStatus.RUNNING])
+    done = db.get_deployments_eligible("ml_status", [MlStatus.COMPLETE])
 
     assert len(ready) == 1 and ready[0]["drop_id"] == DROP_NORMAL
-    assert len(stuck) == 1 and stuck[0]["drop_id"] == DROP_STUCK
+    assert len(running) == 1 and running[0]["drop_id"] == DROP_STUCK
     assert len(done) == 1 and done[0]["drop_id"] == DROP_ML_COMPLETE
 
 
@@ -114,7 +113,6 @@ def test_raw_csv_written_for_drop_normal_only(pipeline_env):
     assert DROP_NORMAL in pipeline_env.raw_csv_paths
     assert pipeline_env.raw_csv_paths[DROP_NORMAL].exists()
 
-    # DROP_STUCK: no raw CSV should exist (simulates mid-run crash)
     stuck_csv = config.get_raw_csv_path(DROP_STUCK, MODEL_NAME)
     assert not stuck_csv.exists()
 
@@ -132,8 +130,8 @@ def test_maxn_csv_pre_written_for_ml_complete(pipeline_env):
     maxn_path = config.get_maxn_csv_path(DROP_ML_COMPLETE, MODEL_NAME)
     assert maxn_path.exists()
     df = pd.read_csv(maxn_path)
-    assert len(df) == 1
-    assert df.iloc[0]["ScientificName"] == "Notolabrus fucicola"
+    assert len(df) == 3
+    assert "Notolabrus fucicola" in df["ScientificName"].values
 
 
 def test_annotations_pre_seeded_for_ml_complete(pipeline_env):
@@ -146,8 +144,9 @@ def test_annotations_pre_seeded_for_ml_complete(pipeline_env):
             (DROP_ML_COMPLETE,),
         )
         rows = cursor.fetchall()
-    assert len(rows) == 1
-    assert rows[0]["scientific_name"] == "Notolabrus fucicola"
+    assert len(rows) == 3
+    species = {row["scientific_name"] for row in rows}
+    assert "Notolabrus fucicola" in species
 
 
 # ── Ground truth ──────────────────────────────────────────────────────────────
@@ -172,13 +171,11 @@ def test_process_maxn_matches_ground_truth(pipeline_env):
     )
 
     expected = env.expected_maxn[DROP_NORMAL]
-    result = result.sort_values("time_of_maxn_seconds").reset_index(drop=True)
+    result = result.sort_values("TimeOfMaxAbsSeconds").reset_index(drop=True)
 
     assert len(result) == len(expected)
     assert list(result["MaxInterval"]) == list(expected["MaxInterval"])
-    assert list(result["time_of_maxn_seconds"]) == list(
-        expected["time_of_maxn_seconds"]
-    )
+    assert list(result["TimeOfMaxAbsSeconds"]) == list(expected["TimeOfMaxAbsSeconds"])
     assert list(result["ConfidenceAgreement"]) == list(expected["ConfidenceAgreement"])
     assert list(result["TimeOfMax"]) == list(expected["TimeOfMax"])
 
@@ -187,8 +184,6 @@ def test_process_maxn_respects_confidence_threshold(pipeline_env):
     """
     Raising confidence_threshold to 0.91 should exclude all but the single
     highest-confidence detection and produce MaxInterval=1 only for interval 10.
-    Frame 10 had confidences 0.85 and 0.90 — both below 0.91 — so interval 0
-    disappears. Frame 25 had 0.95 — the only detection above 0.91.
     """
     env = pipeline_env
     raw_df = pd.read_csv(env.raw_csv_paths[DROP_NORMAL])
@@ -205,4 +200,4 @@ def test_process_maxn_respects_confidence_threshold(pipeline_env):
 
     assert len(result) == 1
     assert result.iloc[0]["MaxInterval"] == 1
-    assert result.iloc[0]["time_of_maxn_seconds"] == 10.0
+    assert result.iloc[0]["TimeOfMaxAbsSeconds"] == 10.0

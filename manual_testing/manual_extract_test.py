@@ -50,7 +50,7 @@ def manual_extract():
     # For each peak time, find the nearest frame index in the raw CSV
     frame_indices = []
     for _, row in df.iterrows():
-        t_sec = float(row["TimeOfMaxnMs"])
+        t_sec = float(row["TimeOfMaxAbsSeconds"])
         closest = raw_df.iloc[(raw_df["time_seconds"] - t_sec).abs().argsort()[:1]]
         frame_indices.append(int(closest["frame"].iloc[0]))
 

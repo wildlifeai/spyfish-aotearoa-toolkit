@@ -5,7 +5,7 @@ from typing import List
 
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus, get_required
+from spyfish.config.base import MlStatus, VideoPresence, get_required
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.ml.run_inference import main as run_inference_main
@@ -15,16 +15,13 @@ from spyfish.utils import validate_model_path
 
 class MLRunner:
     def __init__(self):
-        # S3 properties
         self.bucket = config.s3_bucket
-        self.s3_db_key = config.s3_db_key
         self.s3 = S3Handler(bucket=self.bucket)
         self.db = DatabaseManager()
 
         self.video_storage_dir = config.media_dir
         self.local_db_path = config.db_path
 
-        # Logic properties
         self.limit = get_required(
             config.ml_inference, "limit_processing", "ml_inference"
         )
@@ -33,13 +30,12 @@ class MLRunner:
         self.confidence = get_required(
             config.ml_inference, "confidence_threshold", "ml_inference"
         )
-        # Use the standardized pipeline model path
         self.model = str(validate_model_path(config.pipeline_model_path))
 
     def get_inference_targets(self) -> List[dict]:
-        """Queries the local sqlite DB for videos READY_FOR_ML and returns a list of target dictionaries."""
+        """Queries the DB for drops with ml_status='ready' and downloads their videos."""
         logging.debug(
-            f"Querying local state database for {PipelineStatus.READY_FOR_ML} videos (LIMIT: {self.limit})..."
+            f"Querying local state database for ml_status={MlStatus.READY!r} (LIMIT: {self.limit})..."
         )
 
         if not os.path.exists(self.local_db_path):
@@ -48,35 +44,8 @@ class MLRunner:
             )
             return []
 
-        df = pd.DataFrame(
-            self.db.get_deployments_by_status(PipelineStatus.READY_FOR_ML)
-        )
-
-        # Float any drops listed in pipeline_targets.csv to the top (in CSV order)
-        targets_csv = config.pipeline_targets_csv
-        if targets_csv and os.path.exists(targets_csv):
-            try:
-                priority_ids = (
-                    pd.read_csv(targets_csv)[config.drop_id_column]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .tolist()
-                )
-                priority_order = {d: i for i, d in enumerate(priority_ids)}
-                df["_priority"] = (
-                    df["drop_id"].map(priority_order).fillna(len(priority_ids))
-                )
-                df = df.sort_values("_priority").drop(columns=["_priority"])
-                logging.debug(
-                    f"Priority order applied from {targets_csv}: {priority_ids}"
-                )
-            except Exception as e:
-                logging.warning(
-                    f"Could not apply priority ordering from {targets_csv}: {e}"
-                )
-
-        df = df.head(self.limit)
+        records = self.db.get_deployments_eligible("ml_status", [MlStatus.READY])
+        df = pd.DataFrame(records)
 
         if df.empty:
             return []
@@ -86,15 +55,25 @@ class MLRunner:
         actual_video_dir = self.video_storage_dir
         os.makedirs(actual_video_dir, exist_ok=True)
 
+        # Download in priority order, stopping once we have `self.limit` successes.
         valid_indices = []
         local_filepaths = []
         for idx, path in df["video_path"].items():
+            if len(valid_indices) >= self.limit:
+                break
+
+            if df.at[idx, "video_presence"] == VideoPresence.ARCHIVED:
+                drop_id = df.at[idx, "drop_id"]
+                logging.warning(
+                    f"Skipping {drop_id}: video in DEEP_ARCHIVE — "
+                    f"restore with `aws s3api restore-object` before ML can run."
+                )
+                continue
+
             filename = os.path.basename(path)
             local_path = os.path.join(actual_video_dir, filename)
-
             s3_uri = f"s3://{self.bucket}/{path}"
 
-            # Skip if the file already exists locally
             if os.path.exists(local_path):
                 logging.debug(
                     f"Video {filename} already exists at {local_path}. Skipping download."
@@ -104,7 +83,6 @@ class MLRunner:
                 continue
 
             logging.info(f"Downloading {s3_uri} to {local_path}...")
-
             try:
                 success = self.s3.download_object_from_s3(key=path, filename=local_path)
                 if not success:
@@ -128,15 +106,12 @@ class MLRunner:
         return df.to_dict("records")
 
     def run_inference_loop(self, targets: List[dict]) -> List[str]:
-        """Executes the YOLO inference directly in a Python loop for each target dictionary."""
+        """Executes YOLO inference for each target. Returns drop_ids that succeeded."""
         if not targets:
             return []
 
         drop_ids = [t["drop_id"] for t in targets]
 
-        # Model must exist before any drop status is changed.
-        # Checking here keeps all drops in READY_FOR_ML so the batch can be
-        # retried once the model file is placed — no manual DB repair needed.
         if not os.path.exists(self.model):
             logging.error(
                 f"Model weights not found at {self.model}. Automatic download from S3 is disabled for security."
@@ -147,11 +122,10 @@ class MLRunner:
             raise FileNotFoundError(f"Model missing: {self.model}")
 
         logging.info(
-            f"Setting {len(drop_ids)} targets to {PipelineStatus.PROCESSING_ML}..."
+            f"Setting {len(drop_ids)} targets to ml_status={MlStatus.RUNNING!r}..."
         )
-        # Batch update status to PROCESSING_ML
         for drop_id in drop_ids:
-            self.db.advance_status(drop_id, PipelineStatus.PROCESSING_ML)
+            self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.RUNNING)
 
         logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
 
@@ -159,7 +133,6 @@ class MLRunner:
         for row in targets:
             try:
                 drop_id = row["drop_id"]
-
                 drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
                 model_name = Path(self.model).stem
                 inference_args = {
@@ -175,55 +148,44 @@ class MLRunner:
                         drop_annotations_dir, f"{drop_id}_{model_name}_raw.csv"
                     ),
                 }
-
                 logging.info(f"  → Running ML inference: {drop_id}")
                 run_inference_main(inference_args)
                 success_targets.append(drop_id)
 
             except Exception as e:
                 logging.error(f"Inference failed for {drop_id}: {e}", exc_info=True)
-                self.db.advance_status(drop_id, PipelineStatus.ERROR)
-                self.db.add_validation_errors(
-                    [
-                        {
-                            "SurveyID": config.get_survey_id_from_drop(drop_id),
-                            "DropID": drop_id,
-                            "ErrorType": "PIPELINE_ERROR",
-                            "FileName": "",
-                            "ColumnName": "ml_inference",
-                            "ErrorMessage": f"Inference failed: {type(e).__name__}: {e}",
-                            "InvalidValue": "",
-                        }
-                    ]
+                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
+                self.db.add_validation_error(
+                    survey_id=config.get_survey_id_from_drop(drop_id),
+                    drop_id=drop_id,
+                    error_type=MlStatus.ERROR,
+                    column_name="ml_inference",
+                    error_message=f"Inference failed: {type(e).__name__}: {e}",
                 )
-                # drop_id is not added to success_targets — it will not proceed
 
         return success_targets
 
     def finalize_batch_results(
         self, successful_drops: List[str], all_drop_ids: List[str] | None = None
     ):
-        """Marks successful drops ML_COMPLETE and recovers any stuck PROCESSING_ML drops.
+        """Marks successful drops ml_status=complete. Safety-nets any stuck 'running' drops to 'error'.
 
         Args:
             successful_drops: Drop IDs that completed inference without error.
-            all_drop_ids: Every drop ID that was set to PROCESSING_ML at batch start.
-                          Used as a safety net: any drop still in PROCESSING_ML after
-                          the loop (e.g. process killed mid-batch) is advanced to ERROR
-                          so it can be retried rather than stuck permanently.
+            all_drop_ids: Every drop that was set to 'running' at batch start.
+                          Any still in 'running' after the loop (e.g. process killed
+                          mid-batch) is advanced to 'error' for retry.
         """
-        # Safety net: advance any drop that is still PROCESSING_ML to ERROR.
-        # Under normal operation run_inference_loop already does this per-drop,
-        # but if the process was interrupted the per-drop handler may not have run.
         if all_drop_ids:
             for drop_id in set(all_drop_ids) - set(successful_drops):
                 dep = self.db.get_deployment(drop_id)
-                if dep and dep["status"] == PipelineStatus.PROCESSING_ML:
+                if dep and dep["ml_status"] == MlStatus.RUNNING:
                     logging.error(
-                        f"Drop {drop_id} is still {PipelineStatus.PROCESSING_ML} after batch "
-                        "— advancing to ERROR to allow retry."
+                        f"Drop {drop_id} is still ml_status=running after batch — advancing to error."
                     )
-                    self.db.update_status(drop_id, PipelineStatus.ERROR)
+                    self.db.update_section_status(
+                        drop_id, MlStatus.COLUMN, MlStatus.ERROR
+                    )
 
         if not successful_drops:
             logging.info("No successful drops to finalize.")
@@ -233,16 +195,16 @@ class MLRunner:
             f"Syncing state for {len(successful_drops)} successfully processed drops..."
         )
         for drop_id in successful_drops:
-            self.db.advance_status(drop_id, PipelineStatus.ML_COMPLETE)
+            self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
         logging.info(
-            f"Updated {len(successful_drops)} drops to {PipelineStatus.ML_COMPLETE}."
+            f"Updated {len(successful_drops)} drops to ml_status={MlStatus.COMPLETE!r}."
         )
 
 
 def main():
     runner = MLRunner()
     targets = runner.get_inference_targets()
-    all_drop_ids = [t[config.drop_id_column] for t in targets]
+    all_drop_ids = [t["drop_id"] for t in targets]
     successes = runner.run_inference_loop(targets)
     runner.finalize_batch_results(successes, all_drop_ids=all_drop_ids)
 

@@ -6,7 +6,7 @@ from typing import Any, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 
-from spyfish.config.base import PipelineStatus
+from spyfish.config.base import VideoPresence
 from spyfish.config.wrapper import config
 
 
@@ -134,33 +134,33 @@ def seconds_to_time(seconds: float) -> str:
 
 
 def get_survey_summary(deployment_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregates deployment data to summarize status and progress by Survey."""
+    """Aggregates deployment data to summarize status and progress by survey."""
     if deployment_df.empty:
         return pd.DataFrame()
 
     survey_summary = (
-        deployment_df.groupby("SurveyID")
+        deployment_df.groupby("survey_id")
         .agg(
-            TotalDeployments=("DropID", "nunique"),
-            CompleteDeployments=("Complete", "sum"),
-            BadDeployments=("IsBadDeployment", "sum"),
-            NeedsAction=("NeedsAction", "sum"),
-            VideosPresent=(
-                "Status",
-                lambda x: x.isin(PipelineStatus.VIDEO_PRESENT_STATUSES).sum(),
+            total_deployments=("drop_id", "nunique"),
+            complete_deployments=("complete", "sum"),
+            bad_deployments=("is_bad_deployment", "sum"),
+            needs_action=("needs_action", "sum"),
+            videos_present=(
+                "video_presence",
+                lambda x: (x == VideoPresence.PRESENT).sum(),
             ),
-            MLAnnotated=("MlAnnotations", lambda x: (x > 0).sum()),
-            CitSciAnnotated=("CitSciAnnotations", lambda x: (x > 0).sum()),
-            ExpertAnnotated=("ExpertAnnotations", lambda x: (x > 0).sum()),
+            ml_annotated=("ml_annotations", lambda x: (x > 0).sum()),
+            citsci_annotated=("citsci_annotations", lambda x: (x > 0).sum()),
+            expert_annotated=("expert_annotations", lambda x: (x > 0).sum()),
         )
         .reset_index()
     )
 
-    # Calculate percentages cleanly: (Bad + Expert) / Total
-    survey_summary["CompletionPct"] = (
+    # Completion % = (Bad + Expert) / Total
+    survey_summary["completion_pct"] = (
         (
-            (survey_summary["BadDeployments"] + survey_summary["ExpertAnnotated"])
-            / survey_summary["TotalDeployments"]
+            (survey_summary["bad_deployments"] + survey_summary["expert_annotated"])
+            / survey_summary["total_deployments"]
         )
         * 100
     ).round(1).astype(str) + "%"

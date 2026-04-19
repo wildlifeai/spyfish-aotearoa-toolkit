@@ -44,3 +44,21 @@ class ExtractionConfig(BaseConfig):
     @property
     def multiclass_strategy(self) -> dict:
         return get_required(self._extraction, "multiclass_strategy", "extraction")
+
+    # ── FFmpeg encoding settings ─────────────────────────────────────────
+
+    @property
+    def ffmpeg_config(self) -> dict:
+        return get_required(self._yaml_config, "ffmpeg", "")
+
+    @property
+    def ffmpeg_crf(self) -> str:
+        return str(get_required(self.ffmpeg_config, "crf", "ffmpeg"))
+
+    @property
+    def ffmpeg_preset(self) -> str:
+        return str(get_required(self.ffmpeg_config, "preset", "ffmpeg"))
+
+    @property
+    def ffmpeg_codec(self) -> str:
+        return str(get_required(self.ffmpeg_config, "codec", "ffmpeg"))
