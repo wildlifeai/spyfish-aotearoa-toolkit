@@ -437,13 +437,12 @@ class S3Handler:
                 progress.complete()
 
             logging.info("Successfully uploaded file %s to S3", filename)
+            if delete_file_after_upload:
+                delete_file(filename)
             return True
         except BotoCoreError as e:
             logging.error("Failed to upload file %s to S3: %s", filename, e)
             return False
-        finally:
-            if delete_file_after_upload:
-                delete_file(filename)
 
     def sync_local_to_s3(
         self,

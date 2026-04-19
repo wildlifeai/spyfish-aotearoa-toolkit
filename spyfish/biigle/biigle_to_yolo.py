@@ -2,7 +2,7 @@
 biigle_to_yolo.py — Convert local Biigle expert CSV exports → YOLO label .txt files.
 
 This tool is strictly offline; it consumes CSVs previously exported by sync_biigle_annotations
-into process_files/data_quality/{drop_id}/annotations/.
+into process_files/deployment_data/{drop_id}/annotations/.
 """
 
 import argparse
@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from spyfish.biigle.class_map import load_class_map
+from spyfish.config.wrapper import config
 
 # ---------------------------------------------------------------------------
 # Core conversion helpers
@@ -42,56 +45,6 @@ def biigle_rect_to_yolo(
     return round(cx, 6), round(cy, 6), round(w, 6), round(h, 6)
 
 
-def build_class_map(
-    df: pd.DataFrame, class_map_path: Optional[Path] = None
-) -> Dict[str, int]:
-    """
-    Build a stable label_name → YOLO class_id mapping.
-
-    Stability rule: sort by Biigle label_id ascending (labels are created in order;
-    new labels append, so this mapping is stable across runs unless labels are deleted).
-
-    Args:
-        df: Annotation DataFrame containing 'label_id' and 'label_name' columns.
-        class_map_path: If provided, load existing map from this JSON file (and extend if new labels appear).
-
-    Returns:
-        Dict mapping label_name → integer class ID (0-indexed).
-    """
-    existing_map: Dict[str, int] = {}
-    if class_map_path and class_map_path.exists():
-        with open(class_map_path) as f:
-            existing_map = {v["name"]: v["class_id"] for v in json.load(f).values()}
-        logging.info(
-            f"Loaded existing class map with {len(existing_map)} labels from {class_map_path}"
-        )
-
-    # Stable sort: by the first (lowest) Biigle label_id seen for each label name
-    label_info = (
-        df[["label_id", "label_name"]]
-        .drop_duplicates("label_name")
-        .sort_values("label_id")
-    )
-
-    for _, row in label_info.iterrows():
-        name = row["label_name"]
-        if name not in existing_map:
-            existing_map[name] = len(existing_map)
-
-    return existing_map
-
-
-def save_class_map(class_map: Dict[str, int], path: Path) -> None:
-    """Persist class_map as {class_id: {name, class_id}} JSON for human readability."""
-    serialisable = {
-        str(cid): {"name": name, "class_id": cid} for name, cid in class_map.items()
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(serialisable, f, indent=2)
-    logging.info(f"Saved class map ({len(class_map)} classes) → {path}")
-
-
 def convert_annotations_to_yolo(
     df: pd.DataFrame,
     class_map: Dict[str, int],
@@ -112,6 +65,7 @@ def convert_annotations_to_yolo(
     """
     labels_dir.mkdir(parents=True, exist_ok=True)
     summary: Dict[str, int] = {}
+    unseen_labels: set[str] = set()
 
     for filename, group in df.groupby("filename"):
         img_w, img_h = default_img_size
@@ -121,6 +75,7 @@ def convert_annotations_to_yolo(
             label_name = row["label_name"]
             class_id = class_map.get(label_name)
             if class_id is None:
+                unseen_labels.add(label_name)
                 continue
 
             points_raw = row.get("points", row.get("shape_points", "[]"))
@@ -144,6 +99,12 @@ def convert_annotations_to_yolo(
         txt_path.write_text("\n".join(lines))
         summary[str(filename)] = len(lines)
 
+    if unseen_labels:
+        logging.warning(
+            f"Skipped {len(unseen_labels)} label(s) not in class_map "
+            f"(reseed class_map.json if these are new species): "
+            f"{sorted(unseen_labels)}"
+        )
     logging.info(f"Wrote {len(summary)} label files to {labels_dir}")
     return summary
 
@@ -184,7 +145,7 @@ def draw_frames_on_images(
     for label_path in samples:
         img_path = None
         for ext in (".jpg", ".jpeg", ".png"):
-            # Search in all subdirectories of images_dir (e.g. data_quality/drop_id/biigle_frames/)
+            # Search in all subdirectories of images_dir (e.g. deployment_data/survey_id/drop_id/frames/)
             for p in images_dir.rglob(label_path.stem + ext):
                 img_path = p
                 break
@@ -234,23 +195,22 @@ def draw_frames_on_images(
 
 
 def biigle_to_yolo(
-    data_quality_dir: Path,
+    deployment_data_dir: Path,
     class_map_path: Path,
 ) -> Dict[str, int]:
     """
-    Finds all expert CSVs in data_quality and converts them to YOLO .txt files.
+    Finds all expert CSVs in deployment_data and converts them to YOLO .txt files.
 
     Labels are written into each drop's annotations/ folder alongside the source CSV.
     Use biigle_to_yolo_collect() afterwards to copy them into a flat staging directory.
     """
-    logging.info(f"Searching for expert CSVs in {data_quality_dir}...")
+    logging.info(f"Searching for expert CSVs in {deployment_data_dir}...")
     csv_paths = []
     all_dfs = []
 
     # Strictly use the per-drop expert raw CSVs
-    for csv_path in sorted(
-        data_quality_dir.glob("**/annotations/*_biigle_expert_raw.csv")
-    ):
+    raw_glob = f"**/annotations/*{config.biigle_expert_raw_suffix}"
+    for csv_path in sorted(deployment_data_dir.glob(raw_glob)):
         logging.debug(f"  Found expert CSV: {csv_path}")
         csv_paths.append(csv_path)
         all_dfs.append(pd.read_csv(csv_path))
@@ -259,11 +219,10 @@ def biigle_to_yolo(
         logging.warning("No expert CSV files found. Retraining cannot proceed.")
         return {}
 
-    # Build class map across all drops first so class IDs are consistent
-    df = pd.concat(all_dfs, ignore_index=True)
-    logging.info(f"Loaded {len(df)} annotations from {len(all_dfs)} CSVs.")
-    class_map = build_class_map(df, class_map_path)
-    save_class_map(class_map, class_map_path)
+    class_map = load_class_map(class_map_path)
+    logging.info(
+        f"Loaded class map with {len(class_map)} label keys from {class_map_path}"
+    )
 
     # Write YOLO .txt labels into each drop's annotations/ folder
     for csv_path, drop_df in zip(csv_paths, all_dfs):
@@ -275,24 +234,102 @@ def biigle_to_yolo(
     return class_map
 
 
+def download_extra_volume_labels(
+    volume_id: int,
+    output_dir: Path,
+    class_map_path: Optional[Path] = None,
+    report_type: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Download raw annotations from any Biigle volume and convert to YOLO labels.
+
+    No DropID, no DB, no MaxN — just raw CSV → YOLO .txt files
+    dumped into output_dir for inclusion in training data.
+    """
+    from spyfish.biigle.biigle_parser import BiigleParser
+
+    if report_type is None:
+        report_type = config.annotation_report_type_images
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir = output_dir / "labels"
+
+    parser = BiigleParser()
+    logging.info(f"Downloading annotations for volume {volume_id}...")
+    df = parser.download_volume_annotations(volume_id, type_id=report_type)
+
+    if df.empty:
+        logging.warning(f"No annotations found for volume {volume_id}.")
+        return {}
+
+    raw_csv_path = output_dir / f"volume_{volume_id}_raw.csv"
+    df.to_csv(raw_csv_path, index=False)
+    logging.info(f"Saved raw CSV ({len(df)} rows) → {raw_csv_path}")
+
+    class_map = load_class_map(class_map_path or config.class_map_path)
+
+    summary = convert_annotations_to_yolo(df, class_map, labels_dir)
+    logging.info(f"Wrote {len(summary)} YOLO label files → {labels_dir}")
+    return class_map
+
+
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
         description="Convert local Biigle expert CSVs to YOLO labels."
     )
-    parser.add_argument(
-        "--data-dir", required=True, type=Path, help="Root data_quality directory"
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Existing: convert local CSVs
+    convert_cmd = subparsers.add_parser(
+        "convert", help="Convert local expert CSVs to YOLO labels"
     )
-    parser.add_argument(
+    convert_cmd.add_argument(
+        "--data-dir", required=True, type=Path, help="Root deployment_data directory"
+    )
+    convert_cmd.add_argument(
         "--class-map",
         required=True,
         type=Path,
-        help="Path to write/update the class_map.json",
+        help="Path to class_map.json (seed via `python -m spyfish.biigle.class_map`)",
+    )
+
+    # New: download from arbitrary volume
+    download_cmd = subparsers.add_parser(
+        "download-volume", help="Download labels from any Biigle volume"
+    )
+    download_cmd.add_argument(
+        "--volume-id", required=True, type=int, help="Biigle volume ID"
+    )
+    download_cmd.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: training/extra_labels)",
+    )
+    download_cmd.add_argument(
+        "--class-map",
+        type=Path,
+        default=None,
+        help="Path to class_map.json (defaults to config.class_map_path)",
+    )
+    download_cmd.add_argument(
+        "--report-type",
+        type=int,
+        default=None,
+        help="Biigle report type ID (default: image annotations)",
     )
 
     args = parser.parse_args()
 
-    biigle_to_yolo(args.data_dir, args.class_map)
+    if args.command == "convert":
+        biigle_to_yolo(args.data_dir, args.class_map)
+    elif args.command == "download-volume":
+        output_dir = args.output_dir or config.local_training_dir / "extra_labels"
+        download_extra_volume_labels(
+            args.volume_id, output_dir, args.class_map, args.report_type
+        )
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

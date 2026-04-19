@@ -4,7 +4,13 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from spyfish.config.base import InvalidTransitionError, PipelineStatus, SourceStatus
+from spyfish.config.base import (
+    SECTIONS,
+    IngestStatus,
+    InvalidTransitionError,
+    MlStatus,
+    VideoPresence,
+)
 from spyfish.config.wrapper import config
 
 
@@ -19,6 +25,18 @@ class DatabaseManager:
             str(config.db_path) if db_path is None else str(Path(db_path).absolute())
         )
         self.init_db()
+        self._deployments_columns: frozenset[str] = self._read_deployments_columns()
+
+    def _read_deployments_columns(self) -> frozenset[str]:
+        """Reads the actual column names from the deployments table schema.
+
+        Used by _validate_column() so the injection whitelist is derived from
+        the CREATE TABLE statement rather than a hand-maintained copy of it.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(deployments)")
+            return frozenset(row["name"] for row in cursor.fetchall())
 
     def get_connection(self):
         """Returns a configured SQLite connection wrapped in contextlib.closing."""
@@ -37,10 +55,14 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS deployments (
                     drop_id TEXT PRIMARY KEY,
                     video_path TEXT,
-                    status TEXT NOT NULL,
-                    source_status TEXT NOT NULL DEFAULT 'OK',
+                    video_presence TEXT NOT NULL DEFAULT 'absent',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    ingest_status TEXT NOT NULL DEFAULT 'ok',
+                    ml_status TEXT NOT NULL DEFAULT 'ml_pending',
+                    citsci_status TEXT NOT NULL DEFAULT 'citsci_pending',
+                    biigle_status TEXT NOT NULL DEFAULT 'expert_pending',
+                    reporting_status TEXT NOT NULL DEFAULT 'reporting_pending',
                     is_bad_deployment BOOLEAN NOT NULL DEFAULT 0,
-                    error_message TEXT,
                     sampling_start INTEGER,
                     sampling_end INTEGER,
                     ml_annotations INTEGER DEFAULT 0,
@@ -80,6 +102,15 @@ class DatabaseManager:
             """
             )
 
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """
+            )
+
             # Create a trigger to automatically update updated_at
             cursor.execute(
                 """
@@ -91,16 +122,28 @@ class DatabaseManager:
             """
             )
 
-            # TODO: delete this migration block once all envs have run it at least once
-            # (source_status added 2026-04-05; safe to remove after next full deploy)
-            cursor.execute("PRAGMA table_info(deployments)")
-            existing_cols = {row[1] for row in cursor.fetchall()}
-            if "source_status" not in existing_cols:
-                cursor.execute(
-                    "ALTER TABLE deployments ADD COLUMN source_status TEXT NOT NULL DEFAULT 'OK'"
-                )
-                logging.info("Migrated deployments table: added source_status column.")
+            conn.commit()
 
+    # ── Pipeline metadata KV store ───────────────────────────────────────────
+
+    def get_metadata(self, key: str) -> Optional[str]:
+        """Read a value from the pipeline_metadata table, or None if not set."""
+        with self.get_connection() as conn:
+            row = (
+                conn.cursor()
+                .execute("SELECT value FROM pipeline_metadata WHERE key = ?", (key,))
+                .fetchone()
+            )
+            return row["value"] if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        """Upsert a key-value pair in the pipeline_metadata table."""
+        with self.get_connection() as conn:
+            conn.cursor().execute(
+                "INSERT INTO pipeline_metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
             conn.commit()
 
     def upsert_sites(self, sites_df) -> None:
@@ -159,122 +202,153 @@ class DatabaseManager:
     def add_or_update_deployment(
         self,
         drop_id: str,
-        status: str,
-        source_status: str = SourceStatus.OK,
+        *,
+        ingest_status: str = IngestStatus.OK,
+        ml_status: str = MlStatus.PENDING,
         video_path: str = "",
+        video_presence: str = VideoPresence.ABSENT,
         is_bad_deployment: bool = False,
-        error_message: str = "",
         sampling_start: Optional[int] = None,
         sampling_end: Optional[int] = None,
-        ml_annotations: int = 0,
-        citsci_annotations: int = 0,
-        expert_annotations: int = 0,
         biigle_volume_id: Optional[str] = None,
-    ):
-        """Upserts a deployment record."""
+    ) -> None:
+        """Insert a deployment, or update its metadata if it already exists.
+
+        INSERT-only (ignored on conflict): ml_status, and the citsci/biigle/
+        reporting status columns (set by SQL defaults on insert only).
+        UPDATE-on-conflict: ingest_status, video_path, video_presence,
+        is_bad_deployment, sampling_start, sampling_end, biigle_volume_id.
+        Annotation counts (ml/citsci/expert) are owned by sync_annotation_counts.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO deployments (drop_id, video_path, status, source_status, is_bad_deployment, error_message, sampling_start, sampling_end, ml_annotations, citsci_annotations, expert_annotations, biigle_volume_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO deployments (
+                    drop_id, video_path, video_presence,
+                    ingest_status, ml_status,
+                    is_bad_deployment, sampling_start, sampling_end,
+                    biigle_volume_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
-                    status=excluded.status,
-                    source_status=excluded.source_status,
+                    video_presence=excluded.video_presence,
+                    ingest_status=excluded.ingest_status,
                     is_bad_deployment=excluded.is_bad_deployment,
-                    error_message=excluded.error_message,
                     sampling_start=excluded.sampling_start,
                     sampling_end=excluded.sampling_end,
-                    -- ml_annotations and citsci_annotations are owned by sync_annotation_counts;
-                    -- ingestion must not overwrite them (ingestion always passes 0 for these).
-                    expert_annotations=excluded.expert_annotations,
                     biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id)
-            """,
+                """,
                 (
                     drop_id,
                     video_path,
-                    status,
-                    source_status,
+                    video_presence,
+                    ingest_status,
+                    ml_status,
                     is_bad_deployment,
-                    error_message,
                     sampling_start,
                     sampling_end,
-                    ml_annotations,
-                    citsci_annotations,
-                    expert_annotations,
                     biigle_volume_id,
                 ),
             )
             conn.commit()
 
-    def update_status(self, drop_id: str, new_status: str):
-        """Updates the status of a specific deployment.
-        If transitioning away from ERROR, clears any PIPELINE_ERROR rows from validation_errors.
+    def _validate_column(self, column: str) -> None:
+        """Rejects any column name not in the deployments table schema.
+
+        Caller-supplied column names (section, prerequisite keys) MUST be
+        checked against the real schema before being interpolated into SQL.
+        The allowed set is derived from `PRAGMA table_info(deployments)` at
+        init time — there is no hand-maintained list to drift from the schema.
         """
+        if column not in self._deployments_columns:
+            raise ValueError(
+                f"Invalid column name {column!r}. "
+                f"Allowed: {sorted(self._deployments_columns)}"
+            )
+
+    def update_section_status(self, drop_id: str, section: str, new_status: str):
+        """Updates a specific status column for a deployment.
+
+        When transitioning out of the section's ERROR value, clears that
+        section's rows from validation_errors so a retry starts clean. This
+        is the low-level setter — bypasses transition validation. Pipeline
+        code should use `advance_status()` instead.
+        """
+        self._validate_column(section)
+        status_cls = SECTIONS.get(section)
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # Check current status before updating
+
             cursor.execute(
-                "SELECT status FROM deployments WHERE drop_id = ?", (drop_id,)
+                f"SELECT {section} FROM deployments WHERE drop_id = ?", (drop_id,)
             )
             row = cursor.fetchone()
-            current_status = row["status"] if row else None
+            current_status = row[section] if row else None
+
             cursor.execute(
-                "UPDATE deployments SET status = ? WHERE drop_id = ?",
+                f"UPDATE deployments SET {section} = ? WHERE drop_id = ?",
                 (new_status, drop_id),
             )
-            # If we're moving away from ERROR, clear the PIPELINE_ERROR entries for this drop
-            # TODO: confirm this is wanted — clearing errors on status transition means
-            # re-running a drop that previously errored will always start with a clean slate.
-            if current_status == "ERROR" and new_status != "ERROR":
+
+            # If we're leaving an error state, clear this section's errors.
+            # `ingest_status` has no ERROR value so status_cls can be None.
+            if (
+                status_cls is not None
+                and current_status == status_cls.ERROR
+                and new_status != status_cls.ERROR
+            ):
                 cursor.execute(
-                    "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
-                    (drop_id,),
-                )
-                logging.info(
-                    f"Cleared PIPELINE_ERROR entries for {drop_id} (status reset to {new_status})"
+                    "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = ?",
+                    (drop_id, status_cls.ERROR),
                 )
             conn.commit()
 
-    def advance_status(self, drop_id: str, to_status: str) -> None:
-        """Transition drop_id to to_status, validating against VALID_TRANSITIONS.
+    def advance_status(self, drop_id: str, section: str, to_status: str) -> None:
+        """Validated state-machine transition for any section.
 
-        Raises InvalidTransitionError if the transition is not permitted.
-        Use update_status() directly only for admin/test tooling that needs to
-        set arbitrary statuses (set_status.py, test_setup.py, conftest.py).
+        Looks up the status class from the SECTIONS registry, checks that
+        the target transition is in VALID_TRANSITIONS, and delegates the
+        write to `update_section_status`. Raises `InvalidTransitionError`
+        for disallowed moves, `KeyError` for unknown drop_ids, and
+        `ValueError` for unknown section column names.
+
+        Usage:
+            db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
         """
+        if section not in SECTIONS:
+            raise ValueError(f"Unknown section {section!r}. Known: {sorted(SECTIONS)}")
+        status_cls = SECTIONS[section]
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT status FROM deployments WHERE drop_id = ?", (drop_id,)
+                f"SELECT {section} FROM deployments WHERE drop_id = ?", (drop_id,)
             )
             row = cursor.fetchone()
             if row is None:
                 raise KeyError(f"No deployment found with drop_id={drop_id!r}")
-            current = row["status"]
+            current = row[section]
 
-        # ON_HOLD can transition to any status (it's a pause state, not a terminal)
-        if current != PipelineStatus.ON_HOLD:
-            allowed = PipelineStatus.VALID_TRANSITIONS.get(current, set())
-            if to_status not in allowed:
-                raise InvalidTransitionError(
-                    f"{drop_id}: invalid transition {current!r} → {to_status!r}. "
-                    f"Allowed from {current!r}: {sorted(allowed) if allowed else '(none)'}"
-                )
-
-        self.update_status(drop_id, to_status)
+        allowed = status_cls.VALID_TRANSITIONS.get(current, set())
+        if to_status not in allowed:
+            raise InvalidTransitionError(
+                f"{drop_id}: invalid {status_cls.__name__} transition "
+                f"{current!r} → {to_status!r}"
+            )
+        self.update_section_status(drop_id, section, to_status)
 
     def update_deployment_fields(self, drop_id: str, **fields) -> bool:
-        """Update arbitrary columns on a deployment record. Returns False if drop_id not found."""
+        """Update metadata columns on a deployment record. Returns False if drop_id not found."""
         allowed = {
-            "status",
-            "source_status",
+            "ingest_status",
+            "video_path",
+            "video_presence",
+            "priority",
             "sampling_start",
             "sampling_end",
-            "video_path",
             "is_bad_deployment",
-            "error_message",
             "biigle_volume_id",
         }
         invalid = set(fields) - allowed
@@ -302,24 +376,99 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def get_deployments_by_status(self, status: str) -> List[Dict[str, Any]]:
-        """Returns all deployments currently in the given status."""
+    def get_deployments_by_section_status(
+        self, section: str, status: str
+    ) -> List[Dict[str, Any]]:
+        """Returns all deployments where a specific section matches the given status."""
+        self._validate_column(section)
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM deployments WHERE status = ?", (status,))
+            cursor.execute(
+                f"SELECT * FROM deployments WHERE {section} = ? ORDER BY priority DESC",
+                (status,),
+            )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_deployments_by_statuses(self, statuses: List[str]) -> List[Dict[str, Any]]:
-        """Returns all deployments currently in any of the given statuses."""
+    def get_deployments_by_section_statuses(
+        self, section: str, statuses: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Returns all deployments where a specific section is in the given statuses."""
+        self._validate_column(section)
         if not statuses:
             return []
         placeholders = ", ".join(["?"] * len(statuses))
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"SELECT * FROM deployments WHERE status IN ({placeholders})", statuses
+                f"SELECT * FROM deployments WHERE {section} IN ({placeholders}) ORDER BY priority DESC",
+                statuses,
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_deployments_eligible(
+        self,
+        section: str,
+        statuses: List[str],
+        prerequisites: Optional[Dict[str, str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Returns deployments eligible for processing by a pipeline stage.
+
+        Filters to ingest_status='ok' (excludes bad/errored/removed deployments),
+        checks that `section` is in `statuses`, and optionally checks additional
+        column=value prerequisites (e.g. ml_status='complete' for zooniverse-clips).
+
+        Always orders by priority DESC so high-priority drops are processed first.
+        """
+        self._validate_column(section)
+        if not statuses:
+            return []
+        placeholders = ", ".join(["?"] * len(statuses))
+        params: List[Any] = list(statuses)
+        where = [f"{section} IN ({placeholders})", "ingest_status = 'ok'"]
+        if prerequisites:
+            for col, val in prerequisites.items():
+                self._validate_column(col)
+                where.append(f"{col} = ?")
+                params.append(val)
+        query = f"SELECT * FROM deployments WHERE {' AND '.join(where)} ORDER BY priority DESC"
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_biigle_volumes_awaiting_sync(
+        self, biigle_status: str
+    ) -> List[Dict[str, Any]]:
+        """Returns deployments that have a Biigle volume assigned AND are in the given biigle_status.
+
+        Used by the Biigle annotation-sync stage to find volumes that have been
+        uploaded but not yet marked complete. Deliberately does NOT filter by
+        `ingest_status='ok'` — a deployment can be excluded *after* its Biigle
+        volume was created, and we still want to sync back any annotations the
+        experts produced before it was flagged.
+        """
+        self._validate_column(
+            "biigle_status"
+        )  # defense in depth even with hardcoded value
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT drop_id, biigle_volume_id
+                FROM deployments
+                WHERE biigle_volume_id IS NOT NULL
+                  AND biigle_status = ?
+                """,
+                (biigle_status,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_max_priority(self) -> int:
+        """Returns the current maximum priority value across all deployments (0 if none set)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(priority), 0) FROM deployments")
+            return cursor.fetchone()[0]
 
     def get_deployment(self, drop_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific deployment by drop_id."""
@@ -345,22 +494,19 @@ class DatabaseManager:
         """Fetch all deployment records and return them as a dictionary {drop_id: record}."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM deployments")
+            cursor.execute("SELECT * FROM deployments ORDER BY priority DESC")
             return {row["drop_id"]: dict(row) for row in cursor.fetchall()}
 
     def clear_pipeline_errors(self, drop_id: str):
-        """Remove all PIPELINE_ERROR rows from validation_errors for a specific drop.
-        Call this when manually fixing a drop and retrying it.
-        (This is also called automatically by update_status when moving away from ERROR.)
-        """
+        """Remove all pipeline errors (we now just delete all for drop_id to restart)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = 'PIPELINE_ERROR'",
+                "DELETE FROM validation_errors WHERE DropID = ?",
                 (drop_id,),
             )
             conn.commit()
-            logging.info(f"Cleared PIPELINE_ERROR entries for {drop_id}")
+            logging.info(f"Cleared errors entries for {drop_id}")
 
     def clear_validation_errors(self):
         """Clears all validation errors from the database."""
@@ -369,8 +515,46 @@ class DatabaseManager:
             cursor.execute("DELETE FROM validation_errors")
             conn.commit()
 
-    def add_validation_errors(self, errors: List[Dict[str, Any]]):
-        """Bulk inserts validation errors."""
+    def add_validation_error(
+        self,
+        *,
+        survey_id: str,
+        drop_id: str,
+        error_type: str,
+        column_name: str,
+        error_message: str,
+        file_name: str = "",
+        invalid_value: str = "",
+    ) -> None:
+        """Insert a single validation error with explicit named fields.
+
+        Typed wrapper around `add_validation_errors` for the common case of
+        recording one error at a time (e.g. an ML inference failure). Forces
+        keyword-only arguments so the field mapping can't be accidentally
+        positional.
+        """
+        self.add_validation_errors(
+            [
+                {
+                    "SurveyID": survey_id,
+                    "DropID": drop_id,
+                    "ErrorType": error_type,
+                    "FileName": file_name,
+                    "ColumnName": column_name,
+                    "ErrorMessage": error_message,
+                    "InvalidValue": invalid_value,
+                }
+            ]
+        )
+
+    def add_validation_errors(self, errors: List[Dict[str, Any]]) -> None:
+        """Bulk insert validation errors.
+
+        Each dict must have keys: SurveyID, DropID, ErrorType, FileName,
+        ColumnName, ErrorMessage, InvalidValue. For single-error inserts
+        prefer `add_validation_error()` which validates the field names
+        at the call site.
+        """
         if not errors:
             return
         with self.get_connection() as conn:
@@ -385,13 +569,12 @@ class DatabaseManager:
             conn.commit()
 
     def get_all_validation_errors(self) -> List[Dict[str, Any]]:
-        """Returns all stored validation errors, including deployment status where possible."""
+        """Returns all stored validation errors (updated to not fetch global status)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             query = """
-                SELECT v.SurveyID, v.DropID, v.ErrorType, v.FileName, v.ColumnName, v.ErrorMessage, v.InvalidValue, d.status
+                SELECT v.SurveyID, v.DropID, v.ErrorType, v.FileName, v.ColumnName, v.ErrorMessage, v.InvalidValue
                 FROM validation_errors v
-                LEFT JOIN deployments d ON v.DropID = d.drop_id
             """
             cursor.execute(query)
             return [dict(row) for row in cursor.fetchall()]
@@ -427,7 +610,6 @@ class DatabaseManager:
             cursor.execute(query, params)
             results = cursor.fetchall()
 
-        # Group results by drop_id
         counts_by_drop = {
             d: {"ml": 0, "expert": 0, "citsci": 0} for d in (drop_ids or [])
         }
@@ -446,7 +628,6 @@ class DatabaseManager:
             elif source == "citsci":
                 counts_by_drop[drop_id]["citsci"] = count
 
-        # Update main DB
         with self.get_connection() as conn:
             cursor = conn.cursor()
             for drop_id, counts in counts_by_drop.items():

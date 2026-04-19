@@ -2,7 +2,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-from utils import check_password, render_sidebar_refresh, sync_db_if_needed
+from utils import render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.database.manager import DatabaseManager
 
@@ -18,13 +18,6 @@ def load_error_data():
     except Exception as e:
         st.error(f"Error loading validation errors: {e}")
         return pd.DataFrame()
-
-
-# --- Load file differences (Mocked for now since state machine handles this) ---
-@st.cache_data(ttl=1)
-def load_file_differences():
-    """Returns empty lists since File Presence is handled via pipeline Status."""
-    return [], []
 
 
 # --- Display functions ---
@@ -87,15 +80,12 @@ def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None)
         hide_index=True,
         column_config={
             "ErrorMessage": st.column_config.TextColumn("Message", width="large"),
-            "status": st.column_config.TextColumn("Deployment Status"),
         },
     )
 
 
 def main():
     st.set_page_config(page_title="Error Review", page_icon="🔍", layout="wide")
-    if not check_password():
-        st.stop()
 
     # --- Sidebar ---
     render_sidebar_refresh()
@@ -116,22 +106,14 @@ def main():
     # Move filters up so they affect all subsequent charts
     st.header("📈 Overview")
 
-    fcol1, fcol2 = st.columns(2)
-    with fcol1:
-        show_sampling_errors = st.checkbox("Show Sampling Errors", value=False)
-    with fcol2:
-        show_complete = st.checkbox("Show Complete", value=False)
+    show_sampling_errors = st.checkbox("Show Sampling Errors", value=False)
 
-    # Apply global filters
     errors_df = raw_errors_df.copy()
     if not show_sampling_errors and "ColumnName" in errors_df.columns:
         errors_df = errors_df[
             ~errors_df["ColumnName"].isin(["SamplingStart", "SamplingEnd"])
         ]
-    if not show_complete and "status" in errors_df.columns:
-        errors_df = errors_df[errors_df["status"] != "PIPELINE_COMPLETE"]
 
-    # Now display metrics based on filtered data
     display_error_summary(errors_df)
     st.divider()
 

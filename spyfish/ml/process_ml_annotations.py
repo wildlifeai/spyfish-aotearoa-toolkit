@@ -187,7 +187,7 @@ def _run_qa_visualizations(
     low_conf = maxn_df.nsmallest(5, config.csv_confidence_agreement_column)
     review_df = pd.concat([top_maxn, low_conf]).drop_duplicates()
 
-    # Map time_of_maxn_seconds back to raw CSV frame numbers
+    # Map TimeOfMaxAbsSeconds back to raw CSV frame numbers
     frame_indices = []
     for t_sec in review_df[config.csv_maxn_time_seconds_column]:
         closest = raw_df.iloc[(raw_df["time_seconds"] - t_sec).abs().argsort()[:1]]
@@ -256,7 +256,7 @@ def run_post_ml(
         drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
         drop_annotations_dir.mkdir(parents=True, exist_ok=True)
         raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
-        maxn_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_maxn.csv")
+        maxn_csv = str(config.get_maxn_csv_path(drop_id, model_name))
 
         # Read raw CSV once — shared by process_maxn and draw_frames lookup
         if not Path(raw_csv).exists():

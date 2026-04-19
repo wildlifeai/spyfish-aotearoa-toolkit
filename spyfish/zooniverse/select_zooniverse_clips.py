@@ -33,8 +33,8 @@ def _select_all_clips(
         {
             config.drop_id_column: drop_id,
             config.csv_sampling_start_column: sampling_start,
-            config.csv_clip_start_column: float(s) - sampling_start,
-            config.csv_clip_end_column: float(s) - sampling_start + clip_length,
+            config.csv_clip_start_absolute_column: float(s),
+            config.csv_clip_end_absolute_column: float(s) + clip_length,
             config.csv_clip_max_time_column: float(s),
             config.csv_scientific_name_column: "All",
             "SelectionReason": "Full Video Sample",
@@ -92,26 +92,9 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
 
     df = pd.read_csv(maxn_csv_path)
 
-    # Health Check Handling (Zooniverse specific)
     if df.empty:
-        logging.info(f"Empty MaxN CSV for {drop_id}. Generating health check clips.")
-        selector = ClipSelector(drop_id, sampling_start, config.clip_length)
-        duration = sampling_end - sampling_start
-        if duration > 0:
-            # Center each clip in its band (i + 0.5) so we get exactly health_check_count
-            # clips and none lands at sampling_end (which would produce a truncated ffmpeg clip).
-            interval_step = duration / config.health_check_count
-            for i in range(config.health_check_count):
-                t = sampling_start + interval_step * (i + 0.5)
-                selector.add_interval(
-                    {
-                        config.csv_time_seconds_column: t,
-                        config.csv_max_interval_column: 0,
-                        config.csv_confidence_agreement_column: 1.0,
-                    },
-                    reason="Health Check (Empty Video)",
-                )
-        selections_df = selector.finalize_df()
+        logging.info(f"Empty MaxN CSV for {drop_id}. All clips will be health checks.")
+        selections_df = pd.DataFrame()
     else:
         # Convert human-readable time to seconds
         df[config.csv_time_seconds_column] = df[config.csv_maxn_time_column].apply(
@@ -136,6 +119,58 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
             video_start_threshold=config.video_start_threshold,
             clip_cap=config.clip_cap,
         )
+
+    # Top up with evenly-spaced health check clips if below the minimum.
+    # This fires for both empty MaxN CSVs AND sparse videos where the ML
+    # strategy produced too few clips for meaningful volunteer coverage.
+    min_clips = config.min_clips_per_video
+    if len(selections_df) < min_clips:
+        n_needed = min_clips - len(selections_df)
+        logging.info(
+            f"Only {len(selections_df)} clips from ML strategy — "
+            f"topping up with {n_needed} health check clips to reach {min_clips}."
+        )
+        selector = ClipSelector(drop_id, sampling_start, config.clip_length)
+
+        # Register existing clips so health checks don't overlap them
+        for _, row in selections_df.iterrows():
+            selector.add_interval(
+                {
+                    config.csv_time_seconds_column: row[
+                        config.csv_clip_max_time_column
+                    ],
+                    config.csv_max_interval_column: row.get(
+                        config.csv_max_interval_column, 0
+                    ),
+                    config.csv_confidence_agreement_column: row.get(
+                        config.csv_confidence_agreement_column, 1.0
+                    ),
+                },
+                reason=row.get("SelectionReason", "ML Strategy"),
+            )
+
+        # Fill remaining slots with evenly-spaced clips
+        duration = sampling_end - sampling_start
+        if duration > 0:
+            # Generate more candidates than needed so we can skip overlaps
+            n_candidates = min_clips * 2
+            interval_step = duration / n_candidates
+            added = 0
+            for i in range(n_candidates):
+                if added >= n_needed:
+                    break
+                t = sampling_start + interval_step * (i + 0.5)
+                if selector.add_interval(
+                    {
+                        config.csv_time_seconds_column: t,
+                        config.csv_max_interval_column: 0,
+                        config.csv_confidence_agreement_column: 1.0,
+                    },
+                    reason="Health Check",
+                ):
+                    added += 1
+
+        selections_df = selector.finalize_df()
 
     Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
     selections_df.to_csv(output_selections_path, index=False)

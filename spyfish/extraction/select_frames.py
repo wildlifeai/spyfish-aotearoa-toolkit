@@ -4,8 +4,26 @@ Strategy-based frame selection from a raw ML CSV.
 Groups raw detections by frame to compute per-frame count and mean confidence,
 then applies the binary/multiclass export strategy with an optional multiplier
 to scale counts up and tighten temporal spacing for denser frame coverage.
+
+TODO — frame selection pipeline position is unresolved (in progress):
+  The current implementation selects frames directly from the raw ML CSV and
+  does NOT use volunteer clip classifications from Zooniverse at all. That
+  means the `zooniverse-images` stage (citsci_status: clips_uploaded →
+  frames_uploaded) is only ordered after `zooniverse-clips` by convention —
+  there is no data dependency on clip classifications.
+
+  Open design question: where should frame selection actually live?
+    1. Remove the stage entirely — frames come from the biigle-upload path only.
+    2. Move it to run right after `--ml` (no citsci ordering at all).
+    3. Keep it after clip classifications but actually consume volunteer clip
+       MaxN data to narrow the frame candidates (requires real data dependency).
+
+  Revisit this when the Zooniverse retirement gate (CLIPS_DONE / FRAMES_DONE)
+  is wired — at that point the choice between (1), (2), (3) will be easier to
+  make. See CitSciStatus in spyfish/config/base.py for the retirement-gate TODO.
 """
 
+import bisect
 import logging
 from pathlib import Path
 
@@ -66,15 +84,33 @@ def _select_frames_with_strategy(
         / frame_df[config.csv_confidence_agreement_column]
     )
 
-    selected_times: list[float] = []
+    # Kept in sorted order so the spacing check is O(log n) via bisect instead
+    # of O(n) by scanning every previously-selected time. Frame selection can
+    # consider thousands of candidates on dense videos, so the quadratic form
+    # was the hot path.
+    selected_times_sorted: list[float] = []
     rows: list[dict] = []
 
     def _spaced(t: float, spacing: float) -> bool:
-        return all(abs(t - s) >= spacing for s in selected_times)
+        """True iff t is at least `spacing` seconds from every selected time.
+
+        Uses bisect to find the insertion point and checks only the two
+        immediate neighbors (left and right). Sorted order means no other
+        time can be closer than those neighbors.
+        """
+        idx = bisect.bisect_left(selected_times_sorted, t)
+        if idx > 0 and t - selected_times_sorted[idx - 1] < spacing:
+            return False
+        if (
+            idx < len(selected_times_sorted)
+            and selected_times_sorted[idx] - t < spacing
+        ):
+            return False
+        return True
 
     def _add(row, reason: str):
         t = float(row[time_col])
-        selected_times.append(t)
+        bisect.insort(selected_times_sorted, t)
         rows.append(
             {
                 config.drop_id_column: drop_id,
