@@ -35,7 +35,7 @@ def upload_frames_to_s3(
         frames_df: DataFrame with a 'FramePath' column (output of extract_frames_from_selections).
                    Rows with None FramePath (extraction failures) are skipped.
         s3_frames_prefix: S3 key prefix for the upload destination, e.g.
-                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/" pragma: allowlist secret
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/"
 
     Returns:
         List of uploaded filenames (basename only, as used in the Biigle volume file list).
