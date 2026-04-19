@@ -44,9 +44,14 @@ def build_class_map_from_species(species_df: pd.DataFrame) -> Dict[str, dict]:
             f"Got: {sorted(species_df.columns)}"
         )
 
+    df = species_df[list(required)].copy()
+    df[APHIA_ID_COL] = pd.to_numeric(
+        df[APHIA_ID_COL].astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce",
+    )
     sorted_df = (
-        species_df[list(required)]
-        .dropna(subset=[APHIA_ID_COL, SCIENTIFIC_NAME_COL])
+        df.dropna(subset=[APHIA_ID_COL, SCIENTIFIC_NAME_COL])
+        .astype({APHIA_ID_COL: "int64"})
         .drop_duplicates(subset=[APHIA_ID_COL])
         .sort_values(APHIA_ID_COL)
         .reset_index(drop=True)

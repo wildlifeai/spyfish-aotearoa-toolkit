@@ -79,29 +79,34 @@ class ValidationConfig(BaseConfig):
     ) -> list[str]:
         """Check that the sampling window looks valid for a BUV deployment.
 
-        Returns a list of error messages (empty = valid). Wire into ingest
-        to set ingest_status=validation_error for bad deployments.
+        Returns a list of error messages (empty = valid).
 
         Rules:
-          - sampling_start=0 on a video longer than expected duration means
-            the ranger didn't set the window → bait-settling footage.
+          - sampling_start=0 means the ranger didn't set the window →
+            bait-settling footage included.
           - sampling_end shorter than (expected duration - buffer) means the
             video is likely corrupted or incomplete.
+          - sampling window (end - start) must not exceed the expected BUV duration.
         """
         errors = []
         expected = self.buv_video_duration_seconds
         buffer = self.sampling_end_buffer_seconds
 
-        if sampling_start == 0 and sampling_end > expected:
+        if sampling_start == 0:
             errors.append(
-                f"{drop_id}: sampling_start=0 on a {sampling_end:.0f}s video — "
-                f"likely missing sampling window metadata."
+                f"{drop_id}: sampling_start=0 — likely missing sampling window metadata."
             )
 
         if sampling_end < (expected - buffer):
             errors.append(
                 f"{drop_id}: sampling_end={sampling_end:.0f}s is shorter than "
                 f"expected ({expected}s - {buffer}s buffer = {expected - buffer}s)."
+            )
+
+        if sampling_end > sampling_start + expected:
+            errors.append(
+                f"{drop_id}: sampling window ({sampling_end - sampling_start:.0f}s) "
+                f"exceeds expected BUV duration ({expected}s)."
             )
 
         return errors

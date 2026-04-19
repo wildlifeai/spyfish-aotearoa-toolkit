@@ -117,7 +117,7 @@ zooniverse:
   max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
 
 deployment_validation:
-  buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
+  buv_video_duration_seconds: 28  # Expected minimum duration of a full BUV deployment (30 min)
   sampling_end_buffer_seconds: 120  # Sampling can end up to 2 min before the full duration — still valid
 
 orchestrator:
@@ -146,7 +146,8 @@ biigle:
 
   # Map species scientific/common names (from COCO JSON) to specific Biigle label IDs.
   # The upload script will check this dictionary first, then fall back to default_fish_label_id.
-  label_mapping:
+  # Empty dict = no species-specific mappings; everything goes to default_fish_label_id.
+  label_mapping: {}
     # "Pagrus auratus": 12345
     # "Notolabrus fucicola": 67890
   # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs

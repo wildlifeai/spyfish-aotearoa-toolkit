@@ -24,6 +24,7 @@ import logging
 import sys
 
 from spyfish.config.base import SECTIONS, IngestStatus
+from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 
 _STATUS_CLASSES = {IngestStatus.COLUMN: IngestStatus, **SECTIONS}
@@ -126,6 +127,25 @@ def main():
             f"'{args.drop_id}' not found in database. Pass --create to insert a new record."
         )
         sys.exit(1)
+
+    # Validate before any DB writes — fail the whole command atomically.
+    start = (
+        args.sampling_start
+        if args.sampling_start is not None
+        else (existing or {}).get("sampling_start")
+    )
+    end = (
+        args.sampling_end
+        if args.sampling_end is not None
+        else (existing or {}).get("sampling_end")
+    )
+    if start is not None and end is not None:
+        errors = config.validate_sampling_window(args.drop_id, float(start), float(end))
+        if errors:
+            for e in errors:
+                logging.error(e)
+            logging.error("No changes applied — fix the values above and rerun.")
+            sys.exit(1)
 
     if not existing and args.create:
         db.add_or_update_deployment(drop_id=args.drop_id)

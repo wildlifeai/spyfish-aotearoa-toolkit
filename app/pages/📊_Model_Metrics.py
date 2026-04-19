@@ -19,7 +19,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-from utils import check_password, render_sidebar_refresh
+from utils import render_sidebar_refresh
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
@@ -195,8 +195,6 @@ def render_promote_button(
 
 def main():
     st.set_page_config(page_title="Model Metrics", page_icon="📊", layout="wide")
-    if not check_password():
-        st.stop()
 
     render_sidebar_refresh()
 

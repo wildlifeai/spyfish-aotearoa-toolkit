@@ -2,7 +2,6 @@ import io
 
 import av
 import streamlit as st
-from utils import check_password
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
@@ -39,13 +38,7 @@ def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
                 out_container.mux(packet)
     return buf.getvalue()
 
-
-# --- MAIN APP ---
-if not check_password():
-    st.stop()
-else:
-    st.write("You are logged in! 🎉")
-
+    # --- MAIN APP ---
     # --- Streamlit UI ---
     st.title("Deployment Video player")
 

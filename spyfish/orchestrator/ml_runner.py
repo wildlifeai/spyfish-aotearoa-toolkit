@@ -62,6 +62,15 @@ class MLRunner:
             if len(valid_indices) >= self.limit:
                 break
 
+            storage_class = df.at[idx, "video_storage_class"]
+            if storage_class in {"GLACIER", "DEEP_ARCHIVE"}:
+                drop_id = df.at[idx, "drop_id"]
+                logging.warning(
+                    f"Skipping {drop_id}: video in {storage_class} — "
+                    f"restore with `aws s3api restore-object` before ML can run."
+                )
+                continue
+
             filename = os.path.basename(path)
             local_path = os.path.join(actual_video_dir, filename)
             s3_uri = f"s3://{self.bucket}/{path}"

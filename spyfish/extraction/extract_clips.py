@@ -18,6 +18,26 @@ from spyfish.config.wrapper import config
 from spyfish.utils import generate_clip_filename
 
 
+def _get_video_duration(video_path: str) -> float:
+    """Return video duration in seconds via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return float(result.stdout.strip())
+
+
 def _build_ffmpeg_clip_cmd(
     video_path: str,
     seek_seconds: float,
@@ -156,6 +176,8 @@ def extract_clips_from_selections(
     output_dir = str(config.get_clips_dir(drop_id))
     os.makedirs(output_dir, exist_ok=True)
 
+    video_duration = _get_video_duration(video_path)
+
     # Calibrate CRF using the highest-MaxN clip — most fish = most detail = largest file.
     # This gives a conservative (worst-case) CRF for the whole batch.
     # The loop's exists() check will skip it — extracted exactly once, no waste.
@@ -216,6 +238,15 @@ def extract_clips_from_selections(
             else seek_seconds + config.clip_length
         )
         clip_duration = clip_end_absolute - seek_seconds
+
+        if seek_seconds + clip_duration > video_duration:
+            logging.warning(
+                f"  [{idx+1}/{len(df)}] skipping clip past EOF: "
+                f"seek={seek_seconds:.1f}s + duration={clip_duration:.1f}s "
+                f"> video_duration={video_duration:.1f}s"
+            )
+            clip_paths.append(None)
+            continue
 
         out_filename = generate_clip_filename(drop_id, clip_duration, seek_seconds)
         out_path = Path(output_dir) / out_filename

@@ -225,16 +225,36 @@ def _sync_deployments_to_db(
             sampling_end = None
             sampling_parse_failed = True
 
+        sampling_window_errors: list[str] = []
+        if not sampling_parse_failed and not is_bad_deployment:
+            sampling_window_errors = config.validate_sampling_window(
+                drop_id, sampling_start, sampling_end
+            )
+
         # Determine ingest_status from data quality checks.
-        # Two sources of VALIDATION_ERROR:
+        # Sources of VALIDATION_ERROR:
         #   - drop was flagged by the validator upstream (structural_error_drops)
         #   - sampling_start / sampling_end couldn't be parsed from the row
+        #   - sampling window is out of range (validate_sampling_window)
         if is_bad_deployment:
             ingest_status = IngestStatus.EXCLUDED
-        elif drop_id in structural_error_drops or sampling_parse_failed:
+        elif (
+            drop_id in structural_error_drops
+            or sampling_parse_failed
+            or sampling_window_errors
+        ):
             ingest_status = IngestStatus.VALIDATION_ERROR
         else:
             ingest_status = IngestStatus.OK
+
+        for msg in sampling_window_errors:
+            db.add_validation_error(
+                survey_id=config.get_survey_id_from_drop(drop_id),
+                drop_id=drop_id,
+                error_type=IngestStatus.VALIDATION_ERROR,
+                column_name="sampling_window",
+                error_message=msg,
+            )
 
         # Determine video_presence from current S3 state.
         # For bad deployments: use NO_VIDEO_BAD_DEP only if the video is truly absent;

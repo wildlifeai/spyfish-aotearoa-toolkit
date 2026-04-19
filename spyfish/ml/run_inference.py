@@ -57,6 +57,13 @@ def run_yolo_inference(
         current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        actual_duration_seconds = total_video_frames / true_fps
+        if sampling_end is not None and sampling_end > actual_duration_seconds:
+            raise ValueError(
+                f"{drop_id}: sampling_end={sampling_end:.0f}s exceeds actual video "
+                f"duration ({actual_duration_seconds:.0f}s). Video may be truncated "
+                f"or sampling window is wrong."
+            )
         end_frame = int(sampling_end * true_fps) if sampling_end else total_video_frames
         end_frame = min(end_frame, total_video_frames)
         total_frames_to_process = max(1, (end_frame - current_frame) // vid_stride)
