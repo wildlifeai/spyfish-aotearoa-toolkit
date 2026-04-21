@@ -74,7 +74,7 @@ paths:
 
 
 ml_inference:
-  limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 2 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
@@ -107,7 +107,7 @@ extraction:
     temporal_spacing_seconds: 10     # Minimum seconds between selected clips
 
 zooniverse:
-  project_id: 14054          # Upload target — single project only
+  project_id: 30327          # Upload target — single project only
   source_project_ids:        # All projects to fetch classifications FROM
     - 14054                  # spyfish-aotearoa main
     - 30327                  # spyfish-aotearoa-ey (EY clone workflow)
