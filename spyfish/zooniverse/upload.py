@@ -37,21 +37,25 @@ def _get_site_reserve_meta(site_id: str) -> dict:
         "ProtectionStatus": site.get(config.protection_status_column, ""),
     }
 
+def _get_uploaded_keys(subject_set) -> set:
+    """Return {(DropID, UplAbsSeconds)} tuples already uploaded to a subject set.
 
-def _get_uploaded_filenames(subject_set) -> set:
-    """Return the set of filenames already uploaded to a subject set.
-
-    Used to skip re-uploading on interrupted runs. Panoptes paginates — we
-    exhaust the iterator to get all subjects.
+    Used to skip re-uploading on interrupted runs. Filename-based dedup does
+    not work because Panoptes rewrites uploads to content-addressed URLs
+    (e.g. .../subject_location/<uuid>.mp4), so the original filename never
+    appears in the location URL. The (DropID, UplAbsSeconds) tuple is set on
+    every subject by `_build_base_subject_meta` and is deterministic per
+    clip/frame, so it survives reruns.
     """
     uploaded = set()
     for subject in Subject.where(subject_set_id=subject_set.id):
-        for loc in subject.raw.get("locations", []):
-            # loc is {"image/jpeg": "https://..."} or {"video/mp4": "..."}
-            for url in loc.values():
-                uploaded.add(
-                    url.split("/")[-1].split("?")[0]
-                )  # strip path + query string
+        meta = subject.metadata or {}
+        drop_id = meta.get("DropID")
+        upl_seconds = meta.get(SubjectKeys.UPL_SECONDS)
+        if drop_id is None or upl_seconds is None:
+            continue
+        # Panoptes returns metadata as strings — normalise both sides.
+        uploaded.add((str(drop_id), str(upl_seconds)))
     if uploaded:
         logging.info(
             f"Found {len(uploaded)} already-uploaded subjects in set — will skip duplicates."
@@ -199,7 +203,7 @@ def _upload_subjects_to_zooniverse(
         subject_set.save()
         logging.info(f"Subject set created: '{set_name}'")
 
-    already_uploaded = _get_uploaded_filenames(subject_set)
+    already_uploaded = _get_uploaded_keys(subject_set)
 
     new_subjects = []
     for _, row in uploadable.iterrows():
@@ -209,7 +213,8 @@ def _upload_subjects_to_zooniverse(
                 f"{kind.noun_singular.capitalize()} file missing, skipping: {file_path.name}"
             )
             continue
-        if file_path.name in already_uploaded:
+        upl_seconds = kind.upl_seconds_fn(row)
+        if (str(drop_id), str(upl_seconds)) in already_uploaded:
             logging.info(f"  Already uploaded, skipping: {file_path.name}")
             continue
 
@@ -222,7 +227,8 @@ def _upload_subjects_to_zooniverse(
                 site_reserve_meta,
                 subject_type=kind.noun_singular,
             ),
-            SubjectKeys.UPL_SECONDS: kind.upl_seconds_fn(row),
+            SubjectKeys.UPL_SECONDS: upl_seconds,
+
         }
 
         subject = Subject()

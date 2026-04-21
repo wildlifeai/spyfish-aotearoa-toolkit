@@ -182,9 +182,10 @@ def _run_qa_visualizations(
     if raw_df.empty or maxn_df.empty:
         logging.debug(f"Skipping QA frame drawing for {drop_id}: no raw detections.")
         return
+    
 
-    top_maxn = maxn_df.nlargest(5, config.csv_max_interval_column)
-    low_conf = maxn_df.nsmallest(5, config.csv_confidence_agreement_column)
+    top_maxn = maxn_df.nlargest(4, config.csv_max_interval_column)
+    low_conf = maxn_df.nsmallest(4, config.csv_confidence_agreement_column)
     review_df = pd.concat([top_maxn, low_conf]).drop_duplicates()
 
     # Map TimeOfMaxAbsSeconds back to raw CSV frame numbers
@@ -195,17 +196,20 @@ def _run_qa_visualizations(
             continue
         frame_indices.append(int(closest["frame"].iloc[0]))
 
-    # Add 5 evenly-spaced random frames across the full video for general coverage
+    # 4 evenly-spaced random frames across the detected range for general coverage  
     t_min, t_max = raw_df["time_seconds"].min(), raw_df["time_seconds"].max()
     if t_max > t_min:
-        boundaries = np.linspace(t_min, t_max, 6)  # 5 equal bands
-        for i in range(5):
+        boundaries = np.linspace(t_min, t_max, 5)  # 4 equal bands
+        for i in range(4):
             band = raw_df[
                 (raw_df["time_seconds"] >= boundaries[i])
                 & (raw_df["time_seconds"] < boundaries[i + 1])
             ]
             if not band.empty:
                 frame_indices.append(int(band.sample(1)["frame"].iloc[0]))
+    # First and last detected frames — quick visual check on detection coverage  
+    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))                                                           
+    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))  
 
     # Find video file
     video_path = video_dir / f"{drop_id}.mp4"

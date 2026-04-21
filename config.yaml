@@ -57,7 +57,7 @@ paths:
   # Optional: absolute path to an alternate base dir for media downloads (e.g. /tmp/spyfish).
   # Use this for a temp/no-backup location when videos are large or ephemeral.
   # If unset, media resolves to <project_root>/media as before.
-  media_base_dir:
+  media_base_dir: /nesi/nobackup/wildlife03546
 
   # Sub-directories (local and S3 suffixes)
   sub_dirs:
@@ -74,7 +74,7 @@ paths:
 
 
 ml_inference:
-  limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 7 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
@@ -107,7 +107,7 @@ extraction:
     temporal_spacing_seconds: 10     # Minimum seconds between selected clips
 
 zooniverse:
-  project_id: 14054          # Upload target — single project only
+  project_id: 30327          # Upload target — single project only
   source_project_ids:        # All projects to fetch classifications FROM
     - 14054                  # spyfish-aotearoa main
     - 30327                  # spyfish-aotearoa-ey (EY clone workflow)
@@ -130,7 +130,7 @@ ffmpeg:
 
 
 biigle:
-  project_id:  4081        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  project_id:  3711        #  4081 playground 3711 Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
   disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report

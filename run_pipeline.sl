@@ -1,16 +1,14 @@
 #!/bin/bash -e
 
-PROJECT_DIR="/nesi/project/wildlife03546/spyfish-play"
-
 #SBATCH --job-name=run-spyfish-pipeline
 #SBATCH --account=wildlife03546
 #SBATCH --time=12:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
+#SBATCH --partition=genoa
 #SBATCH --gpus-per-node=1
-#SBATCH --output=${PROJECT_DIR}/slurm_logs/run_pipeline_%j.out
-#SBATCH --error=${PROJECT_DIR}/slurm_logs/run_pipeline_%j.err
-
+#SBATCH --output=/nesi/project/wildlife03546/spyfish-play-new/slurm_logs/run_pipeline_%j.out
+#SBATCH --error=/nesi/project/wildlife03546/spyfish-play-new/slurm_logs/run_pipeline_%j.err
 
 
 # Load modules
@@ -24,27 +22,16 @@ module load CUDA/11.8.0
 source /nesi/project/wildlife03546/kso_venv_0627/bin/activate
 
 # Change to script directory
-cd /nesi/project/wildlife03546/spyfish-play
-
-# Create logs directory
-mkdir -p slurm_logs
-
+cd /nesi/project/wildlife03546/spyfish-play-new
 
 # Run video preprocessing with YOLO detection and frame selection
-python run_pipeline.py --step0
-
+python run_pipeline.py --set-targets --ml --zooniverse-clip
+# python run_pipeline.py --set-targets --zooniverse-clip
+# python run_pipeline.py --set-targets --ingest --ml --zooniverse-clip
+# python run_pipeline.py --biigle-upload
 echo ""
 echo "============================================"
 echo "Pipeline complete!"
 echo "============================================"
 echo ""
 
-
-# to create a cron job, you can add the following line to your crontab file
-# by running `crontab -e`:
-
-# #SCRON -A wildlife03546
-# #SCRON -t 00:02:00
-# #SCRON -o /nesi/project/wildlife03546/spyfish-play/scron_test.log
-
-# * * * * * sbatch /nesi/project/wildlife03546/spyfish-play/run_pipeline.sl
