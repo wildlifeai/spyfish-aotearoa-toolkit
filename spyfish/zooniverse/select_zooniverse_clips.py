@@ -154,6 +154,42 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
     )
     selections_df = edge_selector.finalize_df()
 
+    # Guarantee the very-first and very-last clip of the sampling window so
+    # volunteers can sanity-check whether the deployment was good (camera
+    # framing, bait drop, recovery). Done outside the strategy so it survives
+    # the clip_cap and applies to both binary and multiclass paths.
+    edge_selector = ClipSelector(drop_id, sampling_start, config.clip_length)
+    for _, row in selections_df.iterrows():
+        edge_selector.add_interval(
+            {
+                config.csv_time_seconds_column: row[config.csv_clip_max_time_column],
+                config.csv_max_interval_column: row.get(
+                    config.csv_max_interval_column, 0
+                ),
+                config.csv_confidence_agreement_column: row.get(
+                    config.csv_confidence_agreement_column, 1.0
+                ),
+            },
+            reason=row.get("SelectionReason", "ML Strategy"),
+        )
+    edge_selector.add_interval(
+        {
+            config.csv_time_seconds_column: sampling_start,
+            config.csv_max_interval_column: -1,
+            config.csv_confidence_agreement_column: -1.0,
+        },
+        reason="Deployment Start",
+    )
+    edge_selector.add_interval(
+        {
+            config.csv_time_seconds_column: sampling_end - 0.001,
+            config.csv_max_interval_column: -1,
+            config.csv_confidence_agreement_column: -1.0,
+        },
+        reason="Deployment End",
+    )
+    selections_df = edge_selector.finalize_df()
+
     # Top up with evenly-spaced health check clips if below the minimum.
     # This fires for both empty MaxN CSVs AND sparse videos where the ML
     # strategy produced too few clips for meaningful volunteer coverage.

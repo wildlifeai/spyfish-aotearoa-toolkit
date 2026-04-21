@@ -43,7 +43,6 @@ from spyfish.extraction.extract_clips import extract_clips_from_selections
 from spyfish.extraction.extract_frames import extract_frames_from_selections
 from spyfish.extraction.select_frames import select_frames
 from spyfish.log_config import log_header
-from spyfish.ml.process_ml_annotations import run_post_ml
 from spyfish.orchestrator.ingest import check_pending_arrivals, run_ingestion
 from spyfish.orchestrator.legacy_extract import ingest_legacy_expert_annotations
 from spyfish.orchestrator.ml_runner import MLRunner
@@ -115,14 +114,11 @@ def _run_ml() -> None:
         return
 
     all_drop_ids = [t["drop_id"] for t in targets]
+    # MaxN + QA frames are written per-drop inside run_inference_loop, before
+    # each drop is marked ml_complete. finalize_batch_results is only the safety
+    # net for any drops still stuck in ml_running after the loop exits.
     results = runner.run_inference_loop(targets)
     runner.finalize_batch_results(results, all_drop_ids=all_drop_ids)
-
-    if results:
-        run_post_ml(
-            drop_ids=results,
-            video_dir=str(config.media_dir),
-        )
 
 
 def _run_zooniverse_sync_drop(drop_id: str) -> str | None:

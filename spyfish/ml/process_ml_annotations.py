@@ -211,6 +211,10 @@ def _run_qa_visualizations(
     frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))                                                           
     frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))  
 
+    # First and last detected frames — quick visual check on detection coverage
+    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))
+    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))
+
     # Find video file
     video_path = video_dir / f"{drop_id}.mp4"
     if not video_path.exists():
@@ -228,101 +232,119 @@ def _run_qa_visualizations(
     )
 
 
+def process_one_drop(
+    drop_id: str,
+    video_dir: Path,
+    ann_db: AnnotationDatabaseManager,
+    model_name: str,
+    interval: float,
+    base_conf: float,
+    maxn_conf: float,
+    draw_images: bool = True,
+) -> None:
+    """Post-inference processing for a single drop: MaxN + annotation ingest + QA viz.
+
+    QA viz failures are swallowed and logged — they're diagnostic only and must
+    not block the caller from marking the drop complete. MaxN extraction and
+    annotation ingest failures propagate so the caller can mark the drop as
+    errored.
+    """
+    drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
+    drop_annotations_dir.mkdir(parents=True, exist_ok=True)
+    raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
+    maxn_csv = str(config.get_maxn_csv_path(drop_id, model_name))
+
+    if not Path(raw_csv).exists():
+        raise FileNotFoundError(f"Raw CSV not found for {drop_id} at {raw_csv}")
+
+    raw_df = pd.read_csv(raw_csv)
+    maxn_df = process_maxn(
+        raw_df,
+        maxn_csv,
+        drop_id,
+        interval_seconds=interval,
+        confidence_threshold=maxn_conf,
+        model_name=model_name,
+    )
+
+    if maxn_df.empty:
+        logging.warning(
+            f"No MaxN results for {drop_id}. Saving empty CSV for health checks."
+        )
+        maxn_df = pd.DataFrame(
+            columns=[
+                config.drop_id_column,
+                config.csv_scientific_name_column,
+                config.csv_maxn_time_column,
+                config.csv_max_interval_column,
+                config.csv_annotated_by_column,
+                config.csv_interval_annotation_column,
+                config.csv_confidence_agreement_column,
+                config.csv_maxn_time_seconds_column,
+            ]
+        )
+        maxn_df.to_csv(maxn_csv, index=False)
+
+    _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
+
+    if draw_images:
+        try:
+            _run_qa_visualizations(
+                raw_df=raw_df,
+                maxn_df=maxn_df,
+                drop_id=drop_id,
+                video_dir=video_dir,
+                base_conf=base_conf,
+                maxn_conf=maxn_conf,
+                interval=interval,
+                raw_csv_path=raw_csv,
+            )
+        except Exception as e:
+            logging.error(
+                f"QA visualisation failed for {drop_id} (non-fatal): {e}",
+                exc_info=True,
+            )
+
+
 def run_post_ml(
     drop_ids: list,
     video_dir: str,
     draw_images: bool = True,
 ):
     """
-    For each processed drop:
-    1. Extracts MaxN intervals from the raw YOLO CSV
-    2. Optionally draws bounding boxes on the lowest-confidence frames for human QA review
+    Batch entry point — kept for REPL/notebook use. The pipeline now runs the
+    per-drop work inline inside MLRunner.run_inference_loop so that artifacts
+    are written before the drop is marked complete.
 
-    Args:
-        drop_ids: List of DropIDs that were successfully processed by YOLO.
-        video_dir: Directory containing the source video files.
-        draw_images: Whether to draw QA review frames (default: True).
+    For each drop: extracts MaxN, ingests annotations, optionally draws QA frames.
+    Then syncs annotation counts to the main pipeline DB once at the end.
     """
     model_name = Path(config.pipeline_model_path).stem
-
-    # Initialize shared resources
     db = DatabaseManager()
     ann_db = AnnotationDatabaseManager()
-
-    # Pre-fetch configuration values
     interval = config.interval_seconds
     base_conf = config.confidence_threshold
     maxn_conf = config.maxn_confidence_threshold
 
     for drop_id in drop_ids:
         logging.debug(f"Post-ML processing: {drop_id}")
-
-        drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
-        drop_annotations_dir.mkdir(parents=True, exist_ok=True)
-        raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
-        maxn_csv = str(config.get_maxn_csv_path(drop_id, model_name))
-
-        # Read raw CSV once — shared by process_maxn and draw_frames lookup
-        if not Path(raw_csv).exists():
-            logging.warning(f"Raw CSV not found for {drop_id} at {raw_csv}. Skipping.")
-            continue
-
-        raw_df = pd.read_csv(raw_csv)
-        # 1. Extract MaxN (uses higher threshold than base inference)
-        maxn_df = process_maxn(
-            raw_df,
-            maxn_csv,
-            drop_id,
-            interval_seconds=interval,
-            confidence_threshold=maxn_conf,
-            model_name=model_name,
-        )
-
-        if maxn_df.empty:
-            logging.warning(
-                f"No MaxN results for {drop_id}. Saving empty CSV for health checks."
+        try:
+            process_one_drop(
+                drop_id=drop_id,
+                video_dir=Path(video_dir),
+                ann_db=ann_db,
+                model_name=model_name,
+                interval=interval,
+                base_conf=base_conf,
+                maxn_conf=maxn_conf,
+                draw_images=draw_images,
             )
-            # Create a placeholder empty MaxN CSV with the correct headers
-            maxn_df = pd.DataFrame(
-                columns=[
-                    config.drop_id_column,
-                    config.csv_scientific_name_column,
-                    config.csv_maxn_time_column,
-                    config.csv_max_interval_column,
-                    config.csv_annotated_by_column,
-                    config.csv_interval_annotation_column,
-                    config.csv_confidence_agreement_column,
-                    config.csv_maxn_time_seconds_column,
-                ]
+            logging.info(f"  → Post-ML processing complete for: {drop_id}")
+        except Exception as e:
+            logging.error(
+                f"Post-ML processing failed for {drop_id}: {e}", exc_info=True
             )
-            maxn_df.to_csv(maxn_csv, index=False)
 
-        # 2. Ingest into detailed annotations database
-        _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
-
-        if draw_images:
-            # 3. Draw QA visualisations (MaxN timeline + lowest-confidence frames).
-            # Failures here must not block status advancement — QA viz is diagnostic only.
-            try:
-                _run_qa_visualizations(
-                    raw_df=raw_df,
-                    maxn_df=maxn_df,
-                    drop_id=drop_id,
-                    video_dir=Path(video_dir),
-                    base_conf=base_conf,
-                    maxn_conf=maxn_conf,
-                    interval=interval,
-                    raw_csv_path=raw_csv,
-                )
-            except Exception as e:
-                logging.error(
-                    f"QA visualisation failed for {drop_id} (non-fatal): {e}",
-                    exc_info=True,
-                )
-
-        logging.info(f"  → Post-ML processing complete for: {drop_id}")
-
-    # 4. Finally sync all updated drops to the main pipeline DB
     if drop_ids:
         db.sync_annotation_counts(drop_ids)
         logging.info(
