@@ -233,6 +233,9 @@ def _sync_deployments_to_db(
             continue
 
         video_path = str(row.get(video_col, "")).strip()
+        if not video_path:
+            survey_id = config.get_survey_id_from_drop(drop_id)
+            video_path = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
         is_bad_deployment = str(row.get(bad_col, "")).strip() == "True"
 
         try:

@@ -7,7 +7,9 @@ import pandas as pd
 
 from spyfish.config.base import MlStatus, VideoPresence, get_required
 from spyfish.config.wrapper import config
+from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
+from spyfish.ml.process_ml_annotations import process_one_drop
 from spyfish.ml.run_inference import main as run_inference_main
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.utils import validate_model_path
@@ -129,12 +131,19 @@ class MLRunner:
 
         logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
 
+        # Shared resources for per-drop post-ML processing. Initialised once
+        # outside the loop so each iteration reuses the same DB connections.
+        ann_db = AnnotationDatabaseManager()
+        model_name = Path(self.model).stem
+        interval = config.interval_seconds
+        base_conf = config.confidence_threshold
+        maxn_conf = config.maxn_confidence_threshold
+
         success_targets = []
         for row in targets:
+            drop_id = row["drop_id"]
             try:
-                drop_id = row["drop_id"]
                 drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
-                model_name = Path(self.model).stem
                 inference_args = {
                     "drop_id": drop_id,
                     "video_url": row["VideoURL"],
@@ -150,17 +159,32 @@ class MLRunner:
                 }
                 logging.info(f"  → Running ML inference: {drop_id}")
                 run_inference_main(inference_args)
+
+                # Per-drop post-ML: write MaxN + QA frames BEFORE marking complete,
+                # so a crash here leaves the drop in `ml_running` for retry rather
+                # than `ml_complete` with no artifacts on disk.
+                process_one_drop(
+                    drop_id=drop_id,
+                    video_dir=Path(self.video_storage_dir),
+                    ann_db=ann_db,
+                    model_name=model_name,
+                    interval=interval,
+                    base_conf=base_conf,
+                    maxn_conf=maxn_conf,
+                )
+                self.db.sync_annotation_counts([drop_id])
+                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
                 success_targets.append(drop_id)
 
             except Exception as e:
-                logging.error(f"Inference failed for {drop_id}: {e}", exc_info=True)
+                logging.error(f"ML processing failed for {drop_id}: {e}", exc_info=True)
                 self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
                 self.db.add_validation_error(
                     survey_id=config.get_survey_id_from_drop(drop_id),
                     drop_id=drop_id,
                     error_type=MlStatus.ERROR,
                     column_name="ml_inference",
-                    error_message=f"Inference failed: {type(e).__name__}: {e}",
+                    error_message=f"ML processing failed: {type(e).__name__}: {e}",
                 )
 
         return success_targets
@@ -168,37 +192,22 @@ class MLRunner:
     def finalize_batch_results(
         self, successful_drops: List[str], all_drop_ids: List[str] | None = None
     ):
-        """Marks successful drops ml_status=complete. Safety-nets any stuck 'running' drops to 'error'.
+        """Safety net for drops left stuck in `ml_running` after the inference loop.
 
-        Args:
-            successful_drops: Drop IDs that completed inference without error.
-            all_drop_ids: Every drop that was set to 'running' at batch start.
-                          Any still in 'running' after the loop (e.g. process killed
-                          mid-batch) is advanced to 'error' for retry.
+        Status advancement to `ml_complete` now happens inside `run_inference_loop`
+        immediately after each drop's MaxN + QA frames are written, so this only
+        needs to catch drops where the loop's try/except didn't fire (e.g. process
+        killed mid-iteration).
         """
-        if all_drop_ids:
-            for drop_id in set(all_drop_ids) - set(successful_drops):
-                dep = self.db.get_deployment(drop_id)
-                if dep and dep["ml_status"] == MlStatus.RUNNING:
-                    logging.error(
-                        f"Drop {drop_id} is still ml_status=running after batch — advancing to error."
-                    )
-                    self.db.update_section_status(
-                        drop_id, MlStatus.COLUMN, MlStatus.ERROR
-                    )
-
-        if not successful_drops:
-            logging.info("No successful drops to finalize.")
+        if not all_drop_ids:
             return
-
-        logging.info(
-            f"Syncing state for {len(successful_drops)} successfully processed drops..."
-        )
-        for drop_id in successful_drops:
-            self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
-        logging.info(
-            f"Updated {len(successful_drops)} drops to ml_status={MlStatus.COMPLETE!r}."
-        )
+        for drop_id in set(all_drop_ids) - set(successful_drops):
+            dep = self.db.get_deployment(drop_id)
+            if dep and dep["ml_status"] == MlStatus.RUNNING:
+                logging.error(
+                    f"Drop {drop_id} is still ml_status=running after batch — advancing to error."
+                )
+                self.db.update_section_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
 
 
 def main():
