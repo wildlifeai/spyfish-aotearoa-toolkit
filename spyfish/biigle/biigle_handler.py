@@ -355,11 +355,13 @@ class BiigleHandler:
     def get_label_tree_labels(self, tree_id: int) -> List[Dict[str, Any]]:
         """
         Get all labels in a label tree.
-        Uses GET /api/v1/label-trees/{id}/labels
+
+        Biigle's `label-trees/{id}/labels` route is POST-only (create a label).
+        To list, fetch the tree itself and pluck its nested `labels` array.
         """
         try:
-            response = self.api.get(f"label-trees/{tree_id}/labels")
-            return response.json()
+            response = self.api.get(f"label-trees/{tree_id}")
+            return response.json().get("labels", [])
         except Exception as e:
             logging.error(f"Failed to list labels for label tree {tree_id}: {e}")
             raise

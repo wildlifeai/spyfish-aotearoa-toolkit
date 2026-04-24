@@ -55,6 +55,11 @@ class MLConfig(BaseConfig):
         return get_required(self._yaml_config, "training", "")
 
     @property
+    def image_extensions(self) -> tuple:
+        """Canonical image suffixes the pipeline accepts (e.g. ('.jpg', '.jpeg', '.png'))."""
+        return tuple(get_required(self.training_config, "image_extensions", "training"))
+
+    @property
     def training_epochs(self) -> int:
         return int(get_required(self.training_config, "epochs", "training"))
 
@@ -67,6 +72,10 @@ class MLConfig(BaseConfig):
         return int(get_required(self.training_config, "imgsz", "training"))
 
     @property
+    def training_batch(self) -> int:
+        return int(get_required(self.training_config, "batch", "training"))
+
+    @property
     def training_ceiling_pct(self) -> float:
         return float(
             get_required(self.training_config, "class_ceiling_pct", "training")
@@ -75,12 +84,6 @@ class MLConfig(BaseConfig):
     @property
     def training_floor_pct(self) -> float:
         return float(get_required(self.training_config, "class_floor_pct", "training"))
-
-    @property
-    def training_ceiling_max_iterations(self) -> int:
-        return int(
-            get_required(self.training_config, "ceiling_max_iterations", "training")
-        )
 
     @property
     def training_train_pct(self) -> float:
@@ -99,10 +102,45 @@ class MLConfig(BaseConfig):
         return int(get_required(self.training_config, "val_min_images", "training"))
 
     @property
+    def training_min_frames_per_drop(self) -> int:
+        return int(
+            get_required(self.training_config, "min_frames_per_drop", "training")
+        )
+
+    @property
+    def training_oversample_factor(self) -> int:
+        return int(get_required(self.training_config, "oversample_factor", "training"))
+
+    @property
+    def training_oversample_rare_threshold(self) -> float:
+        return float(
+            get_required(self.training_config, "oversample_rare_threshold", "training")
+        )
+
+    @property
     def local_training_dir(self) -> Path:
         return self.project_root / get_required(
             self.training_config, "local_training_dir", "training"
         )
+
+    @property
+    def training_excluded_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "excluded_drops_file", "training"
+        )
+
+    @property
+    def training_excluded_drops(self) -> set:
+        """Parse excluded_drops_file into a set of DropIDs. Empty set if file missing."""
+        path = self.training_excluded_drops_file
+        if not path.exists():
+            return set()
+        excluded = set()
+        for line in path.read_text().splitlines():
+            id_part = line.split("#", 1)[0].strip()
+            if id_part:
+                excluded.add(id_part)
+        return excluded
 
     @property
     def training_results_dir(self) -> Path:

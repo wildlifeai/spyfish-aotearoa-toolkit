@@ -31,28 +31,32 @@ def split_drops_by_survey(
     drop_ids: List[str],
     train_pct: float = 0.80,
     val_pct: float = 0.10,
+    test_pct: float = 0.10,
     seed: int = 42,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     Assign each DropID to train, val, or test while keeping survey representation.
 
-    Strategy:
-      - Group drops by SurveyID.
-      - For surveys with ≥5 drops: donate 1 to val, 1 to test, rest to train.
-      - For surveys with ≥3 drops: donate 1 to val, rest to train.
-      - For surveys with 1-2 drops: all go to train (too small to split).
-      - Print the split before returning for manual review.
+    Strategy (when test_pct > 0):
+      - Surveys with ≥5 drops: donate 1 to val, 1 to test, rest to train.
+      - Surveys with ≥3 drops: donate 1 to val, rest to train.
+      - Surveys with 1-2 drops: all go to train.
+
+    When test_pct == 0 the test donation is skipped entirely: surveys with ≥3
+    drops donate 1 to val and put the rest into train; the returned test_drops
+    list is always empty.
 
     Args:
         drop_ids: List of all drop IDs.
-        train_pct: Target train fraction (used only for the summary printout).
-        val_pct: Target val fraction (used only for the summary printout).
+        train_pct, val_pct: Target fractions (summary printout only).
+        test_pct: If 0, no drops are allocated to test.
         seed: Random seed for reproducibility.
 
     Returns:
         (train_drops, val_drops, test_drops)
     """
     rng = random.Random(seed)
+    include_test = test_pct > 0
 
     # Group by survey
     survey_to_drops: Dict[str, List[str]] = {}
@@ -72,7 +76,7 @@ def split_drops_by_survey(
         drops = survey_to_drops[survey]
         rng.shuffle(drops)
 
-        if len(drops) >= 5:
+        if include_test and len(drops) >= 5:
             val_drops.append(drops[0])
             test_drops.append(drops[1])
             train_drops.extend(drops[2:])
@@ -88,7 +92,7 @@ def split_drops_by_survey(
         f"  Total drops: {total}\n"
         f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}) — target {train_pct:.0%}\n"
         f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}) — target {val_pct:.0%}\n"
-        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {1 - train_pct - val_pct:.0%}\n"
+        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {test_pct:.0%}\n"
         f"====================\n"
     )
 
@@ -114,9 +118,9 @@ def write_split_txt(
     image_paths = []
     for drop_id in drop_ids:
         # Each drop may have multiple frames; match all images for that drop
-        for ext in ("*.jpg", "*.jpeg", "*.png"):
-            image_paths.extend(sorted(images_dir.glob(f"{drop_id}*{ext[1:]}")))
-            image_paths.extend(sorted(images_dir.glob(f"**/{drop_id}*{ext[1:]}")))
+        for ext in config.image_extensions:
+            image_paths.extend(sorted(images_dir.glob(f"{drop_id}*{ext}")))
+            image_paths.extend(sorted(images_dir.glob(f"**/{drop_id}*{ext}")))
 
     # Deduplicate and sort
     image_paths = sorted(set(image_paths))
@@ -192,13 +196,18 @@ def split_data(
     """
     train_pct = config.training_train_pct
     val_pct = config.training_val_pct
+    test_pct = config.training_test_pct
 
     all_drop_ids = balanced_df["DropID"].unique().tolist()
     if len(all_drop_ids) == 0:
         raise ValueError("No drop IDs found in balanced_df — aborting split.")
 
     train_drops, val_drops, test_drops = split_drops_by_survey(
-        all_drop_ids, train_pct=train_pct, val_pct=val_pct, seed=seed
+        all_drop_ids,
+        train_pct=train_pct,
+        val_pct=val_pct,
+        test_pct=test_pct,
+        seed=seed,
     )
 
     print_species_breakdown(balanced_df, train_drops, val_drops, test_drops)

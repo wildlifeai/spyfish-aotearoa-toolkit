@@ -45,22 +45,31 @@ def _extract_timestamp_from_filename(row: pd.Series, fname_col: str) -> Optional
 
 
 def _map_biigle_to_spyfish_schema(
-    row: pd.Series, label_col: str, drop_id: str, timestamp: Optional[str]
+    row: pd.Series,
+    label_col: str,
+    drop_id: str,
+    timestamp: Optional[str],
+    frame_key: str,
 ) -> Tuple[Tuple[str, str], Dict[str, Any]]:
-    """Maps a Biigle annotation row to the Spyfish schema. Returns (aggregation_key, mapped_dict)."""
+    """Maps a Biigle annotation row to the Spyfish schema. Returns (aggregation_key, mapped_dict).
+
+    `frame_key` is used as the per-frame identifier when `timestamp` is None —
+    e.g. for image volumes (like UUID-named uploads) where no clip/frame-seconds
+    pattern is in the filename. Preserves per-frame uniqueness for MaxN aggregation.
+    """
     species = str(row.get(label_col, "unknown_species")).strip()
     if " - " in species:
         parts = species.split(" - ", 1)
         if len(parts) == 2:
             species = parts[1]
 
-    sortable_time = timestamp or ""
+    sortable_time = timestamp or frame_key
     key = (sortable_time, species)
 
     mapped_item = {
         "drop_id": drop_id,
         "scientific_name": species,
-        "time_of_max": timestamp,
+        "time_of_max": timestamp or frame_key,
         "max_interval": 0,
         "annotated_by": "expert",
         "interval_annotation": "",
@@ -70,18 +79,25 @@ def _map_biigle_to_spyfish_schema(
     return key, mapped_item
 
 
-def _aggregate_annotations(
+def aggregate_raw_to_maxn_rows(
     fish_annotations_df: pd.DataFrame, drop_id: str
 ) -> List[Dict[str, Any]]:
-    """Aggregate raw Biigle rows into MaxN counts per timestamp and species."""
+    """Aggregate raw Biigle annotation rows into MaxN rows (one per frame × species).
+
+    Public entry point reused by the Biigle sync pipeline AND by the
+    download-volume bundle synthesizer. Returns a list of dicts using the
+    Spyfish lowercase schema (drop_id, scientific_name, time_of_max, ...);
+    use `maxn_rows_to_df` to rename for CSV output.
+    """
     label_col = "label_name"
     fname_col = "filename"
 
     aggregated_annotations = {}
     for _, row in fish_annotations_df.iterrows():
+        fname = str(row.get(fname_col, ""))
         timestamp = _extract_timestamp_from_filename(row, fname_col)
         key, mapped_item = _map_biigle_to_spyfish_schema(
-            row, label_col, drop_id, timestamp
+            row, label_col, drop_id, timestamp, fname
         )
 
         if key not in aggregated_annotations:
@@ -92,6 +108,25 @@ def _aggregate_annotations(
     annotations_to_add = list(aggregated_annotations.values())
     annotations_to_add.sort(key=lambda x: (x["drop_id"], x["time_of_max"] or ""))
     return annotations_to_add
+
+
+def maxn_rows_to_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Build a MaxN CSV-ready DataFrame from `aggregate_raw_to_maxn_rows` output.
+
+    Renames lowercase schema keys to the canonical CSV column names used
+    downstream by `prepare_from_annotations` (config-driven).
+    """
+    return pd.DataFrame(rows).rename(
+        columns={
+            "drop_id": config.drop_id_column,
+            "scientific_name": config.csv_scientific_name_column,
+            "time_of_max": config.csv_maxn_time_column,
+            "max_interval": config.csv_max_interval_column,
+            "annotated_by": config.csv_annotated_by_column,
+            "interval_annotation": config.csv_interval_annotation_column,
+            "confidence_agreement": config.csv_confidence_agreement_column,
+        }
+    )
 
 
 def sync_biigle_annotations():
@@ -160,7 +195,9 @@ def sync_biigle_annotations():
             logging.info(f"  Raw expert annotations → {raw_path}")
 
             # Aggregate into MaxN counts
-            annotations_to_add = _aggregate_annotations(fish_annotations_df, drop_id)
+            annotations_to_add = aggregate_raw_to_maxn_rows(
+                fish_annotations_df, drop_id
+            )
 
             if not annotations_to_add:
                 logging.info(
@@ -176,17 +213,7 @@ def sync_biigle_annotations():
             ann_db.add_annotations(annotations_to_add)
 
             # Export MaxN CSV per drop
-            maxn_df = pd.DataFrame(annotations_to_add).rename(
-                columns={
-                    "drop_id": config.drop_id_column,
-                    "scientific_name": config.csv_scientific_name_column,
-                    "time_of_max": config.csv_maxn_time_column,
-                    "max_interval": config.csv_max_interval_column,
-                    "annotated_by": config.csv_annotated_by_column,
-                    "interval_annotation": config.csv_interval_annotation_column,
-                    "confidence_agreement": config.csv_confidence_agreement_column,
-                }
-            )
+            maxn_df = maxn_rows_to_df(annotations_to_add)
             maxn_path = config.get_biigle_expert_maxn_csv_path(drop_id)
             maxn_df.to_csv(maxn_path, index=False)
             logging.info(f"  Expert MaxN → {maxn_path}")

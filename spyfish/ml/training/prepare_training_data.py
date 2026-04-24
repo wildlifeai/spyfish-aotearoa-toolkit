@@ -4,13 +4,15 @@ prepare_training_data.py — Balance and prepare expert annotations for YOLO tra
 This module is intentionally split into small, composable functions so each step
 can be run and tested independently:
 
-  prepare_from_annotations()   — Load expert annotations from DB, apply ceiling/floor balancing.
+  prepare_from_annotations()   — Load expert annotations, apply trim-dominant + floor.
   make_binary_labels()         — Convert existing multi-class YOLO .txt labels → binary (all → class 0).
   generate_data_yaml()         — Write a YOLO-compatible data.yaml for a given split.
   copy_split_files()           — Copy images + labels into clean train/val/test directory layout.
   compute_species_fractions()  — Utility: per-species fraction of total MaxInterval counts.
-  apply_ceiling()              — Remove least-diverse frames for over-represented species (iterative).
+  trim_dominant_species()      — Anti-monoculture: trim only the most-dominant species if wildly over fair share.
   apply_floor()                — Remap rare species below threshold → "fish".
+  identify_rare_classes()      — Names of species below the oversample threshold.
+  oversample_rare_in_train()   — Replicate rare-class frames in train split (no removal).
 
 Typical usage order:
   1. biigle_to_yolo.py         → writes species labels to labels_dir/
@@ -25,14 +27,16 @@ Usage (standalone):
 """
 
 import argparse
+import json
 import logging
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import yaml
 
+from spyfish.biigle.class_map import load_class_map, load_class_map_by_id
 from spyfish.config.wrapper import config
 
 # ---------------------------------------------------------------------------
@@ -74,110 +78,179 @@ def _print_species_summary(df: pd.DataFrame, label: str = "Dataset") -> None:
 # ---------------------------------------------------------------------------
 
 
-def apply_ceiling(
+def trim_dominant_species(
     df: pd.DataFrame,
     ceiling_pct: float,
-    max_iterations: int = 3,
-    min_rows: Optional[int] = None,
+    min_frames_per_drop: Optional[int] = None,
 ) -> pd.DataFrame:
     """
-    Iteratively remove least-diverse frames for over-represented species.
+    Trim ONLY the single most-dominant species, ONLY if it's wildly over fair share.
 
-    'Least diverse' = frames where the fewest other species are co-present.
-    Removal is at the *frame* level (DropID + TimeOfMax) — individual bboxes
-    cannot be removed without removing the whole frame.
+    Anti-monoculture sanity check, not a balancing pass. Other species — even if
+    technically above ceiling_pct — are left alone. Use class oversampling
+    (`oversample_rare_in_train`) to give rare species more training signal
+    instead of removing dominant-class examples.
 
-    Args:
-        df: Expert annotation DataFrame with 'ScientificName', 'MaxInterval',
-            'DropID', 'TimeOfMax' columns.
-        ceiling_pct: Maximum allowed fraction for any species (e.g. 0.40).
-        max_iterations: Safety cap to prevent infinite loops.
-        min_rows: Minimum viable dataset size after ceiling removal. Defaults to
-            config.training_val_min_images. Removal is skipped (with a warning)
-            if it would reduce the dataset below this threshold.
+    Trigger threshold: `max(ceiling_pct, 2/N)` where N = distinct species count.
+      - N=2 species at 50/50: threshold = 100% → never triggers.
+      - N=3, ceiling=40%: threshold = 66% → only fires for very dominant species.
+      - N=10, ceiling=40%: threshold = 40% → fires whenever any species exceeds ceiling.
 
-    Returns:
-        Filtered DataFrame with ceiling applied.
+    The triggering species is trimmed down to the threshold (not lower).
+    Frames are removed from its most-populated drops first; within each drop,
+    least-diverse frames go first (monoculture). Per-drop floor is enforced.
     """
-    if min_rows is None:
-        min_rows = config.training_val_min_images
+    if min_frames_per_drop is None:
+        min_frames_per_drop = config.training_min_frames_per_drop
 
-    for iteration in range(1, max_iterations + 1):
-        fractions = compute_species_fractions(df)
-        over_ceiling = fractions[fractions > ceiling_pct]
+    fractions = compute_species_fractions(df)
+    if fractions.empty:
+        return df
 
-        if over_ceiling.empty:
-            logging.info(f"Ceiling satisfied after {iteration - 1} iteration(s).")
+    n_species = len(fractions)
+    threshold = max(ceiling_pct, 2.0 / n_species)
+    top_species = fractions.index[0]
+    top_frac = float(fractions.iloc[0])
+
+    if top_frac <= threshold:
+        logging.info(
+            f"No species above trigger threshold ({threshold:.0%} = max of "
+            f"ceiling {ceiling_pct:.0%} and 2/N={2 / n_species:.0%} for {n_species} species). "
+            f"Top species '{top_species}' at {top_frac:.0%} — leaving dataset untouched."
+        )
+        return df.reset_index(drop=True)
+
+    logging.info(
+        f"Trimming dominant species '{top_species}': {top_frac:.0%} → ≤{threshold:.0%}"
+    )
+    df = _trim_species_to_threshold(df, top_species, threshold, min_frames_per_drop)
+    final_frac = float(compute_species_fractions(df).get(top_species, 0.0))
+    logging.info(f"  '{top_species}' now at {final_frac:.0%}")
+    return df.reset_index(drop=True)
+
+
+def _trim_species_to_threshold(
+    df: pd.DataFrame,
+    species: str,
+    threshold: float,
+    min_frames_per_drop: int,
+) -> pd.DataFrame:
+    """Trim `species` frames until its fraction is ≤ threshold (or per-drop floor blocks more)."""
+
+    def still_over():
+        t = df["MaxInterval"].sum()
+        s = df[df["ScientificName"] == species]["MaxInterval"].sum()
+        return t > 0 and (s / t) > threshold
+
+    if not still_over():
+        return df
+
+    species_frames = df[df["ScientificName"] == species][
+        ["DropID", "TimeOfMax"]
+    ].drop_duplicates()
+    drops_by_count = species_frames["DropID"].value_counts()
+
+    frames_removed = 0
+    for drop_id in drops_by_count.index:
+        if not still_over():
             break
 
-        logging.info(
-            f"Ceiling iteration {iteration}: over-represented: {over_ceiling.to_dict()}"
-        )
+        # Rank this drop's species-frames by diversity ASC (monoculture first)
+        drop_species_frames = species_frames[species_frames["DropID"] == drop_id]
+        ranked = []
+        for _, fr in drop_species_frames.iterrows():
+            mask = (df["DropID"] == drop_id) & (df["TimeOfMax"] == fr["TimeOfMax"])
+            ranked.append((int(df[mask]["ScientificName"].nunique()), fr["TimeOfMax"]))
+        ranked.sort()
 
-        for species, fraction in over_ceiling.items():
-            species_frames = df[df["ScientificName"] == species][
-                ["DropID", "TimeOfMax"]
-            ].drop_duplicates()
+        drop_frame_count = df[df["DropID"] == drop_id]["TimeOfMax"].nunique()
 
-            # Score each frame by the number of distinct species it contains (diversity)
-            diversity_scores = []
-            for _, frame_row in species_frames.iterrows():
-                frame_mask = (df["DropID"] == frame_row["DropID"]) & (
-                    df["TimeOfMax"] == frame_row["TimeOfMax"]
-                )
-                diversity_scores.append(
-                    {
-                        "DropID": frame_row["DropID"],
-                        "TimeOfMax": frame_row["TimeOfMax"],
-                        "diversity": int(df[frame_mask]["ScientificName"].nunique()),
-                    }
-                )
+        for _, time_of_max in ranked:
+            if not still_over() or drop_frame_count <= min_frames_per_drop:
+                break
+            mask = (df["DropID"] == drop_id) & (df["TimeOfMax"] == time_of_max)
+            df = df.drop(index=df[mask].index)
+            drop_frame_count -= 1
+            frames_removed += 1
 
-            diversity_df = pd.DataFrame(diversity_scores).sort_values("diversity")
-
-            total = df["MaxInterval"].sum()
-            species_total = df[df["ScientificName"] == species]["MaxInterval"].sum()
-            excess_intervals = max(0, species_total - ceiling_pct * total)
-            if excess_intervals <= 0:
-                continue
-
-            # Remove least-diverse frames until enough intervals are shed
-            removed = 0
-            indices_to_drop = []
-            for _, frame_row in diversity_df.iterrows():
-                frame_mask = (df["DropID"] == frame_row["DropID"]) & (
-                    df["TimeOfMax"] == frame_row["TimeOfMax"]
-                )
-                frame_interval_sum = int(df[frame_mask]["MaxInterval"].sum())
-                indices_to_drop.extend(df[frame_mask].index.tolist())
-                removed += frame_interval_sum
-                if removed >= excess_intervals:
-                    break
-
-            if indices_to_drop:
-                rows_after = len(df) - len(indices_to_drop)
-                if rows_after < min_rows:
-                    logging.warning(
-                        f"  Cannot apply ceiling to '{species}' (was {fraction:.1%}): "
-                        f"removing {len(indices_to_drop)} rows would leave only {rows_after} rows, "
-                        f"below the minimum viable dataset size of {min_rows} "
-                        f"(config training.val_min_images). "
-                        "Training cannot proceed with the current data — collect more annotations "
-                        "or relax the ceiling threshold."
-                    )
-                    continue
-                df = df.drop(index=indices_to_drop)
-                logging.info(
-                    f"  Removed {len(indices_to_drop)} rows (~{removed} intervals) "
-                    f"from '{species}' (was {fraction:.1%})"
-                )
-    else:
+    if frames_removed:
+        logging.info(f"  Removed {frames_removed} frame(s) from '{species}'")
+    elif still_over():
         logging.warning(
-            f"Ceiling not fully resolved after {max_iterations} iterations. "
-            "Consider increasing ceiling_max_iterations in config.yaml."
+            f"  '{species}' still over threshold; limited by "
+            f"{min_frames_per_drop}-frame-per-drop floor."
         )
+    return df
 
-    return df.reset_index(drop=True)
+
+def identify_rare_classes(
+    df: pd.DataFrame,
+    threshold: Optional[float] = None,
+) -> List[str]:
+    """Return species names whose post-balancing fraction is below `threshold`."""
+    if threshold is None:
+        threshold = config.training_oversample_rare_threshold
+    fractions = compute_species_fractions(df)
+    return fractions[fractions < threshold].index.tolist()
+
+
+def oversample_rare_in_train(
+    train_images_dir: Path,
+    train_labels_dir: Path,
+    rare_class_ids: List[int],
+    oversample_factor: int,
+) -> int:
+    """
+    Replicate train-split frames containing any rare class.
+
+    For each .txt label file referencing at least one rare class_id, creates
+    `oversample_factor` additional (image, label) copies with a `_copyN` suffix
+    on the stem. The duplicates are pure file copies — augmentation during
+    training (mosaic, HSV, etc.) provides the variation that prevents
+    memorization.
+
+    Train split only — never call this on val/test.
+
+    Returns the number of duplicate (image, label) pairs created.
+    """
+    if not rare_class_ids or oversample_factor < 1:
+        return 0
+
+    rare_set = set(rare_class_ids)
+    n_dup = 0
+    for label_path in sorted(train_labels_dir.glob("*.txt")):
+        lines = [ln for ln in label_path.read_text().splitlines() if ln.strip()]
+        has_rare = any(int(ln.split()[0]) in rare_set for ln in lines)
+        if not has_rare:
+            continue
+
+        stem = label_path.stem
+        img_path = None
+        for ext in config.image_extensions:
+            p = train_images_dir / (stem + ext)
+            if p.exists():
+                img_path = p
+                break
+        if img_path is None:
+            logging.debug(f"oversample: no image for label {stem}")
+            continue
+
+        for i in range(1, oversample_factor + 1):
+            new_stem = f"{stem}_copy{i}"
+            new_img = train_images_dir / (new_stem + img_path.suffix)
+            new_lbl = train_labels_dir / (new_stem + ".txt")
+            if not new_img.exists():
+                shutil.copy2(img_path, new_img)
+            if not new_lbl.exists():
+                shutil.copy2(label_path, new_lbl)
+            n_dup += 1
+
+    if n_dup:
+        logging.info(
+            f"Oversampled rare classes: {n_dup} duplicate (image, label) "
+            f"pair(s) added to train split"
+        )
+    return n_dup
 
 
 def apply_floor(df: pd.DataFrame, floor_pct: float) -> pd.DataFrame:
@@ -224,28 +297,23 @@ def prepare_from_annotations(
     deployment_data_dir: Optional[Path] = None,
     ceiling_pct: Optional[float] = None,
     floor_pct: Optional[float] = None,
-    ceiling_max_iterations: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Load expert annotations from local CSV files, apply ceiling + floor balancing.
+    Load expert annotations from local CSV files, apply trim-dominant + floor balancing.
 
     Globs for *_biigle_expert_maxn.csv under deployment_data_dir.
     This function is 100% offline and does NOT use the database.
 
     Args:
         deployment_data_dir: Root directory to search for expert CSVs. Defaults to config.deployment_data_dir.
-        ceiling_pct: Max per-species fraction. Defaults to config training.class_ceiling_pct.
-        floor_pct: Min per-species fraction. Defaults to config training.class_floor_pct.
-        ceiling_max_iterations: Safety cap. Defaults to config training.ceiling_max_iterations.
+        ceiling_pct: Anti-monoculture trim threshold. Defaults to config training.class_ceiling_pct.
+        floor_pct: Min per-species fraction (rare → 'fish'). Defaults to config training.class_floor_pct.
 
     Returns:
         (balanced_df, species_class_names)
     """
     ceiling_pct = ceiling_pct or config.training_ceiling_pct
     floor_pct = floor_pct or config.training_floor_pct
-    ceiling_max_iterations = (
-        ceiling_max_iterations or config.training_ceiling_max_iterations
-    )
     deployment_data_dir = deployment_data_dir or config.deployment_data_dir
 
     logging.info(f"Loading expert MaxN annotations from {deployment_data_dir}...")
@@ -269,16 +337,200 @@ def prepare_from_annotations(
         f"Loaded {len(df)} expert MaxN rows from {df['DropID'].nunique()} drops."
     )
 
-    # Ceiling first
-    df = apply_ceiling(df, ceiling_pct, max_iterations=ceiling_max_iterations)
+    excluded = config.training_excluded_drops
+    if excluded:
+        loaded_drops = set(df["DropID"].unique())
+        hit = loaded_drops & excluded
+        if hit:
+            df = df[~df["DropID"].isin(hit)]
+            logging.info(
+                f"Excluded {len(hit)} drop(s) per {config.training_excluded_drops_file.name}: "
+                f"{sorted(hit)}"
+            )
+        stale = excluded - loaded_drops
+        if stale:
+            logging.warning(
+                f"{len(stale)} drop(s) listed in {config.training_excluded_drops_file.name} "
+                f"were not found in loaded annotations (stale entries?): {sorted(stale)}"
+            )
 
-    # Floor after ceiling is stable
+    # Trim only the dominant species (anti-monoculture, not full balance)
+    df = trim_dominant_species(df, ceiling_pct)
+
+    # Floor: merge rare species into 'fish'
     df = apply_floor(df, floor_pct)
 
     _print_species_summary(df, label="Balanced dataset")
 
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
+
+
+# ---------------------------------------------------------------------------
+# Label remapping (unify class IDs across sources)
+# ---------------------------------------------------------------------------
+
+
+def _build_id_remap(
+    src_class_map_path: Path,
+    unified_names: List[str],
+    fallback_species: str = "fish",
+) -> Dict[int, Optional[int]]:
+    """Build {old_id: new_id} by decoding the source map to species names, then
+    looking each up in `unified_names`. Species missing from `unified_names`
+    redirect to `fallback_species` if present, otherwise map to None (dropped).
+    """
+    src_map = load_class_map_by_id(src_class_map_path)
+    unified_ids = {name: idx for idx, name in enumerate(unified_names)}
+    fallback_id = unified_ids.get(fallback_species)
+    return {
+        old_id: unified_ids.get(species, fallback_id)
+        for old_id, species in src_map.items()
+    }
+
+
+def _rewrite_label_file(
+    src_txt: Path, dst_txt: Path, id_remap: Dict[int, Optional[int]]
+) -> None:
+    """Rewrite a single YOLO .txt through id_remap, dropping lines whose class
+    resolves to None."""
+    out_lines = []
+    for line in src_txt.read_text().splitlines():
+        parts = line.strip().split()
+        if len(parts) != 5:
+            continue
+        old_id = int(parts[0])
+        new_id = id_remap.get(old_id)
+        if new_id is None:
+            continue
+        out_lines.append(f"{new_id} " + " ".join(parts[1:]))
+    dst_txt.write_text("\n".join(out_lines))
+
+
+def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str]]:
+    """Find drops with labels + frames but no MaxN CSV (extras from download-volume
+    or manually-dropped datasets).
+
+    Returns (drop_ids, extra_species_names). Extras bypass ceiling/floor balancing
+    by design; their species are unioned into the unified class list so they get
+    their own class IDs rather than falling back to "fish".
+
+    Species detection order:
+      1. Read the raw Biigle CSV if present (authoritative label names).
+      2. Fall back to decoding YOLO class IDs via a class_map.json sidecar in
+         annotations/ — required for Route B (manually-authored labels, no CSV).
+
+    Drops without either are skipped with a warning.
+    """
+    extras: List[str] = []
+    species_set: set[str] = set()
+
+    for labels_dir in deployment_data_dir.glob("**/labels"):
+        drop_dir = labels_dir.parent
+        drop_id = drop_dir.name
+        annotations_dir = drop_dir / "annotations"
+        frames_dir = drop_dir / "frames"
+
+        # Skip if MaxN is present — normal pipeline handles this drop.
+        maxn_suffix = config.biigle_expert_maxn_suffix
+        if annotations_dir.is_dir() and any(annotations_dir.glob(f"*{maxn_suffix}")):
+            continue
+
+        label_files = list(labels_dir.glob("*.txt"))
+        if not label_files:
+            continue
+        if not frames_dir.is_dir() or not any(frames_dir.iterdir()):
+            continue
+
+        # Resolve label names through the class_map (sidecar preferred over global)
+        # so bait/fish bucket aliases route correctly — e.g. "Bait box" → "bait".
+        sidecar = (
+            annotations_dir / "class_map.json" if annotations_dir.is_dir() else None
+        )
+        class_map_path = (
+            sidecar if sidecar and sidecar.exists() else config.class_map_path
+        )
+        if not class_map_path.exists():
+            logging.warning(
+                f"Skipping extra drop {drop_id}: no class_map (sidecar or global) "
+                f"available to resolve labels."
+            )
+            continue
+        name_to_id = load_class_map(class_map_path)
+        id_to_name = load_class_map_by_id(class_map_path)
+
+        drop_species: set[str] = set()
+        raw_suffix = config.biigle_expert_raw_suffix
+        raw_csvs = (
+            list(annotations_dir.glob(f"*{raw_suffix}"))
+            if annotations_dir.is_dir()
+            else []
+        )
+        if raw_csvs:
+            df = pd.read_csv(raw_csvs[0])
+            for label in (
+                df.get("label_name", pd.Series()).dropna().astype(str).unique()
+            ):
+                cid = name_to_id.get(label) or name_to_id.get(label.strip())
+                if cid is None:
+                    logging.warning(
+                        f"  {drop_id}: label {label!r} not in class_map — dropped."
+                    )
+                    continue
+                drop_species.add(id_to_name[cid])
+        else:
+            for lf in label_files:
+                for line in lf.read_text().splitlines():
+                    parts = line.strip().split()
+                    if len(parts) == 5:
+                        try:
+                            cid = int(parts[0])
+                        except ValueError:
+                            continue
+                        if cid in id_to_name:
+                            drop_species.add(id_to_name[cid])
+
+        extras.append(drop_id)
+        species_set.update(drop_species)
+
+    if extras:
+        logging.info(
+            f"discover_extra_drops: {len(extras)} extras → train split "
+            f"(species contributed: {sorted(species_set)})"
+        )
+    return extras, sorted(species_set)
+
+
+def flatten_and_remap_labels(
+    deployment_data_dir: Path,
+    src_class_map_path: Path,
+    unified_names: List[str],
+    dst_dir: Path,
+    fallback_species: str = "fish",
+) -> int:
+    """Walk per-drop `labels/*.txt`, remap class IDs to the unified ordering
+    (index in `unified_names`), write into `dst_dir/<drop_id>/`. Returns file count.
+
+    Per-drop subdir layout decouples the downstream lookup from filename
+    prefixes — works for UUID-stemmed labels (e.g. Biigle web-UI uploads)
+    that don't naturally start with their drop_id.
+    """
+    id_remap = _build_id_remap(src_class_map_path, unified_names, fallback_species)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    n = 0
+    for src_txt in deployment_data_dir.glob("**/labels/*.txt"):
+        drop_id = src_txt.parent.parent.name
+        drop_dst = dst_dir / drop_id
+        drop_dst.mkdir(parents=True, exist_ok=True)
+        _rewrite_label_file(src_txt, drop_dst / src_txt.name, id_remap)
+        n += 1
+
+    logging.info(
+        f"flatten_and_remap_labels: {n} files → {dst_dir}/<drop_id>/ "
+        f"(unified classes: {len(unified_names)})"
+    )
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -310,14 +562,19 @@ def make_binary_labels(
     """
     binary_labels_dir.mkdir(parents=True, exist_ok=True)
 
-    label_files = list(species_labels_dir.glob("*.txt"))
+    # species_labels_dir has per-drop subdirs (from flatten_and_remap_labels);
+    # mirror that structure in binary_labels_dir so copy_split_files() finds them.
+    label_files = list(species_labels_dir.glob("*/*.txt"))
     if not label_files:
         logging.warning(f"No .txt files found in {species_labels_dir}")
         return 0
 
     processed = 0
     for src_path in label_files:
-        dst_path = binary_labels_dir / src_path.name
+        drop_id = src_path.parent.name
+        dst_drop_dir = binary_labels_dir / drop_id
+        dst_drop_dir.mkdir(parents=True, exist_ok=True)
+        dst_path = dst_drop_dir / src_path.name
 
         if dst_path.exists() and not overwrite:
             continue
@@ -336,7 +593,7 @@ def make_binary_labels(
         processed += 1
 
     logging.info(
-        f"make_binary_labels: wrote {processed} binary label files → {binary_labels_dir}"
+        f"make_binary_labels: wrote {processed} binary label files → {binary_labels_dir}/<drop_id>/"
     )
     return processed
 
@@ -384,10 +641,11 @@ def copy_split_files(
     n_images, n_labels = 0, 0
 
     for drop_id in drop_ids:
-        # Find all label files that belong to this drop (stems start with drop_id)
-        drop_labels = [
-            p for p in labels_dir.glob("*.txt") if p.stem.startswith(drop_id)
-        ]
+        # Labels live in labels_dir/<drop_id>/ after flatten_and_remap_labels.
+        drop_labels_dir = labels_dir / drop_id
+        drop_labels = (
+            list(drop_labels_dir.glob("*.txt")) if drop_labels_dir.is_dir() else []
+        )
         if not drop_labels:
             logging.warning(
                 f"No label files found for {drop_id} in {labels_dir} — skipping."
@@ -398,7 +656,7 @@ def copy_split_files(
             # Search only inside canonical 'frames/' directories — exclude qa_frames,
             # zooniverse_frames, biigle_frames, etc.
             img_path = None
-            for ext in (".jpg", ".jpeg", ".png"):
+            for ext in config.image_extensions:
                 for p in images_dir.rglob(lbl_path.stem + ext):
                     if p.parent.name == "frames":
                         img_path = p
@@ -479,6 +737,41 @@ def generate_data_yaml(
 # ---------------------------------------------------------------------------
 
 
+def _write_sidecar_class_map(
+    class_names: List[str],
+    output_dir: Path,
+    source_class_map_path: Optional[Path] = None,
+) -> Path:
+    """Write a class_map.json sidecar next to data.yaml, reordered to match class_names.
+
+    Pulls richer metadata (aphia_id, common_name, aliases) from the source class
+    map when scientific names match; falls back to minimal entries otherwise.
+    """
+    source_lookup: Dict[str, dict] = {}
+    if source_class_map_path and source_class_map_path.exists():
+        registry = json.loads(source_class_map_path.read_text())
+        source_lookup = {e["scientific_name"]: e for e in registry.values()}
+
+    sidecar: Dict[str, dict] = {}
+    for idx, name in enumerate(class_names):
+        src = source_lookup.get(name, {})
+        entry = {
+            "class_id": idx,
+            "aphia_id": src.get("aphia_id"),
+            "scientific_name": name,
+            "common_name": src.get("common_name", name),
+        }
+        if "aliases" in src:
+            entry["aliases"] = src["aliases"]
+        sidecar[str(idx)] = entry
+
+    sidecar_path = output_dir / "class_map.json"
+    with open(sidecar_path, "w") as f:
+        json.dump(sidecar, f, indent=2)
+    logging.info(f"Wrote sidecar class_map → {sidecar_path}")
+    return sidecar_path
+
+
 def assemble_yolo_dataset(
     train_drops: List[str],
     val_drops: List[str],
@@ -489,27 +782,30 @@ def assemble_yolo_dataset(
     class_names: List[str],
     build_binary: bool = True,
     symlink: bool = False,
+    source_class_map_path: Optional[Path] = None,
+    rare_class_names: Optional[List[str]] = None,
+    oversample_factor: Optional[int] = None,
 ) -> Tuple[Path, Optional[Path]]:
     """
     Assemble a complete YOLO dataset (species + optional binary) from pre-split drop lists.
 
     Creates:
-        output_dir/species/{images,labels}/{train,val,test}/   + data.yaml
+        output_dir/species/{images,labels}/{train,val,test}/   + data.yaml + class_map.json
         output_dir/binary/{images,labels}/{train,val,test}/    + data.yaml  (if build_binary=True)
 
-    Internally calls:
-        copy_split_files()     for each split × dataset type
-        make_binary_labels()   to derive binary labels from species labels
-        generate_data_yaml()   for each dataset type
+    Extras (drops discovered via `discover_extra_drops`) should be appended to
+    `train_drops` before calling this function — they flow through the normal
+    per-drop copy loop since they live under `deployment_data/extra_no_survey_id/`.
 
     Args:
         train_drops, val_drops, test_drops: Drop ID lists from split_data().
         images_dir: Source directory of JPEG frames.
-        species_labels_dir: Directory of multi-class YOLO .txt files.
+        species_labels_dir: Directory of multi-class YOLO .txt files (already remapped to `class_names`).
         output_dir: Root output directory.
-        class_names: Ordered species class names.
+        class_names: Ordered species class names (unified ID space).
         build_binary: Also build a binary (fish/no-fish) dataset.
         symlink: Use symlinks instead of copying files.
+        source_class_map_path: Canonical class_map used as metadata source for the sidecar.
 
     Returns:
         (species_data_yaml_path, binary_data_yaml_path) — binary path is None if not built.
@@ -517,7 +813,6 @@ def assemble_yolo_dataset(
     species_dir = output_dir / "species"
     binary_dir = output_dir / "binary"
 
-    # Species dataset
     for split_name, drops in [
         ("train", train_drops),
         ("val", val_drops),
@@ -531,9 +826,26 @@ def assemble_yolo_dataset(
             split_name,
             symlink=symlink,
         )
-    species_yaml = generate_data_yaml(class_names, species_dir)
 
-    # Binary dataset (derived from species labels)
+    # Oversample rare classes in TRAIN split only (species dataset only — binary has 1 class)
+    factor = (
+        oversample_factor
+        if oversample_factor is not None
+        else config.training_oversample_factor
+    )
+    if rare_class_names and factor > 0:
+        rare_ids = [class_names.index(n) for n in rare_class_names if n in class_names]
+        if rare_ids:
+            oversample_rare_in_train(
+                species_dir / "images" / "train",
+                species_dir / "labels" / "train",
+                rare_ids,
+                factor,
+            )
+
+    species_yaml = generate_data_yaml(class_names, species_dir)
+    _write_sidecar_class_map(class_names, species_dir, source_class_map_path)
+
     binary_yaml = None
     if build_binary:
         binary_labels_dir = output_dir / "binary_labels_staging"

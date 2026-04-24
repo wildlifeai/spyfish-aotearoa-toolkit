@@ -1,0 +1,21 @@
+# Drops to exclude from training.
+#
+# Used by spyfish.ml.training.prepare_training_data to filter out DropIDs
+# *before* ceiling/floor balancing and train/val/test splitting. Excluded
+# drops are invisible to the rest of the pipeline — they contribute zero
+# frames, and their species counts don't influence the ceiling math.
+#
+# Format:
+#   - One DropID per line
+#   - Blank lines ignored
+#   - Lines starting with '#' are comments
+#   - Inline comments allowed after '#' on the same line
+#
+# Example:
+#   LDN_20220513_BUV_WWS_001_01   # QA still in progress
+#   ABC_20230101_BUV_XYZ_002_01   # waiting on expert re-annotation
+#   DEF_20240215_BUV_LNM_003_01   # bad lighting — flagged 2026-03-10
+#
+# This file is the canonical list — edit it here and commit. Not in config.yaml.
+
+# --- Excluded DropIDs ---

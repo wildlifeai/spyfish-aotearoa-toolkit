@@ -68,9 +68,6 @@ def _clear_yolo_cache(training_dir: Path) -> None:
             pass
 
 
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
-
-
 def validate_dataset(data_yaml: str) -> None:
     """
     Check that the train and val splits in a YOLO data.yaml are non-empty before training.
@@ -97,7 +94,9 @@ def validate_dataset(data_yaml: str) -> None:
             issues.append(f"  '{split}' directory does not exist: {split_path}")
             continue
         n_images = sum(
-            1 for p in split_path.rglob("*") if p.suffix.lower() in _IMAGE_EXTENSIONS
+            1
+            for p in split_path.rglob("*")
+            if p.suffix.lower() in config.image_extensions
         )
         if n_images == 0:
             issues.append(f"  '{split}' has 0 images in {split_path}")
@@ -120,6 +119,7 @@ def train_model(
     patience: int,
     imgsz: int,
     workers: int = 8,
+    batch: int = 16,
     extra_params: Optional[dict] = None,
 ) -> Path:
     """
@@ -154,7 +154,7 @@ def train_model(
         "data": data_yaml,
         "epochs": epochs,
         "patience": patience,
-        "batch": -1,  # auto-batch
+        "batch": batch,
         "imgsz": imgsz,
         "workers": workers,
         "project": str(project_dir),
@@ -192,6 +192,7 @@ def run_training_pipeline(
     epochs = config.training_epochs
     patience = config.training_patience
     imgsz = config.training_imgsz
+    batch = config.training_batch
 
     base_model_path = config.base_model_path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -219,6 +220,7 @@ def run_training_pipeline(
             epochs=epochs,
             patience=patience,
             imgsz=imgsz,
+            batch=batch,
         )
         results["binary"] = {"local": str(best_pt)}
 
@@ -235,6 +237,7 @@ def run_training_pipeline(
             epochs=epochs,
             patience=patience,
             imgsz=imgsz,
+            batch=batch,
         )
         results["species"] = {"local": str(best_pt)}
 

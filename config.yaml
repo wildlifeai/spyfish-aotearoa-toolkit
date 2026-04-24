@@ -74,7 +74,7 @@ paths:
 
 
 ml_inference:
-  limit_processing: 2 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 5 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
@@ -130,7 +130,7 @@ ffmpeg:
 
 
 biigle:
-  project_id:  4081        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  project_id:  3711        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
   disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
@@ -142,7 +142,7 @@ biigle:
   # Default fish label for ML annotations uploaded to Biigle
   # This is the exact fallback if a species is not found in label_mapping below.
   default_fish_label_id: 531298   # "Fish - review required" label
-  default_label_tree_id: 3375
+  default_label_tree_id: 3511 # 3375
 
   # Map species scientific/common names (from COCO JSON) to specific Biigle label IDs.
   # The upload script will check this dictionary first, then fall back to default_fish_label_id.
@@ -160,17 +160,22 @@ biigle:
   report_download_retry_interval_secs: 2.0
 
 training:
-  epochs: 100
+  image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"]   # canonical image suffixes accepted anywhere in the pipeline
+  epochs: 1
   patience: 25
   imgsz: 640
+  batch: 16                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
   val_min_images: 20
-  train_pct: 0.70
+  train_pct: 0.85
   val_pct: 0.15
-  test_pct: 0.15
+  test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
   class_ceiling_pct: 0.40       # cap any species above 40% — subsample (iterative, max 3 rounds)
   class_floor_pct: 0.02         # merge species below 2% into "fish"
-  ceiling_max_iterations: 3     # safety: never run more than 3 ceiling rounds
+  min_frames_per_drop: 10       # never trim a drop below this total frame count during ceiling
+  oversample_factor: 3                 # extra train-split copies of rare-class frames (0 = disabled)
+  oversample_rare_threshold: 0.05      # classes below this fraction get oversampled in train split
   local_training_dir: "process_files/training"
+  excluded_drops_file: "training_excluded_drops.txt"   # one DropID per line; '#' comments OK
   retrain_min_improvement_pct: 2.0
 
 

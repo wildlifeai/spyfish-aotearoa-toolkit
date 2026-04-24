@@ -132,14 +132,16 @@ All time values in CSVs, databases, and code are absolute seconds from frame 0
 of the source video file. There is no relative-to-sampling-window convention
 anywhere in the pipeline.
 
-| Column                      | Meaning                                     |
-| --------------------------- | ------------------------------------------- |
-| `ClipStartAbsoluteSeconds`  | Where an extracted clip starts in the video |
-| `ClipEndAbsoluteSeconds`    | Where an extracted clip ends                |
-| `TimeOfMaxAbsoluteSeconds`  | Timestamp of a MaxN peak                    |
-| `TimeAbsoluteSeconds`       | Raw ML detection timestamp                  |
-| `SamplingStart`             | First usable frame (set by rangers)         |
-| `SamplingEnd`               | Last usable frame                           |
+
+| Column                     | Meaning                                     |
+| -------------------------- | ------------------------------------------- |
+| `ClipStartAbsoluteSeconds` | Where an extracted clip starts in the video |
+| `ClipEndAbsoluteSeconds`   | Where an extracted clip ends                |
+| `TimeOfMaxAbsoluteSeconds` | Timestamp of a MaxN peak                    |
+| `TimeAbsoluteSeconds`      | Raw ML detection timestamp                  |
+| `SamplingStart`            | First usable frame (set by rangers)         |
+| `SamplingEnd`              | Last usable frame                           |
+
 
 **Rule:** any time column can be passed directly to ffmpeg as a seek position.
 No arithmetic needed at call sites.
@@ -405,7 +407,7 @@ flowchart TD
 
     M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>biigle_status: expert_uploaded → expert_complete"]
 
-    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Balance classes (ceiling 40%, floor 2%)<br/>Split 70/15/15 train/val/test<br/>Train YOLOv12<br/>Evaluate vs base model<br/>Promote if mAP improvement ≥ 2%"]
+    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, trim dominant species, floor merge<br/>Survey-aware 70/15/15 split, oversample rare classes in train<br/>Train YOLOv12 (or sweep variants)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
 
     O --> P["Updated production model<br/>All future inference uses new weights"]
 ```
@@ -576,26 +578,26 @@ erDiagram
 #### `deployments` table columns (`spyfish_pipeline.db`)
 
 
-| Column                | Type      | Description                                                                            |
-| --------------------- | --------- | -------------------------------------------------------------------------------------- |
-| `drop_id`             | TEXT PK   | Unique deployment identifier (`{Reserve}_{YYYYMMDD}_BUV_{Reserve}_{Site}_{Rep}`)       |
-| `ingest_status`       | TEXT      | Data quality: `ok`, `excluded`, `metadata_error`, `validation_error`, `removed`. Only `ok` advances through stages. |
-| `ml_status`           | TEXT      | ML section: `ml_pending`, `ml_ready`, `ml_running`, `ml_complete`, `ml_error`          |
-| `citsci_status`       | TEXT      | Citizen science section: `citsci_pending`, `citsci_clips_uploaded`, `citsci_frames_uploaded`, `citsci_complete`, `citsci_error` |
-| `biigle_status`       | TEXT      | BIIGLE section: `expert_pending`, `expert_uploaded`, `expert_complete`, `expert_error`  |
-| `reporting_status`    | TEXT      | Reporting section: `reporting_pending`, `reporting_complete`, `reporting_error`         |
-| `video_presence`      | TEXT      | `present`, `archived` (DEEP_ARCHIVE — needs restore), `absent`, `no_video_bad_dep`     |
-| `video_path`          | TEXT      | S3 key of the deployment video                                                         |
-| `sampling_start`      | INTEGER   | Start of valid sampling window (seconds) — from PowerApps metadata                    |
-| `sampling_end`        | INTEGER   | End of valid sampling window (seconds)                                                 |
-| `is_bad_deployment`   | BOOLEAN   | Flagged as problematic in source CSV; still tracked through pipeline                  |
-| `priority`            | INTEGER   | Processing priority. Higher = picked up first. Default 0.                              |
-| `ml_annotations`      | INTEGER   | Count of ML annotations — **owned by `sync_annotation_counts()`, never set by ingest** |
-| `citsci_annotations`  | INTEGER   | Count of volunteer annotations — same ownership rule                                  |
-| `expert_annotations`  | INTEGER   | Count of expert annotations                                                            |
-| `biigle_volume_id`    | TEXT      | BIIGLE volume ID, set when the volume is created                                       |
-| `created_at`          | TIMESTAMP | Record creation time                                                                   |
-| `updated_at`          | TIMESTAMP | Last update time                                                                       |
+| Column               | Type      | Description                                                                                                                     |
+| -------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `drop_id`            | TEXT PK   | Unique deployment identifier (`{Reserve}_{YYYYMMDD}_BUV_{Reserve}_{Site}_{Rep}`)                                                |
+| `ingest_status`      | TEXT      | Data quality: `ok`, `excluded`, `metadata_error`, `validation_error`, `removed`. Only `ok` advances through stages.             |
+| `ml_status`          | TEXT      | ML section: `ml_pending`, `ml_ready`, `ml_running`, `ml_complete`, `ml_error`                                                   |
+| `citsci_status`      | TEXT      | Citizen science section: `citsci_pending`, `citsci_clips_uploaded`, `citsci_frames_uploaded`, `citsci_complete`, `citsci_error` |
+| `biigle_status`      | TEXT      | BIIGLE section: `expert_pending`, `expert_uploaded`, `expert_complete`, `expert_error`                                          |
+| `reporting_status`   | TEXT      | Reporting section: `reporting_pending`, `reporting_complete`, `reporting_error`                                                 |
+| `video_presence`     | TEXT      | `present`, `archived` (DEEP_ARCHIVE — needs restore), `absent`, `no_video_bad_dep`                                              |
+| `video_path`         | TEXT      | S3 key of the deployment video                                                                                                  |
+| `sampling_start`     | INTEGER   | Start of valid sampling window (seconds) — from PowerApps metadata                                                              |
+| `sampling_end`       | INTEGER   | End of valid sampling window (seconds)                                                                                          |
+| `is_bad_deployment`  | BOOLEAN   | Flagged as problematic in source CSV; still tracked through pipeline                                                            |
+| `priority`           | INTEGER   | Processing priority. Higher = picked up first. Default 0.                                                                       |
+| `ml_annotations`     | INTEGER   | Count of ML annotations — **owned by `sync_annotation_counts()`, never set by ingest**                                          |
+| `citsci_annotations` | INTEGER   | Count of volunteer annotations — same ownership rule                                                                            |
+| `expert_annotations` | INTEGER   | Count of expert annotations                                                                                                     |
+| `biigle_volume_id`   | TEXT      | BIIGLE volume ID, set when the volume is created                                                                                |
+| `created_at`         | TIMESTAMP | Record creation time                                                                                                            |
+| `updated_at`         | TIMESTAMP | Last update time                                                                                                                |
 
 
 #### `annotations` table columns (`spyfish_annotations.db`)
@@ -652,13 +654,13 @@ validation_error  ml_complete             citsci_frames_uploaded    expert_compl
 
 **Why this replaces the old single linear `status`:** Zooniverse and BIIGLE can run in parallel on the same deployment — the old linear state machine forced an artificial ordering. Errors were ambiguous (`ERROR` didn't say *which* section failed). Legacy deployments that skipped ML had no way to record that without lying about their progress. Splitting into independent sections fixes all three.
 
-**`ON_HOLD` removed.** The old state machine had an `ON_HOLD` state for manually pausing a deployment. It's gone — runtime pausing is now done by omitting a stage flag (`python run_pipeline.py --ml` with no `--biigle-upload`). If a persistent soft-pause flag is ever needed, an `is_paused BOOLEAN` column is less invasive than encoding it into every section's state machine.
+`**ON_HOLD` removed.** The old state machine had an `ON_HOLD` state for manually pausing a deployment. It's gone — runtime pausing is now done by omitting a stage flag (`python run_pipeline.py --ml` with no `--biigle-upload`). If a persistent soft-pause flag is ever needed, an `is_paused BOOLEAN` column is less invasive than encoding it into every section's state machine.
 
 **Error storage.** The old `error_message` column on `deployments` is gone. Errors now live in the `validation_errors` table with section-specific `ErrorType` values: `ML_ERROR`, `CITSCI_ERROR`, `BIIGLE_ERROR`, `PIPELINE_ERROR` (reporting), `VALIDATION_ERROR` (ingest). Each section has a unique error value (`ml_error`, `citsci_error`, `expert_error`, `reporting_error`); `validation_errors` holds the details. `_SECTION_ERROR_TYPES` in `DatabaseManager` maps each section column to its error type so moving out of an error state clears only the matching rows.
 
 **Future cleanup pass:** once `reporting_status = reporting_complete`, any section that never reached its `complete` value (e.g. Zooniverse for a BIIGLE-direct deployment) can be rewritten to its `skipped` value so the dashboard doesn't show ambiguous `pending` states on already-done deployments. Not wired up yet.
 
-**`priority` column.** Integer, default 0, higher = picked first. `get_deployments_eligible()` always applies `ORDER BY priority DESC`. Set per-deployment via `set_status --priority N`, in bulk via the targets CSV + `--set-targets`, or (future) via the Streamlit Deployment Management page.
+`**priority` column.** Integer, default 0, higher = picked first. `get_deployments_eligible()` always applies `ORDER BY priority DESC`. Set per-deployment via `set_status --priority N`, in bulk via the targets CSV + `--set-targets`, or (future) via the Streamlit Deployment Management page.
 
 ---
 
@@ -680,7 +682,7 @@ A deployment is considered **complete** when `biigle_status = expert_complete` O
 
 ### Section state machines
 
-**`ingest_status`** — set at ingestion, never modified by pipeline stages:
+`**ingest_status`** — set at ingestion, never modified by pipeline stages:
 
 ```mermaid
 stateDiagram-v2
@@ -689,7 +691,9 @@ stateDiagram-v2
     [*] --> validation_error : CSV structural error
 ```
 
-**`ml_status`** — ML inference section:
+
+
+`**ml_status**` — ML inference section:
 
 ```mermaid
 stateDiagram-v2
@@ -701,7 +705,9 @@ stateDiagram-v2
     ml_error --> ml_ready : Retry after fix
 ```
 
-**`citsci_status`** — Citizen science section:
+
+
+`**citsci_status**` — Citizen science section:
 
 ```mermaid
 stateDiagram-v2
@@ -723,9 +729,11 @@ stateDiagram-v2
     citsci_error --> citsci_frames_uploaded : Retry
 ```
 
+
+
 > **TODO — retirement gates:** `citsci_clips_done` and `citsci_frames_done` are defined but **not yet wired**. Today, the pipeline uses the two "bypass" edges (`citsci_clips_uploaded → citsci_frames_uploaded` and `citsci_frames_uploaded → citsci_complete`) because `sync_zooniverse_drop()` reads a single bundled `{drop_id}_zooniverse_maxn.csv` and does not distinguish clip-subject retirement from frame-subject retirement. When the Caesar retirement check is implemented, the sync should split by `subject_type` (already parsed — see `parse_classifications.py` ~line 314), advance `citsci_clips_uploaded → citsci_clips_done` and `citsci_frames_uploaded → citsci_frames_done`, and the two bypass edges in `CitSciStatus.VALID_TRANSITIONS` should be deleted. Full implementation notes in the TODO block on `CitSciStatus` in `spyfish/config/base.py`.
 
-**`biigle_status`** — BIIGLE expert annotation section:
+`**biigle_status`** — BIIGLE expert annotation section:
 
 ```mermaid
 stateDiagram-v2
@@ -736,7 +744,9 @@ stateDiagram-v2
     expert_error --> expert_pending : Retry
 ```
 
-**`reporting_status`** — Reporting section (currently placeholder):
+
+
+`**reporting_status**` — Reporting section (currently placeholder):
 
 ```mermaid
 stateDiagram-v2
@@ -746,20 +756,24 @@ stateDiagram-v2
     reporting_error --> reporting_pending : Retry
 ```
 
+
+
 ### Cross-section prerequisites
 
 Stage eligibility is resolved at query time via `get_deployments_eligible(section, statuses, prerequisites)`. The `prerequisites` dict (or callable) adds extra `AND` conditions to the query. All queries also always filter `ingest_status = 'ok'`.
 
-| Stage              | `section`        | `input_statuses`                   | `prerequisites`                                                                    |
-| ------------------ | ---------------- | ---------------------------------- | -----------------------------------------------------------------------------------|
-| `check-arrivals`   | `ml_status`      | `[ml_pending]`                     | `video_presence = absent`                                                          |
-| `ml`               | `ml_status`      | `[ml_ready]`                       | —                                                                                  |
-| `zooniverse-clips` | `citsci_status`  | `[citsci_pending]`                 | `ml_status = ml_complete`                                                          |
-| `zooniverse-images`| `citsci_status`  | `[citsci_clips_uploaded]`          | —                                                                                  |
-| `biigle-upload`    | `biigle_status`  | `[expert_pending]`                 | `ml_status = ml_complete` OR `citsci_status = citsci_complete` (callable, depends on flags) |
-| `biigle-sync`      | `biigle_status`  | `[expert_uploaded]`                | `biigle_volume_id IS NOT NULL`                                                     |
 
-**Biigle-direct path:** Running `--biigle-upload` without any `--zooniverse-*` flags sets the prerequisite to `ml_status = ml_complete`, bypassing the citizen science loop.
+| Stage               | `section`       | `input_statuses`          | `prerequisites`                                                                             |
+| ------------------- | --------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `check-arrivals`    | `ml_status`     | `[ml_pending]`            | `video_presence = absent`                                                                   |
+| `ml`                | `ml_status`     | `[ml_ready]`              | —                                                                                           |
+| `zooniverse-clips`  | `citsci_status` | `[citsci_pending]`        | `ml_status = ml_complete`                                                                   |
+| `zooniverse-images` | `citsci_status` | `[citsci_clips_uploaded]` | —                                                                                           |
+| `biigle-upload`     | `biigle_status` | `[expert_pending]`        | `ml_status = ml_complete` OR `citsci_status = citsci_complete` (callable, depends on flags) |
+| `biigle-sync`       | `biigle_status` | `[expert_uploaded]`       | `biigle_volume_id IS NOT NULL`                                                              |
+
+
+**Biigle-direct path:** Running `--biigle-upload` without any `--zooniverse-`* flags sets the prerequisite to `ml_status = ml_complete`, bypassing the citizen science loop.
 
 ### Transition rules
 
@@ -942,10 +956,14 @@ Sequenced by dependency, not assigned dates.
 ### Phase 3 — Model Improvement Loop
 
 - BIIGLE annotation → YOLO label conversion
-- Training data balancing (class ceiling 40% + floor 2%)
+- Training data balancing — anti-monoculture trim + floor merge + rare-class oversampling
+- Drop exclusion list (`training_excluded_drops.txt`) for in-progress QA holds
 - YOLOv12 retraining pipeline (train → evaluate → promote)
+- Multi-variant training sweep (`sweep.py`) + auto-generated Markdown report (`sweep_report.py`)
+- Slurm wrapper for NeSI submission (`train_job.sl`)
 - Per-species evaluation metrics surfaced in Streamlit dashboard
 - Formal per-species model promotion tracking
+- Training manifest (per-drop fate audit) — deferred; see §12
 
 ### Phase 4 — User Interaction & Admin
 
@@ -1101,17 +1119,17 @@ python run_pipeline.py --biigle-sync --retrain
 ### Pipeline stage flags
 
 
-| Flag                  | Stage     | Section queried    | Advances                                                                                        |
-| --------------------- | --------- | ------------------ | ----------------------------------------------------------------------------------------------- |
-| `--ingest`            | Step 1    | —                  | Sets `ingest_status` + `video_presence` + `ml_status=ml_ready` when video present               |
-| `--check-arrivals`    | Step 1b   | `ml_status`        | `ml_pending` → `ml_ready` when video found in S3 (requires `video_presence=absent`)             |
-| `--ml`                | Steps 2+3 | `ml_status`        | `ml_ready → ml_running → ml_complete` (or `ml_error`)                                           |
-| `--zooniverse-clips`  | Step 4    | `citsci_status`    | `citsci_pending → citsci_clips_uploaded` (requires `ml_status=ml_complete`)                     |
-| `--zooniverse-images` | Step 5    | `citsci_status`    | `citsci_clips_uploaded → citsci_frames_uploaded`                                                |
-| `--zooniverse-sync`   | Step 5b   | `citsci_status`    | `citsci_frames_uploaded → citsci_complete` — **not yet wired in, use `python -m spyfish.zooniverse.live_extract`** |
-| `--biigle-upload`     | Step 6    | `biigle_status`    | `expert_pending → expert_uploaded` (requires `citsci_status=citsci_complete` OR `ml_status=ml_complete`) |
-| `--biigle-sync`       | Step 7    | `biigle_status`    | `expert_uploaded → expert_complete`                                                             |
-| `--retrain`           | Step 8    | —                  | Retrain YOLO model on expert annotations                                                        |
+| Flag                  | Stage     | Section queried | Advances                                                                                                           |
+| --------------------- | --------- | --------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--ingest`            | Step 1    | —               | Sets `ingest_status` + `video_presence` + `ml_status=ml_ready` when video present                                  |
+| `--check-arrivals`    | Step 1b   | `ml_status`     | `ml_pending` → `ml_ready` when video found in S3 (requires `video_presence=absent`)                                |
+| `--ml`                | Steps 2+3 | `ml_status`     | `ml_ready → ml_running → ml_complete` (or `ml_error`)                                                              |
+| `--zooniverse-clips`  | Step 4    | `citsci_status` | `citsci_pending → citsci_clips_uploaded` (requires `ml_status=ml_complete`)                                        |
+| `--zooniverse-images` | Step 5    | `citsci_status` | `citsci_clips_uploaded → citsci_frames_uploaded`                                                                   |
+| `--zooniverse-sync`   | Step 5b   | `citsci_status` | `citsci_frames_uploaded → citsci_complete` — **not yet wired in, use `python -m spyfish.zooniverse.live_extract`** |
+| `--biigle-upload`     | Step 6    | `biigle_status` | `expert_pending → expert_uploaded` (requires `citsci_status=citsci_complete` OR `ml_status=ml_complete`)           |
+| `--biigle-sync`       | Step 7    | `biigle_status` | `expert_uploaded → expert_complete`                                                                                |
+| `--retrain`           | Step 8    | —               | Retrain YOLO model on expert annotations                                                                           |
 
 
 ### Special flags
@@ -1268,13 +1286,19 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 ### Training (`training` section)
 
 
-| Key                           | Default | Effect                                                |
-| ----------------------------- | ------- | ----------------------------------------------------- |
-| `epochs`                      | 100     | Max training epochs                                   |
-| `patience`                    | 25      | Early stopping patience                               |
-| `class_ceiling_pct`           | 0.40    | Cap any species at 40% of training data               |
-| `class_floor_pct`             | 0.02    | Merge species below 2% into generic "fish" label      |
-| `retrain_min_improvement_pct` | 2.0     | New model must beat current by ≥2% mAP to be promoted |
+| Key                           | Default                       | Effect                                                                  |
+| ----------------------------- | ----------------------------- | ----------------------------------------------------------------------- |
+| `epochs`                      | 100                           | Max training epochs                                                     |
+| `patience`                    | 25                            | Early stopping patience                                                 |
+| `imgsz`                       | 640                           | Input image size                                                        |
+| `batch`                       | 16                            | YOLO batch size; drop to 4 at imgsz=1280, raise to 32 on 24GB+ GPUs     |
+| `class_ceiling_pct`           | 0.40                          | Anti-monoculture trigger: trim top species only if it exceeds max(ceiling, 2/N) |
+| `class_floor_pct`             | 0.02                          | Merge species below this fraction into generic "fish" label             |
+| `min_frames_per_drop`         | 10                            | Per-drop floor: never trim a drop below this total frame count          |
+| `oversample_factor`           | 3                             | Extra train-split copies of rare-class frames (0 disables)              |
+| `oversample_rare_threshold`   | 0.05                          | Classes below this post-floor fraction get oversampled in train split   |
+| `excluded_drops_file`         | `training_excluded_drops.txt` | DropIDs to skip (one per line; `#` comments OK)                         |
+| `retrain_min_improvement_pct` | 2.0                           | New model must beat production by ≥ this much mAP@0.5 to be promoted    |
 
 
 ### CSV column mapping (`csv_mapping` section)
@@ -1312,7 +1336,7 @@ Two database managers with distinct responsibilities:
 
 **Error type isolation:** Each status class has an `ERROR` value (e.g. `MlStatus.ERROR = "ml_error"`) that doubles as the `ErrorType` discriminator in `validation_errors`. When `advance_status` moves out of ERROR, only rows matching that section's ERROR value are deleted. The `SECTIONS` registry in `base.py` is the single lookup — no separate `_SECTION_ERROR_TYPES` dict.
 
-`**AnnotationDatabaseManager**` (`spyfish_annotations.db`):
+`**AnnotationDatabaseManager`** (`spyfish_annotations.db`):
 
 - Stores one row per species observation from any source (`ml`, `citsci`, `expert`)
 - `upsert_annotations(df)` — bulk insert/update annotation records
@@ -1397,7 +1421,7 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 
 ### `spyfish/extraction/extract_frames.py` — Frame extraction
 
-`**extract_frame(video_path, seek_seconds, out_path)**`: Uses OpenCV (not FFmpeg) — matches the exact frame seen by YOLO. Reads EXIF rotation and applies it.
+`**extract_frame(video_path, seek_seconds, out_path)`**: Uses OpenCV (not FFmpeg) — matches the exact frame seen by YOLO. Reads EXIF rotation and applies it.
 
 `**extract_frames_from_selections(selections_csv_path, video_path, raw_csv_path)**`: Extracts one JPEG per selection at `TimeOfMax`, generates a COCO JSON sidecar with bounding boxes from the raw ML CSV.
 
@@ -1445,7 +1469,7 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 
 ### `spyfish/validation/data_validator.py` — Data quality
 
-`**DataValidator**`: Applies rules from `config.yaml` (`validation_rules` section). Rule types: `required`, `unique`, `formats` (regex), `foreign_keys`, `relationships`, `value_range`. All errors go to `validation_errors` table and are visible in Streamlit.
+`**DataValidator`**: Applies rules from `config.yaml` (`validation_rules` section). Rule types: `required`, `unique`, `formats` (regex), `foreign_keys`, `relationships`, `value_range`. All errors go to `validation_errors` table and are visible in Streamlit.
 
 ---
 
@@ -1463,19 +1487,63 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 
 ## 18. Model Retraining
 
-Run with `--retrain` (typically after `--biigle-sync`).
+Run with `--retrain` (typically after `--biigle-sync`):
+
+```bash
+python run_pipeline.py --retrain
+```
+
+The orchestrator (`spyfish/orchestrator/retrain_runner.py`) chains together:
 
 1. **Export BIIGLE annotations to YOLO format** (`biigle_to_yolo.py`): Reads frame annotation CSVs from `data_quality/{DropID}/biigle_frames/`, converts bounding boxes to YOLO `.txt` format, generates `class_map.json`.
-2. **Balance training data** (`prepare_training_data.py`): `class_ceiling_pct` (40%) — subsample dominant class. `class_floor_pct` (2%) — merge rare species into generic "fish".
-3. **Split** (`split_data.py`): Stratified 70/15/15 train/val/test. Requires min `val_min_images` (20).
-4. **Train** (`train.py`): YOLOv12 with underwater-tuned augmentation (HSV shifts, rotation, horizontal flip). AMP disabled (prevents NaN losses on some underwater data).
-5. **Evaluate** (`evaluate.py`): Evaluates new model vs base model on test set. Promotes if mAP improvement ≥ `retrain_min_improvement_pct` (2%). Results in `process_files/training/`.
+2. **Drop exclusion** (`prepare_from_annotations`): DropIDs listed in `training_excluded_drops.txt` (one per line; `#` for inline comments) are filtered out *before* any balancing. Use this to hold back deployments whose QA is still in progress — they remain invisible to the rest of the pipeline until removed from the file.
+3. **Anti-monoculture trim** (`trim_dominant_species`): Trims *only* the single most-dominant species, *only* if its fraction exceeds `max(class_ceiling_pct, 2/N)` where N is the species count. With 2 species near 50/50, the threshold is 100% — never fires. With many species and one dominant, fires at `class_ceiling_pct` (40%). Frames are removed from the species' most-populated drops first; least-diverse (monoculture) frames go first within each drop. The `min_frames_per_drop` floor (10) prevents any drop from being gutted.
+4. **Floor merge** (`apply_floor`): Species below `class_floor_pct` (2%) are remapped to a generic `"fish"` label. After this step the working class set is the dominant species plus an aggregated "fish" class.
+5. **Survey-aware split** (`split_data.py`): Drop-level 70/15/15 train/val/test. Surveys with ≥5 drops donate one each to val + test; ≥3 drops donate one to val; smaller surveys go entirely to train. No drop appears in two splits (no leakage). `val_min_images` (20) is logged as a recommendation.
+6. **Assemble + oversample** (`assemble_yolo_dataset` → `oversample_rare_in_train`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`. After assembly, classes whose post-floor fraction is below `oversample_rare_threshold` (5%) get their **train-split** frames replicated `oversample_factor` (3) times each. Val/test are never duplicated. This gives rare classes more gradient signal during training without removing dominant-class examples.
+7. **Train** (`train.py`): YOLOv12 with underwater-tuned augmentation (HSV shifts, rotation, horizontal flip), `batch=16`, `imgsz=640`. AMP disabled (prevents NaN losses on some underwater data). Stability params: `warmup_epochs=5`, `warmup_bias_lr=0.0001`, `nbs=64`, `box=5.0`.
+8. **Evaluate + promote** (`evaluate.py`): Evaluates new model vs production model on the test split. Promotes if mAP@0.5 improvement ≥ `retrain_min_improvement_pct` (2%).
 
 **Model paths:**
 
 - Production model weights: `process_files/models/pipeline_model/`
 - Base model (evaluation baseline): `process_files/models/base_model/`
 - Model name is read from the filename stem and embedded in output CSV names (e.g. `{DropID}_ml_{model_name}_maxn.csv`), so annotations are always traceable to the exact model version that produced them.
+
+### Visibility into balancing decisions
+
+The retrain run prints these markers to the log — scan them to confirm the pipeline did what you expected:
+
+- `Excluded N drop(s) per training_excluded_drops.txt: [...]` — exclusion list applied
+- `No species above trigger threshold ... leaving dataset untouched` — `trim_dominant_species` was a no-op (distribution balanced enough)
+- `Trimming dominant species 'snapper': 70% → ≤40%` — trim fired on the named species
+- `Rare classes flagged for oversampling: ['fish', 'wrasse']` — which classes will be replicated
+- `Oversampled rare classes: N duplicate (image, label) pair(s) added to train split` — oversampling executed
+
+### Experimentation: training sweeps
+
+For the model-selection phase (before a winner has been chosen), `--retrain` produces a single binary + species pair. To compare multiple configurations on the same dataset, use the sweep harness — it reuses the assembled YOLO directory, so you don't re-prepare data:
+
+```bash
+# After --retrain has built the dataset
+python -m spyfish.ml.training.sweep \
+    --data process_files/training/species/data.yaml
+
+# Build a self-contained Markdown report (tables + training curves +
+# confusion matrices + example prediction images per run)
+python -m spyfish.ml.training.sweep_report \
+    --sweep-dir process_files/training/runs/sweep_<timestamp>
+```
+
+Default variants in `SWEEP_RUNS` (`sweep.py`): `baseline`, `adamw` (AdamW + lr0=0.001 + dropout), `highres` (imgsz=1280, batch=4), `adamw_highres`. Edit the list to add/remove experiments. Each run produces its own `best.pt` + `results.csv`; the comparison CSV lands at `<sweep_dir>/comparison.csv` and the report at `<sweep_dir>/report.md`.
+
+### NeSI / Slurm
+
+`spyfish/ml/training/train_job.sl` is a Slurm wrapper that runs sweep + report under one `sbatch`. Three placeholders need to be set before first use: `--account`, venv path, project dir.
+
+```bash
+sbatch spyfish/ml/training/train_job.sl
+```
 
 ### Legacy BIIGLE volumes (outside the pipeline)
 
