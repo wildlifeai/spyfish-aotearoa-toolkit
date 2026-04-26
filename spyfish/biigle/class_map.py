@@ -162,7 +162,13 @@ _MANUAL_OVERRIDES: List[dict] = [
         "scientific_name": "fish",
         "common_name": "fish",
         "aphia_id": None,
-        "aliases": ["Fish - Final", "To review"],
+        "aliases": ["Fish - Final", "To review", "Fish: review required"],
+    },
+    {
+        "scientific_name": "bait",
+        "common_name": "bait",
+        "aphia_id": None,
+        "aliases": ["Bait", "Bait box"],
     },
 ]
 

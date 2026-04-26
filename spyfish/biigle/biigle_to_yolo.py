@@ -143,7 +143,9 @@ def draw_frames_on_images(
 
     id_to_name = {v: k for k, v in class_map.items()}
 
-    label_files = list(labels_dir.glob("*.txt"))
+    # rglob so callers can pass either a flat dir of .txt files or a tree
+    # like labels_staged_dir/<drop_id>/*.txt (post-flatten layout).
+    label_files = list(labels_dir.rglob("*.txt"))
     if not label_files:
         logging.warning("No label files found for spot-check.")
         return

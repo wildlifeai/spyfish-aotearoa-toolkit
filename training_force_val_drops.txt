@@ -1,0 +1,7 @@
+# DropIDs to force into the val split during training.
+# Overrides the survey-aware donation rule — useful when a rare-species
+# drop sits in a singleton survey that would otherwise never reach val.
+#
+# Format: one DropID per line. '#' starts a comment (rest of line ignored).
+
+AHE_20250513_BUV_AHE_060_01   # singleton survey; force into val for rare-species coverage

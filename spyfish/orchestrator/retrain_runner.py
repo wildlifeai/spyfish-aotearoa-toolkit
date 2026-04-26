@@ -23,6 +23,7 @@ from spyfish.ml.training.prepare_training_data import (
     prepare_from_annotations,
 )
 from spyfish.ml.training.split_data import split_data
+from spyfish.ml.training.sweep import run_sweep_pipeline
 from spyfish.ml.training.train import run_training_pipeline
 
 
@@ -102,9 +103,16 @@ def run_retraining(
     binary_only: bool = False,
     species_only: bool = False,
     auto_promote: bool = False,
+    sweep: bool = False,
 ) -> dict:
     """
     Run the full retraining pipeline.
+
+    When sweep=True, steps 6+7 (single train + evaluate) are replaced by
+    run_sweep_pipeline, which trains every variant in SWEEP_RUNS, evaluates
+    each on the test split (val fallback if test is empty), and writes a
+    Markdown comparison report. Auto-promotion is disabled in sweep mode —
+    pick a winner from the report manually.
     """
     logging.info("Starting Retraining Pipeline...")
 
@@ -159,12 +167,17 @@ def run_retraining(
     )
 
     # 5. Filter to drops that have BOTH labels AND images — skip drops missing either.
+    # Both checks resolve directly to the canonical per-drop dirs — no tree walk:
+    #   labels: labels_staged_dir/<drop_id>/*.txt   (flatten_and_remap_labels writes here)
+    #   images: deployment_data_dir/<survey>/<drop>/frames/*.{jpg,…}  (config.get_frames_dir)
     image_exts = set(config.image_extensions)
     _trainable_drops = []
     for drop_id in balanced_df["DropID"].unique():
-        has_labels = any(labels_staged_dir.glob(f"{drop_id}*.txt"))
-        has_images = any(
-            p for p in images_dir.rglob(f"{drop_id}*") if p.suffix.lower() in image_exts
+        drop_labels_dir = labels_staged_dir / drop_id
+        has_labels = drop_labels_dir.is_dir() and any(drop_labels_dir.glob("*.txt"))
+        drop_frames_dir = config.get_frames_dir(drop_id)
+        has_images = drop_frames_dir.is_dir() and any(
+            p for p in drop_frames_dir.iterdir() if p.suffix.lower() in image_exts
         )
         if has_labels and has_images:
             _trainable_drops.append(drop_id)
@@ -219,9 +232,27 @@ def run_retraining(
         build_binary=not species_only,
         source_class_map_path=class_map_path,
         rare_class_names=rare_classes,
+        extra_drops=set(extra_drops),
     )
 
-    # 6. Train
+    # 6. Train (single variant) OR sweep (multi-variant comparison).
+    if sweep:
+        if auto_promote:
+            logging.warning(
+                "auto_promote is ignored in sweep mode — pick a winner manually "
+                "from the generated report.md."
+            )
+        logging.info("Step 6: Running training sweep across SWEEP_RUNS...")
+        sweep_results = run_sweep_pipeline(
+            binary_data_yaml=str(binary_yaml) if binary_yaml else None,
+            species_data_yaml=str(species_yaml) if species_yaml else None,
+            train_binary=not species_only,
+            train_species=not binary_only,
+            build_reports=True,
+        )
+        logging.info("Retraining Pipeline COMPLETE (sweep mode).")
+        return {"sweep": sweep_results}
+
     logging.info("Step 6: Training YOLO models...")
     train_results = run_training_pipeline(
         binary_data_yaml=str(binary_yaml) if binary_yaml else None,

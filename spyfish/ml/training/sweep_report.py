@@ -231,11 +231,37 @@ def build_report(sweep_dir: Path) -> Path:
 
     lines = [f"# Sweep report: `{sweep_dir.name}`", ""]
 
+    # Val-fallback callout — surface when the test split was empty and we
+    # evaluated on val instead. Val was used for early stopping during training,
+    # so these metrics are optimistic, not a held-out evaluation.
+    if "eval_split" in df_ok.columns:
+        val_runs = df_ok[df_ok["eval_split"].astype(str) == "val"]["run"].tolist()
+        if val_runs:
+            lines += [
+                "> ⚠️ **Metrics evaluated on val split, not test.**",
+                "> ",
+                f"> The following runs had no test images and fell back to val: "
+                f"`{', '.join(val_runs)}`. ",
+                "> Val was used for early stopping during training, so these numbers "
+                "over-estimate held-out performance. Add more drops or extract more "
+                "frames so `assemble_yolo_dataset` can carve out a real test split.",
+                "",
+            ]
+
     # Final metrics
-    lines += ["## Final metrics (test split, sorted by mAP@0.5)", ""]
+    lines += ["## Final metrics (sorted by mAP@0.5)", ""]
     display_cols = [
         c
-        for c in ["run", "mAP50", "mAP50_95", "precision", "recall", "imgsz", "batch"]
+        for c in [
+            "run",
+            "mAP50",
+            "mAP50_95",
+            "precision",
+            "recall",
+            "imgsz",
+            "batch",
+            "eval_split",
+        ]
         if c in df_ok.columns
     ]
     lines.append(_to_md_table(df_ok[display_cols]))

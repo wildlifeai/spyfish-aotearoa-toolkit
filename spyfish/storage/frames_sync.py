@@ -110,15 +110,15 @@ def main() -> None:
         help="Direction of sync.",
     )
     parser.add_argument(
-        "--drop",
-        action="append",
-        required=True,
-        help="Drop ID. Pass --drop multiple times for batches.",
+        "drop_ids",
+        nargs="+",
+        metavar="DROP_ID",
+        help="One or more drop IDs to sync.",
     )
     args = parser.parse_args()
 
     fn = download_drops_frames if args.direction == "download" else upload_drops_frames
-    results = fn(args.drop)
+    results = fn(args.drop_ids)
     total = sum(results.values())
     logging.info(
         f"\n{args.direction} complete: "

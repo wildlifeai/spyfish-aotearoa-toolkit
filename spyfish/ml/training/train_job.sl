@@ -10,8 +10,12 @@
 
 # Spyfish Aotearoa training job wrapper.
 #
-# By default runs a full sweep over SWEEP_RUNS from sweep.py.
-# To run a single binary+species train instead, swap the python command below.
+# Runs a full sweep over SWEEP_RUNS from sweep.py, then auto-generates the
+# Markdown comparison report. Assumes prepare+split+assemble has already run
+# (i.e. process_files/training/{binary,species}/data.yaml exist).
+#
+# To also run the data-prep steps on NeSI, swap the python command for:
+#   python run_pipeline.py --retrain --sweep
 #
 # Before first use, update the three placeholders marked TODO:
 #   1. SBATCH --account above
@@ -26,8 +30,6 @@ module load CUDA/11.0.2
 VENV=/nesi/project/uoa04631/mussels-0115/bin/activate
 # TODO update to where this repo is checked out on NeSI
 PROJECT_DIR=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit
-# Path to the species data.yaml produced by prepare_training_data + assemble_yolo_dataset
-DATA_YAML=${PROJECT_DIR}/process_files/training/species/data.yaml
 
 source "${VENV}"
 cd "${PROJECT_DIR}"
@@ -36,11 +38,6 @@ mkdir -p logs
 echo "Starting Spyfish training sweep on $(hostname)"
 nvidia-smi || true
 
-SWEEP_NAME="sweep_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
-python -m spyfish.ml.training.sweep --data "${DATA_YAML}" --sweep-name "${SWEEP_NAME}"
+python -m spyfish.ml.training.sweep
 
-# Generate a Markdown report (tables + plots + example images) for the sweep
-python -m spyfish.ml.training.sweep_report \
-    --sweep-dir "process_files/training/runs/${SWEEP_NAME}"
-
-echo "Training job complete. Report: process_files/training/runs/${SWEEP_NAME}/report.md"
+echo "Training job complete. Reports in process_files/training/runs/sweep_*/report.md"

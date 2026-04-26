@@ -164,7 +164,7 @@ training:
   epochs: 1
   patience: 25
   imgsz: 640
-  batch: 16                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  batch: 4                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
   val_min_images: 20
   train_pct: 0.85
   val_pct: 0.15
@@ -176,6 +176,7 @@ training:
   oversample_rare_threshold: 0.05      # classes below this fraction get oversampled in train split
   local_training_dir: "process_files/training"
   excluded_drops_file: "training_excluded_drops.txt"   # one DropID per line; '#' comments OK
+  force_val_drops_file: "training_force_val_drops.txt" # DropIDs to force into val (overrides survey-aware donation)
   retrain_min_improvement_pct: 2.0
 
 

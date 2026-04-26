@@ -14,9 +14,10 @@ Usage:
 
 import argparse
 import logging
+import math
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -32,24 +33,37 @@ def split_drops_by_survey(
     train_pct: float = 0.80,
     val_pct: float = 0.10,
     test_pct: float = 0.10,
+    force_val_drops: Optional[set] = None,
     seed: int = 42,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
-    Assign each DropID to train, val, or test while keeping survey representation.
+    Assign each DropID to train, val, or test, stratified by survey.
 
-    Strategy (when test_pct > 0):
-      - Surveys with ≥5 drops: donate 1 to val, 1 to test, rest to train.
-      - Surveys with ≥3 drops: donate 1 to val, rest to train.
-      - Surveys with 1-2 drops: all go to train.
+    Per-survey donation rule (n = drops in survey):
+      - val_take  = max(1, ceil(n * val_pct))   if n >= 2 and val_pct > 0
+      - test_take = max(1, ceil(n * test_pct))  if n >= 3 and test_pct > 0
+      - train_take = n - val_take - test_take   (always >= 1; donations are
+        clipped if they would empty train)
 
-    When test_pct == 0 the test donation is skipped entirely: surveys with ≥3
-    drops donate 1 to val and put the rest into train; the returned test_drops
-    list is always empty.
+    The min-1 floor means any survey large enough to qualify contributes at
+    least one drop to val (and to test, when enabled), so small surveys
+    aren't silently dropped from evaluation. Singleton surveys go entirely
+    to train — losing the only drop to val would mean a species seen there
+    would never be in train.
+
+    Stratification (not leakage) is the reason for grouping by survey: drops
+    within one survey can be at very different locations/times, so they're
+    independent samples — leakage is per-DropID, not per-survey. Grouping
+    by survey just ensures val sees a representative spread of survey
+    conditions instead of (by random chance) all val drops landing in one
+    survey.
 
     Args:
         drop_ids: List of all drop IDs.
-        train_pct, val_pct: Target fractions (summary printout only).
-        test_pct: If 0, no drops are allocated to test.
+        train_pct: Target fraction (summary printout only — derived from
+            val_pct/test_pct in the actual algorithm).
+        val_pct: Per-survey fraction donated to val.
+        test_pct: Per-survey fraction donated to test (0 disables test).
         seed: Random seed for reproducibility.
 
     Returns:
@@ -57,15 +71,33 @@ def split_drops_by_survey(
     """
     rng = random.Random(seed)
     include_test = test_pct > 0
+    force_val = set(force_val_drops or set())
 
-    # Group by survey
+    # Pull forced-val drops out of the survey-grouped pool first; they bypass
+    # the donation rule. Useful when a rare-species drop sits in a singleton
+    # survey that would otherwise never reach val.
+    forced_in_data = [d for d in drop_ids if d in force_val]
+    missing_forced = force_val - set(forced_in_data)
+    if missing_forced:
+        logging.warning(
+            f"force_val_drops contains {len(missing_forced)} ID(s) not present in "
+            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_forced)}"
+        )
+    if forced_in_data:
+        logging.info(
+            f"Forcing {len(forced_in_data)} drop(s) into val: {sorted(forced_in_data)}"
+        )
+
+    # Group by survey, excluding forced drops
     survey_to_drops: Dict[str, List[str]] = {}
     for drop_id in drop_ids:
+        if drop_id in force_val:
+            continue
         survey_id = config.get_survey_id_from_drop(drop_id)
         survey_to_drops.setdefault(survey_id, []).append(drop_id)
 
     train_drops: List[str] = []
-    val_drops: List[str] = []
+    val_drops: List[str] = list(forced_in_data)
     test_drops: List[str] = []
 
     # Shuffle survey order for reproducibility
@@ -75,16 +107,23 @@ def split_drops_by_survey(
     for survey in surveys:
         drops = survey_to_drops[survey]
         rng.shuffle(drops)
+        n = len(drops)
 
-        if include_test and len(drops) >= 5:
-            val_drops.append(drops[0])
-            test_drops.append(drops[1])
-            train_drops.extend(drops[2:])
-        elif len(drops) >= 3:
-            val_drops.append(drops[0])
-            train_drops.extend(drops[1:])
-        else:
-            train_drops.extend(drops)
+        val_take = max(1, math.ceil(n * val_pct)) if n >= 2 and val_pct > 0 else 0
+        test_take = max(1, math.ceil(n * test_pct)) if include_test and n >= 3 else 0
+
+        # Always leave at least 1 drop in train. Trim test first, then val.
+        overflow = (val_take + test_take) - (n - 1)
+        if overflow > 0:
+            trim_test = min(overflow, test_take)
+            test_take -= trim_test
+            overflow -= trim_test
+            if overflow > 0:
+                val_take = max(0, val_take - overflow)
+
+        val_drops.extend(drops[:val_take])
+        test_drops.extend(drops[val_take : val_take + test_take])
+        train_drops.extend(drops[val_take + test_take :])
 
     total = len(train_drops) + len(val_drops) + len(test_drops)
     logging.info(
@@ -207,6 +246,7 @@ def split_data(
         train_pct=train_pct,
         val_pct=val_pct,
         test_pct=test_pct,
+        force_val_drops=config.training_force_val_drops,
         seed=seed,
     )
 

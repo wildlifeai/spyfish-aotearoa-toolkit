@@ -143,6 +143,25 @@ class MLConfig(BaseConfig):
         return excluded
 
     @property
+    def training_force_val_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "force_val_drops_file", "training"
+        )
+
+    @property
+    def training_force_val_drops(self) -> set:
+        """Parse force_val_drops_file into a set of DropIDs. Empty set if file missing."""
+        path = self.training_force_val_drops_file
+        if not path.exists():
+            return set()
+        forced = set()
+        for line in path.read_text().splitlines():
+            id_part = line.split("#", 1)[0].strip()
+            if id_part:
+                forced.add(id_part)
+        return forced
+
+    @property
     def training_results_dir(self) -> Path:
         return self.local_training_dir / "results"
 

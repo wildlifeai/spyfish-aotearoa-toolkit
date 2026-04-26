@@ -131,8 +131,8 @@ def _run_biigle_sync() -> None:
     sync_biigle_annotations()
 
 
-def _run_retrain() -> None:
-    run_retraining(auto_promote=True)
+def _run_retrain(sweep: bool = False) -> None:
+    run_retraining(auto_promote=True, sweep=sweep)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +312,12 @@ def main() -> None:
         help="Skip all S3 uploads (DB, models, results)",
     )
     parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="On --retrain, run multi-variant training sweep (SWEEP_RUNS in sweep.py) "
+        "and produce a Markdown comparison report instead of a single train+evaluate.",
+    )
+    parser.add_argument(
         "--ping",
         action="store_true",
         help="Connectivity check: print config summary and exit without running the pipeline",
@@ -329,16 +335,16 @@ def main() -> None:
         logging.info(f"Base dir:  {config.base_dir}")
         return
 
-    patched_stages = [
-        (
-            replace(
+    def _patch_stage(s):
+        if s.flag == "set-targets":
+            return replace(
                 s, fn=functools.partial(_run_set_targets, push_s3=not args.no_upload)
             )
-            if s.flag == "set-targets"
-            else s
-        )
-        for s in STAGES
-    ]
+        if s.flag == "retrain":
+            return replace(s, fn=functools.partial(_run_retrain, sweep=args.sweep))
+        return s
+
+    patched_stages = [_patch_stage(s) for s in STAGES]
     runner = StageRunner(patched_stages, db)
     runner.run(args)
 

@@ -31,7 +31,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import yaml
@@ -135,47 +135,67 @@ def _trim_species_to_threshold(
     threshold: float,
     min_frames_per_drop: int,
 ) -> pd.DataFrame:
-    """Trim `species` frames until its fraction is ≤ threshold (or per-drop floor blocks more)."""
+    """Trim `species` frames until its fraction ≤ threshold, respecting per-drop floor.
 
-    def still_over():
-        t = df["MaxInterval"].sum()
-        s = df[df["ScientificName"] == species]["MaxInterval"].sum()
-        return t > 0 and (s / t) > threshold
+    Whole frames (DropID, TimeOfMax) are removed atomically. Drops with the most
+    species frames are visited first; within a drop, least-diverse frames go first
+    so multi-species training signal is preserved.
+    """
+    species_mask = df["ScientificName"] == species
+    total_remaining = float(df["MaxInterval"].sum())
+    species_remaining = float(df.loc[species_mask, "MaxInterval"].sum())
 
-    if not still_over():
+    if total_remaining == 0 or species_remaining / total_remaining <= threshold:
         return df
 
-    species_frames = df[df["ScientificName"] == species][
-        ["DropID", "TimeOfMax"]
-    ].drop_duplicates()
+    # Pre-compute per-frame attributes once. Without these, each loop iteration
+    # would re-scan df via boolean masks — O(N²) for the trim phase.
+    grouped = df.groupby(["DropID", "TimeOfMax"])
+    frame_indices = grouped.groups  # (drop, time) → row Index
+    frame_intervals = grouped["MaxInterval"].sum().to_dict()
+    frame_diversity = grouped["ScientificName"].nunique().to_dict()
+    frame_species_intervals = (
+        df.loc[species_mask]
+        .groupby(["DropID", "TimeOfMax"])["MaxInterval"]
+        .sum()
+        .to_dict()
+    )
+    frames_per_drop = df.groupby("DropID")["TimeOfMax"].nunique().to_dict()
+
+    species_frames = df.loc[species_mask, ["DropID", "TimeOfMax"]].drop_duplicates()
     drops_by_count = species_frames["DropID"].value_counts()
 
+    dropped_indices: set = set()
     frames_removed = 0
     for drop_id in drops_by_count.index:
-        if not still_over():
+        if species_remaining / total_remaining <= threshold:
             break
 
-        # Rank this drop's species-frames by diversity ASC (monoculture first)
-        drop_species_frames = species_frames[species_frames["DropID"] == drop_id]
-        ranked = []
-        for _, fr in drop_species_frames.iterrows():
-            mask = (df["DropID"] == drop_id) & (df["TimeOfMax"] == fr["TimeOfMax"])
-            ranked.append((int(df[mask]["ScientificName"].nunique()), fr["TimeOfMax"]))
-        ranked.sort()
+        candidates = sorted(
+            (frame_diversity[(drop_id, t)], t)
+            for t in species_frames.loc[
+                species_frames["DropID"] == drop_id, "TimeOfMax"
+            ]
+        )
 
-        drop_frame_count = df[df["DropID"] == drop_id]["TimeOfMax"].nunique()
-
-        for _, time_of_max in ranked:
-            if not still_over() or drop_frame_count <= min_frames_per_drop:
+        for _, time_of_max in candidates:
+            if (
+                species_remaining / total_remaining <= threshold
+                or frames_per_drop[drop_id] <= min_frames_per_drop
+            ):
                 break
-            mask = (df["DropID"] == drop_id) & (df["TimeOfMax"] == time_of_max)
-            df = df.drop(index=df[mask].index)
-            drop_frame_count -= 1
+            key = (drop_id, time_of_max)
+            dropped_indices.update(frame_indices[key])
+            total_remaining -= frame_intervals[key]
+            species_remaining -= frame_species_intervals[key]
+            frames_per_drop[drop_id] -= 1
             frames_removed += 1
 
     if frames_removed:
         logging.info(f"  Removed {frames_removed} frame(s) from '{species}'")
-    elif still_over():
+        return df.drop(index=list(dropped_indices))
+
+    if total_remaining > 0 and species_remaining / total_remaining > threshold:
         logging.warning(
             f"  '{species}' still over threshold; limited by "
             f"{min_frames_per_drop}-frame-per-drop floor."
@@ -442,22 +462,20 @@ def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str
         if not frames_dir.is_dir() or not any(frames_dir.iterdir()):
             continue
 
-        # Resolve label names through the class_map (sidecar preferred over global)
-        # so bait/fish bucket aliases route correctly — e.g. "Bait box" → "bait".
-        sidecar = (
-            annotations_dir / "class_map.json" if annotations_dir.is_dir() else None
-        )
-        class_map_path = (
-            sidecar if sidecar and sidecar.exists() else config.class_map_path
-        )
-        if not class_map_path.exists():
+        # Two distinct lookup needs:
+        #   - raw-CSV path: resolve current label names → use the GLOBAL class_map
+        #     (authoritative for current aliases like 'Bait', 'Fish: review required').
+        #     Step 1 of retrain (biigle_to_yolo) already rewrote .txt files against
+        #     the global, so no historical-ID concern here.
+        #   - .txt-only path: decode pre-existing YOLO IDs that were written at some
+        #     prior point — prefer a per-drop sidecar if present, else fall back to
+        #     the global. Sidecar preserves the original ID→species mapping.
+        if not config.class_map_path.exists():
             logging.warning(
-                f"Skipping extra drop {drop_id}: no class_map (sidecar or global) "
-                f"available to resolve labels."
+                f"Skipping extra drop {drop_id}: global class_map missing at "
+                f"{config.class_map_path}."
             )
             continue
-        name_to_id = load_class_map(class_map_path)
-        id_to_name = load_class_map_by_id(class_map_path)
 
         drop_species: set[str] = set()
         raw_suffix = config.biigle_expert_raw_suffix
@@ -467,6 +485,10 @@ def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str
             else []
         )
         if raw_csvs:
+            name_to_id = load_class_map(config.class_map_path)
+            id_to_name = load_class_map_by_id(config.class_map_path)
+            # _MANUAL_OVERRIDES guarantees the fish bucket exists in the global map.
+            fish_cid = name_to_id["fish"]
             df = pd.read_csv(raw_csvs[0])
             for label in (
                 df.get("label_name", pd.Series()).dropna().astype(str).unique()
@@ -474,11 +496,15 @@ def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str
                 cid = name_to_id.get(label) or name_to_id.get(label.strip())
                 if cid is None:
                     logging.warning(
-                        f"  {drop_id}: label {label!r} not in class_map — dropped."
+                        f"  {drop_id}: label {label!r} not in class_map — "
+                        "routed to 'fish' bucket. Consider adding to _MANUAL_OVERRIDES."
                     )
-                    continue
+                    cid = fish_cid
                 drop_species.add(id_to_name[cid])
         else:
+            sidecar = annotations_dir / "class_map.json"
+            decode_path = sidecar if sidecar.exists() else config.class_map_path
+            id_to_name = load_class_map_by_id(decode_path)
             for lf in label_files:
                 for line in lf.read_text().splitlines():
                     parts = line.strip().split()
@@ -603,6 +629,21 @@ def make_binary_labels(
 # ---------------------------------------------------------------------------
 
 
+def _build_image_index(images_dir: Path) -> Dict[str, Path]:
+    """Map frame-image stem → path, restricted to canonical `frames/` dirs.
+
+    One walk of `images_dir`; downstream lookups are O(1). Excludes derivative
+    dirs (qa_frames, zooniverse_frames, biigle_frames, …) by checking that the
+    immediate parent is exactly `frames`.
+    """
+    exts = {e.lower() for e in config.image_extensions}
+    index: Dict[str, Path] = {}
+    for p in images_dir.rglob("*"):
+        if p.is_file() and p.suffix.lower() in exts and p.parent.name == "frames":
+            index.setdefault(p.stem, p)
+    return index
+
+
 def copy_split_files(
     drop_ids: List[str],
     images_dir: Path,
@@ -610,6 +651,7 @@ def copy_split_files(
     output_dir: Path,
     split_name: str,
     symlink: bool = False,
+    image_index: Optional[Dict[str, Path]] = None,
 ) -> Tuple[int, int]:
     """
     Copy (or symlink) images and their corresponding label files into a
@@ -619,8 +661,10 @@ def copy_split_files(
           images/{split_name}/   ← source JPEGs
           labels/{split_name}/   ← YOLO .txt label files
 
-    Iterates label files for each drop and searches images_dir recursively for
-    the matching image. This is robust to any subdirectory structure under images_dir.
+    Looks up each label's matching image via `image_index` (stem → Path). If
+    not provided, the index is built from `images_dir` on entry — pass a
+    pre-built index when calling this multiple times against the same
+    `images_dir` to avoid redundant tree walks.
 
     Args:
         drop_ids: List of DropIDs to include in this split.
@@ -629,6 +673,7 @@ def copy_split_files(
         output_dir: Root output directory.
         split_name: One of 'train', 'val', 'test'.
         symlink: Use symlinks instead of copies.
+        image_index: Optional pre-built `{stem: Path}` map; built locally if None.
 
     Returns:
         (n_images_copied, n_labels_copied)
@@ -637,6 +682,9 @@ def copy_split_files(
     lbl_out = output_dir / "labels" / split_name
     img_out.mkdir(parents=True, exist_ok=True)
     lbl_out.mkdir(parents=True, exist_ok=True)
+
+    if image_index is None:
+        image_index = _build_image_index(images_dir)
 
     n_images, n_labels = 0, 0
 
@@ -653,17 +701,7 @@ def copy_split_files(
             continue
 
         for lbl_path in drop_labels:
-            # Search only inside canonical 'frames/' directories — exclude qa_frames,
-            # zooniverse_frames, biigle_frames, etc.
-            img_path = None
-            for ext in config.image_extensions:
-                for p in images_dir.rglob(lbl_path.stem + ext):
-                    if p.parent.name == "frames":
-                        img_path = p
-                        break
-                if img_path:
-                    break
-
+            img_path = image_index.get(lbl_path.stem)
             if img_path is None:
                 logging.warning(f"No image found for label {lbl_path.stem} — skipping.")
                 continue
@@ -772,6 +810,111 @@ def _write_sidecar_class_map(
     return sidecar_path
 
 
+def _group_drops_by_survey(
+    drops: List[str], extra_drops: Set[str]
+) -> List[Tuple[str, List[str]]]:
+    """Group drops by survey for printout. Extras land in their own '[extras]' bucket.
+
+    Falls back to '[extras]' for any drop whose ID doesn't parse as a valid
+    DropID (e.g. 'volume_30505') so unconventional IDs don't crash the print.
+    """
+    by_survey: Dict[str, List[str]] = {}
+    extras_in_split: List[str] = []
+    for d in drops:
+        if d in extra_drops:
+            extras_in_split.append(d)
+            continue
+        try:
+            survey = config.get_survey_id_from_drop(d)
+        except Exception:
+            extras_in_split.append(d)
+            continue
+        by_survey.setdefault(survey, []).append(d)
+    groups: List[Tuple[str, List[str]]] = sorted(
+        (s, sorted(ds)) for s, ds in by_survey.items()
+    )
+    if extras_in_split:
+        groups.append(("[extras]", sorted(extras_in_split)))
+    return groups
+
+
+def print_assembled_summary(
+    species_dir: Path,
+    class_names: List[str],
+    train_drops: List[str],
+    val_drops: List[str],
+    test_drops: List[str],
+    extra_drops: Optional[Set[str]] = None,
+) -> None:
+    """Comprehensive post-assembly summary: drops per split + bounding-box counts.
+
+    Reflects the FINAL composition the model trains on — includes extras
+    (no MaxN row) and oversampled rare-class copies. Two sections:
+
+      1. Drops per split, grouped by survey, with extras tagged separately.
+      2. Per-species bounding-box counts read from the on-disk YOLO labels.
+
+    The bounding-box count is a different unit from `print_species_breakdown`
+    (which sums MaxInterval) so the totals won't match — bounding boxes are
+    raw annotation counts; MaxInterval is a peak-fish-count aggregate.
+    """
+    extras = set(extra_drops or [])
+
+    # --- Drops per split ---
+    logging.info("\n=== Drops per split (assembled training set) ===")
+    for split_name, drops in [
+        ("TRAIN", train_drops),
+        ("VAL", val_drops),
+        ("TEST", test_drops),
+    ]:
+        if not drops:
+            logging.info(f"{split_name} (0 drops): empty")
+            continue
+        groups = _group_drops_by_survey(drops, extras)
+        logging.info(f"{split_name} ({len(drops)} drops, {len(groups)} groups):")
+        for group_name, ds in groups:
+            logging.info(f"  {group_name} ({len(ds)}): {', '.join(ds)}")
+    logging.info("=" * 60)
+
+    # --- Per-species bounding-box counts ---
+    counts: Dict[str, Dict[str, int]] = {
+        name: {"train": 0, "val": 0, "test": 0} for name in class_names
+    }
+    for split in ("train", "val", "test"):
+        labels_dir = species_dir / "labels" / split
+        if not labels_dir.is_dir():
+            continue
+        for txt in labels_dir.glob("*.txt"):
+            for line in txt.read_text().splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    cid = int(parts[0])
+                except ValueError:
+                    continue
+                if 0 <= cid < len(class_names):
+                    counts[class_names[cid]][split] += 1
+
+    df = pd.DataFrame.from_dict(counts, orient="index")[["train", "val", "test"]]
+    df["total"] = df.sum(axis=1)
+    df = df[df["total"] > 0].sort_values("total", ascending=False)
+
+    if df.empty:
+        logging.warning(
+            "Assembled YOLO dataset contains no annotations — "
+            f"check {species_dir / 'labels'}."
+        )
+        return
+
+    logging.info(
+        "\n=== Per-species bounding-box counts (post-balance, "
+        "post-oversample, includes extras) ==="
+    )
+    logging.info(df.to_string())
+    logging.info("=" * 90 + "\n")
+
+
 def assemble_yolo_dataset(
     train_drops: List[str],
     val_drops: List[str],
@@ -785,6 +928,7 @@ def assemble_yolo_dataset(
     source_class_map_path: Optional[Path] = None,
     rare_class_names: Optional[List[str]] = None,
     oversample_factor: Optional[int] = None,
+    extra_drops: Optional[Set[str]] = None,
 ) -> Tuple[Path, Optional[Path]]:
     """
     Assemble a complete YOLO dataset (species + optional binary) from pre-split drop lists.
@@ -813,6 +957,12 @@ def assemble_yolo_dataset(
     species_dir = output_dir / "species"
     binary_dir = output_dir / "binary"
 
+    # Walk images_dir once; reused across all 6 copy_split_files calls below.
+    image_index = _build_image_index(images_dir)
+    logging.info(
+        f"assemble_yolo_dataset: indexed {len(image_index)} frame image(s) under {images_dir}"
+    )
+
     for split_name, drops in [
         ("train", train_drops),
         ("val", val_drops),
@@ -825,6 +975,7 @@ def assemble_yolo_dataset(
             species_dir,
             split_name,
             symlink=symlink,
+            image_index=image_index,
         )
 
     # Oversample rare classes in TRAIN split only (species dataset only — binary has 1 class)
@@ -862,8 +1013,18 @@ def assemble_yolo_dataset(
                 binary_dir,
                 split_name,
                 symlink=symlink,
+                image_index=image_index,
             )
         binary_yaml = generate_data_yaml(["fish"], binary_dir)
+
+    print_assembled_summary(
+        species_dir=species_dir,
+        class_names=class_names,
+        train_drops=train_drops,
+        val_drops=val_drops,
+        test_drops=test_drops,
+        extra_drops=extra_drops,
+    )
 
     return species_yaml, binary_yaml
 
