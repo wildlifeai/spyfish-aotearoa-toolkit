@@ -57,7 +57,7 @@ paths:
   # Optional: absolute path to an alternate base dir for media downloads (e.g. /tmp/spyfish).
   # Use this for a temp/no-backup location when videos are large or ephemeral.
   # If unset, media resolves to <project_root>/media as before.
-  media_base_dir:
+  media_base_dir: /nesi/nobackup/wildlife03546
 
   # Sub-directories (local and S3 suffixes)
   sub_dirs:
@@ -130,7 +130,7 @@ ffmpeg:
 
 
 biigle:
-  project_id:  3711        #  4081 3711 playground Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  project_id:  3711        #  4081 playground 3711 Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
   disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report

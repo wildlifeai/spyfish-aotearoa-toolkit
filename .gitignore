@@ -181,3 +181,4 @@ wip/
 hold*
 .streamlit/
 data/
+slurm_logs/
