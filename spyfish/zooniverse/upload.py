@@ -37,7 +37,6 @@ def _get_site_reserve_meta(site_id: str) -> dict:
         "ProtectionStatus": site.get(config.protection_status_column, ""),
     }
 
-
 def _get_uploaded_keys(subject_set) -> set:
     """Return {(DropID, UplAbsSeconds)} tuples already uploaded to a subject set.
 
