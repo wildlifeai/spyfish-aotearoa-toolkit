@@ -14,9 +14,10 @@ Usage:
 
 import argparse
 import logging
+import math
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -31,37 +32,72 @@ def split_drops_by_survey(
     drop_ids: List[str],
     train_pct: float = 0.80,
     val_pct: float = 0.10,
+    test_pct: float = 0.10,
+    force_val_drops: Optional[set] = None,
     seed: int = 42,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
-    Assign each DropID to train, val, or test while keeping survey representation.
+    Assign each DropID to train, val, or test, stratified by survey.
 
-    Strategy:
-      - Group drops by SurveyID.
-      - For surveys with ≥5 drops: donate 1 to val, 1 to test, rest to train.
-      - For surveys with ≥3 drops: donate 1 to val, rest to train.
-      - For surveys with 1-2 drops: all go to train (too small to split).
-      - Print the split before returning for manual review.
+    Per-survey donation rule (n = drops in survey):
+      - val_take  = max(1, ceil(n * val_pct))   if n >= 2 and val_pct > 0
+      - test_take = max(1, ceil(n * test_pct))  if n >= 3 and test_pct > 0
+      - train_take = n - val_take - test_take   (always >= 1; donations are
+        clipped if they would empty train)
+
+    The min-1 floor means any survey large enough to qualify contributes at
+    least one drop to val (and to test, when enabled), so small surveys
+    aren't silently dropped from evaluation. Singleton surveys go entirely
+    to train — losing the only drop to val would mean a species seen there
+    would never be in train.
+
+    Stratification (not leakage) is the reason for grouping by survey: drops
+    within one survey can be at very different locations/times, so they're
+    independent samples — leakage is per-DropID, not per-survey. Grouping
+    by survey just ensures val sees a representative spread of survey
+    conditions instead of (by random chance) all val drops landing in one
+    survey.
 
     Args:
         drop_ids: List of all drop IDs.
-        train_pct: Target train fraction (used only for the summary printout).
-        val_pct: Target val fraction (used only for the summary printout).
+        train_pct: Target fraction (summary printout only — derived from
+            val_pct/test_pct in the actual algorithm).
+        val_pct: Per-survey fraction donated to val.
+        test_pct: Per-survey fraction donated to test (0 disables test).
         seed: Random seed for reproducibility.
 
     Returns:
         (train_drops, val_drops, test_drops)
     """
     rng = random.Random(seed)
+    include_test = test_pct > 0
+    force_val = set(force_val_drops or set())
 
-    # Group by survey
+    # Pull forced-val drops out of the survey-grouped pool first; they bypass
+    # the donation rule. Useful when a rare-species drop sits in a singleton
+    # survey that would otherwise never reach val.
+    forced_in_data = [d for d in drop_ids if d in force_val]
+    missing_forced = force_val - set(forced_in_data)
+    if missing_forced:
+        logging.warning(
+            f"force_val_drops contains {len(missing_forced)} ID(s) not present in "
+            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_forced)}"
+        )
+    if forced_in_data:
+        logging.info(
+            f"Forcing {len(forced_in_data)} drop(s) into val: {sorted(forced_in_data)}"
+        )
+
+    # Group by survey, excluding forced drops
     survey_to_drops: Dict[str, List[str]] = {}
     for drop_id in drop_ids:
+        if drop_id in force_val:
+            continue
         survey_id = config.get_survey_id_from_drop(drop_id)
         survey_to_drops.setdefault(survey_id, []).append(drop_id)
 
     train_drops: List[str] = []
-    val_drops: List[str] = []
+    val_drops: List[str] = list(forced_in_data)
     test_drops: List[str] = []
 
     # Shuffle survey order for reproducibility
@@ -71,16 +107,23 @@ def split_drops_by_survey(
     for survey in surveys:
         drops = survey_to_drops[survey]
         rng.shuffle(drops)
+        n = len(drops)
 
-        if len(drops) >= 5:
-            val_drops.append(drops[0])
-            test_drops.append(drops[1])
-            train_drops.extend(drops[2:])
-        elif len(drops) >= 3:
-            val_drops.append(drops[0])
-            train_drops.extend(drops[1:])
-        else:
-            train_drops.extend(drops)
+        val_take = max(1, math.ceil(n * val_pct)) if n >= 2 and val_pct > 0 else 0
+        test_take = max(1, math.ceil(n * test_pct)) if include_test and n >= 3 else 0
+
+        # Always leave at least 1 drop in train. Trim test first, then val.
+        overflow = (val_take + test_take) - (n - 1)
+        if overflow > 0:
+            trim_test = min(overflow, test_take)
+            test_take -= trim_test
+            overflow -= trim_test
+            if overflow > 0:
+                val_take = max(0, val_take - overflow)
+
+        val_drops.extend(drops[:val_take])
+        test_drops.extend(drops[val_take : val_take + test_take])
+        train_drops.extend(drops[val_take + test_take :])
 
     total = len(train_drops) + len(val_drops) + len(test_drops)
     logging.info(
@@ -88,7 +131,7 @@ def split_drops_by_survey(
         f"  Total drops: {total}\n"
         f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}) — target {train_pct:.0%}\n"
         f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}) — target {val_pct:.0%}\n"
-        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {1 - train_pct - val_pct:.0%}\n"
+        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {test_pct:.0%}\n"
         f"====================\n"
     )
 
@@ -114,9 +157,9 @@ def write_split_txt(
     image_paths = []
     for drop_id in drop_ids:
         # Each drop may have multiple frames; match all images for that drop
-        for ext in ("*.jpg", "*.jpeg", "*.png"):
-            image_paths.extend(sorted(images_dir.glob(f"{drop_id}*{ext[1:]}")))
-            image_paths.extend(sorted(images_dir.glob(f"**/{drop_id}*{ext[1:]}")))
+        for ext in config.image_extensions:
+            image_paths.extend(sorted(images_dir.glob(f"{drop_id}*{ext}")))
+            image_paths.extend(sorted(images_dir.glob(f"**/{drop_id}*{ext}")))
 
     # Deduplicate and sort
     image_paths = sorted(set(image_paths))
@@ -128,43 +171,6 @@ def write_split_txt(
 
     logging.info(f"Wrote {len(image_paths)} image paths to {output_path}")
     return len(image_paths)
-
-
-def print_species_breakdown(
-    df: pd.DataFrame,
-    train_drops: List[str],
-    val_drops: List[str],
-    test_drops: List[str],
-) -> None:
-    """Print per-species annotation count per split for manual inspection."""
-    split_map = {d: "train" for d in train_drops}
-    split_map.update({d: "val" for d in val_drops})
-    split_map.update({d: "test" for d in test_drops})
-
-    df = df.copy()
-    df["split"] = df["DropID"].map(split_map)
-
-    pivot = (
-        df.groupby(["ScientificName", "split"])["MaxInterval"]
-        .sum()
-        .unstack(fill_value=0)
-    )
-    for col in ("train", "val", "test"):
-        if col not in pivot.columns:
-            pivot[col] = 0
-
-    pivot = pivot[["train", "val", "test"]]
-    pivot["total"] = pivot.sum(axis=1)
-    pivot = pivot.sort_values("total", ascending=False)
-
-    logging.info("\n=== Per-species split breakdown ===")
-    logging.info(pivot.to_string())
-    val_min_images = config.training_val_min_images
-    logging.info(
-        f"\n  ⚠ Minimum val images recommended: {val_min_images}. "
-        "If any species val count is too low, extract more frames from those deployments."
-    )
-    logging.info("====================================\n")
 
 
 # ---------------------------------------------------------------------------
@@ -192,16 +198,20 @@ def split_data(
     """
     train_pct = config.training_train_pct
     val_pct = config.training_val_pct
+    test_pct = config.training_test_pct
 
     all_drop_ids = balanced_df["DropID"].unique().tolist()
     if len(all_drop_ids) == 0:
         raise ValueError("No drop IDs found in balanced_df — aborting split.")
 
     train_drops, val_drops, test_drops = split_drops_by_survey(
-        all_drop_ids, train_pct=train_pct, val_pct=val_pct, seed=seed
+        all_drop_ids,
+        train_pct=train_pct,
+        val_pct=val_pct,
+        test_pct=test_pct,
+        force_val_drops=config.training_force_val_drops,
+        seed=seed,
     )
-
-    print_species_breakdown(balanced_df, train_drops, val_drops, test_drops)
 
     # Write image list .txt files
     for split_name, drops in [

@@ -169,18 +169,12 @@ def run_ingestion():
 
     if not config.class_map_path.exists():
         try:
-            from spyfish.biigle.class_map import (
-                build_class_map_from_species,
-                save_class_map,
-            )
+            from spyfish.biigle.class_map import reseed_from_label_tree
 
-            species_df = storage.read_df_from_s3_csv(config.s3_sharepoint_species_csv)
-            save_class_map(
-                build_class_map_from_species(species_df), config.class_map_path
-            )
+            reseed_from_label_tree()
         except Exception as e:
             logging.warning(
-                f"Failed to seed class_map.json from species CSV: {e}. "
+                f"Failed to seed class_map.json from Biigle label tree: {e}. "
                 f"Run `python -m spyfish.biigle.class_map` to retry."
             )
 

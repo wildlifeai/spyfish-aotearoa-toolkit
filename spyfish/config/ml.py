@@ -55,6 +55,11 @@ class MLConfig(BaseConfig):
         return get_required(self._yaml_config, "training", "")
 
     @property
+    def image_extensions(self) -> tuple:
+        """Canonical image suffixes the pipeline accepts (e.g. ('.jpg', '.jpeg', '.png'))."""
+        return tuple(get_required(self.training_config, "image_extensions", "training"))
+
+    @property
     def training_epochs(self) -> int:
         return int(get_required(self.training_config, "epochs", "training"))
 
@@ -67,20 +72,12 @@ class MLConfig(BaseConfig):
         return int(get_required(self.training_config, "imgsz", "training"))
 
     @property
-    def training_ceiling_pct(self) -> float:
-        return float(
-            get_required(self.training_config, "class_ceiling_pct", "training")
-        )
+    def training_batch(self) -> int:
+        return int(get_required(self.training_config, "batch", "training"))
 
     @property
     def training_floor_pct(self) -> float:
         return float(get_required(self.training_config, "class_floor_pct", "training"))
-
-    @property
-    def training_ceiling_max_iterations(self) -> int:
-        return int(
-            get_required(self.training_config, "ceiling_max_iterations", "training")
-        )
 
     @property
     def training_train_pct(self) -> float:
@@ -95,14 +92,43 @@ class MLConfig(BaseConfig):
         return float(get_required(self.training_config, "test_pct", "training"))
 
     @property
-    def training_val_min_images(self) -> int:
-        return int(get_required(self.training_config, "val_min_images", "training"))
-
-    @property
     def local_training_dir(self) -> Path:
         return self.project_root / get_required(
             self.training_config, "local_training_dir", "training"
         )
+
+    @staticmethod
+    def _parse_drop_ids_from_file(path: Path) -> set:
+        """One DropID per line; '#' starts a comment. Empty set if file missing."""
+        if not path.exists():
+            return set()
+        return {
+            id_part
+            for line in path.read_text().splitlines()
+            if (id_part := line.split("#", 1)[0].strip())
+        }
+
+    @property
+    def training_excluded_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "excluded_drops_file", "training"
+        )
+
+    @property
+    def training_excluded_drops(self) -> set:
+        """DropIDs to exclude from training entirely."""
+        return self._parse_drop_ids_from_file(self.training_excluded_drops_file)
+
+    @property
+    def training_force_val_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "force_val_drops_file", "training"
+        )
+
+    @property
+    def training_force_val_drops(self) -> set:
+        """DropIDs to force into the val split (overrides survey-aware donation)."""
+        return self._parse_drop_ids_from_file(self.training_force_val_drops_file)
 
     @property
     def training_results_dir(self) -> Path:
