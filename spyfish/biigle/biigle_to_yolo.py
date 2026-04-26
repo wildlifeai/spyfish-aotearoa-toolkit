@@ -45,10 +45,26 @@ def biigle_rect_to_yolo(
     return round(cx, 6), round(cy, 6), round(w, 6), round(h, 6)
 
 
+def _read_image_dimensions(img_path: Path) -> Optional[Tuple[int, int]]:
+    """Return (width, height) from a JPEG/PNG header, or None if unreadable.
+
+    PIL's `Image.open` only parses the header for these formats — no full decode.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(img_path) as im:
+            return im.size  # (width, height)
+    except Exception as exc:
+        logging.debug(f"Could not read dimensions of {img_path}: {exc}")
+        return None
+
+
 def convert_annotations_to_yolo(
     df: pd.DataFrame,
     class_map: Dict[str, int],
     labels_dir: Path,
+    images_dir: Path,
     default_img_size: Tuple[int, int] = (1920, 1080),
 ) -> Dict[str, int]:
     """
@@ -58,7 +74,12 @@ def convert_annotations_to_yolo(
         df: Annotation DataFrame with columns: filename, label_name, points (JSON list).
         class_map: label_name → YOLO class_id.
         labels_dir: Output directory for .txt files.
-        default_img_size: Fallback (width, height) when image dimensions are unavailable.
+        images_dir: Source directory of the actual frame images. Per-image
+            dimensions are read from the file headers so YOLO normalisation
+            uses the right denominator. Drops with mixed resolutions (e.g.
+            external Biigle volumes) require this to be accurate.
+        default_img_size: Fallback (width, height) when an image is missing
+            from disk and no dimension can be read.
 
     Returns:
         {filename: annotation_count} summary.
@@ -85,9 +106,16 @@ def convert_annotations_to_yolo(
 
     labels_dir.mkdir(parents=True, exist_ok=True)
     summary: Dict[str, int] = {}
+    n_default_fallback = 0
 
     for filename, group in df.groupby("filename"):
-        img_w, img_h = default_img_size
+        img_path = images_dir / str(filename)
+        dims = _read_image_dimensions(img_path) if img_path.exists() else None
+        if dims is None:
+            n_default_fallback += 1
+            img_w, img_h = default_img_size
+        else:
+            img_w, img_h = dims
         lines = []
 
         for _, row in group.iterrows():
@@ -115,6 +143,12 @@ def convert_annotations_to_yolo(
         summary[str(filename)] = len(lines)
 
     logging.info(f"Wrote {len(summary)} label files to {labels_dir}")
+    if n_default_fallback:
+        logging.warning(
+            f"  {n_default_fallback}/{len(summary)} image(s) were not on disk — "
+            f"used default {default_img_size} for their YOLO normalisation. "
+            "Boxes for those images may be misaligned if their actual resolution differs."
+        )
     return summary
 
 
@@ -240,9 +274,11 @@ def biigle_to_yolo(
     )
 
     for csv_path, drop_df in zip(csv_paths, all_dfs):
-        labels_dir = csv_path.parent.parent / "labels"
-        convert_annotations_to_yolo(drop_df, class_map, labels_dir)
-        logging.info(f"  Wrote labels for {csv_path.parent.parent.name} → {labels_dir}")
+        drop_dir = csv_path.parent.parent
+        labels_dir = drop_dir / "labels"
+        images_dir = drop_dir / "frames"
+        convert_annotations_to_yolo(drop_df, class_map, labels_dir, images_dir)
+        logging.info(f"  Wrote labels for {drop_dir.name} → {labels_dir}")
 
     return class_map
 
@@ -303,7 +339,7 @@ def download_extra_volume_labels(
     logging.info(f"Froze class_map sidecar → {sidecar_class_map}")
 
     class_map = load_class_map(resolved_class_map_path)
-    summary = convert_annotations_to_yolo(df, class_map, labels_dir)
+    summary = convert_annotations_to_yolo(df, class_map, labels_dir, frames_dir)
     logging.info(f"Wrote {len(summary)} YOLO label files → {labels_dir}")
     logging.info(
         f"Bundle ready at {source_dir} — populate {frames_dir}/ with JPEGs "
