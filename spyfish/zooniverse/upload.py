@@ -228,10 +228,6 @@ def _upload_subjects_to_zooniverse(
                 subject_type=kind.noun_singular,
             ),
             SubjectKeys.UPL_SECONDS: upl_seconds,
-<<<<<<< HEAD
-
-=======
->>>>>>> 68b09eb66979a8aafc1614d8d8aafc5ea67cd64f
         }
 
         subject = Subject()
