@@ -48,6 +48,18 @@ STABILITY_PARAMS = {
     "box": 5.0,  # Lower bounding box loss penalty (default 7.5)
 }
 
+# Class-imbalance handling lives here, not in prepare_training_data.py.
+# Trim/oversample were removed — they were destructive (oversample copies whole
+# frames; trim throws away annotations). The right place for class balancing in
+# YOLO is the loss/sampler, which preserves all data:
+#   - `image_weights=True` (Ultralytics arg) → samples images more often when
+#     they contain rare classes. Pass via extra_params in the SWEEP_RUNS or
+#     here directly. Verify the running ultralytics version supports it.
+#   - Per-class loss weighting: subclass the loss or use a custom dataset.
+# Defer enabling either until a real training run shows the model collapses on
+# tail species. For our current data the tail is so sparse (1–10 examples for
+# several species) that floor-merging into 'fish' is doing most of the work.
+
 
 def _clear_yolo_cache(training_dir: Path) -> None:
     """
@@ -66,9 +78,6 @@ def _clear_yolo_cache(training_dir: Path) -> None:
             logging.debug(f"Removed cache: {cache_file}")
         except OSError:
             pass
-
-
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 
 
 def validate_dataset(data_yaml: str) -> None:
@@ -97,7 +106,9 @@ def validate_dataset(data_yaml: str) -> None:
             issues.append(f"  '{split}' directory does not exist: {split_path}")
             continue
         n_images = sum(
-            1 for p in split_path.rglob("*") if p.suffix.lower() in _IMAGE_EXTENSIONS
+            1
+            for p in split_path.rglob("*")
+            if p.suffix.lower() in config.image_extensions
         )
         if n_images == 0:
             issues.append(f"  '{split}' has 0 images in {split_path}")
@@ -120,6 +131,7 @@ def train_model(
     patience: int,
     imgsz: int,
     workers: int = 8,
+    batch: int = 16,
     extra_params: Optional[dict] = None,
 ) -> Path:
     """
@@ -154,7 +166,7 @@ def train_model(
         "data": data_yaml,
         "epochs": epochs,
         "patience": patience,
-        "batch": -1,  # auto-batch
+        "batch": batch,
         "imgsz": imgsz,
         "workers": workers,
         "project": str(project_dir),
@@ -192,6 +204,7 @@ def run_training_pipeline(
     epochs = config.training_epochs
     patience = config.training_patience
     imgsz = config.training_imgsz
+    batch = config.training_batch
 
     base_model_path = config.base_model_path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -219,6 +232,7 @@ def run_training_pipeline(
             epochs=epochs,
             patience=patience,
             imgsz=imgsz,
+            batch=batch,
         )
         results["binary"] = {"local": str(best_pt)}
 
@@ -235,6 +249,7 @@ def run_training_pipeline(
             epochs=epochs,
             patience=patience,
             imgsz=imgsz,
+            batch=batch,
         )
         results["species"] = {"local": str(best_pt)}
 

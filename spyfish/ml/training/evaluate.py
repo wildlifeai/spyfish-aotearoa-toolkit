@@ -20,9 +20,35 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import pandas as pd
+import yaml
 
 from spyfish.config.wrapper import config
 from spyfish.utils import validate_model_path
+
+
+def _resolve_split(data_yaml: str, requested_split: str) -> str:
+    """Demote 'test' to 'val' when the dataset has no usable test split.
+
+    Small datasets often can't carve out a viable test split, so
+    `assemble_yolo_dataset` writes an empty/missing `test:` entry. YOLO would
+    crash; instead we warn (val was used for early stopping, so the metrics
+    are optimistic) and proceed.
+    """
+    if requested_split != "test":
+        return requested_split
+    with open(data_yaml) as f:
+        data = yaml.safe_load(f)
+    test_path = data.get("test")
+    has_test = test_path and Path(test_path).exists() and any(Path(test_path).iterdir())
+    if has_test:
+        return "test"
+    logging.warning(
+        f"No test split available in {Path(data_yaml).name} — falling back to val. "
+        "Note: val was used for early stopping during training, so these metrics "
+        "are optimistic (not a held-out evaluation)."
+    )
+    return "val"
+
 
 # ---------------------------------------------------------------------------
 # Core evaluation
@@ -56,13 +82,14 @@ def evaluate_model(
 
     logging.info(f"Evaluating model: {model_path}")
     model_path = str(validate_model_path(model_path))
-    logging.info(f"  data={data_yaml}  split={split}  imgsz={imgsz}")
+    eval_split = _resolve_split(data_yaml, split)
+    logging.info(f"  data={data_yaml}  split={eval_split}  imgsz={imgsz}")
 
     model = YOLO(model_path)
 
     val_kwargs = {
         "data": data_yaml,
-        "split": split,
+        "split": eval_split,
         "imgsz": imgsz,
         "save_json": True,
         "plots": True,
@@ -77,7 +104,7 @@ def evaluate_model(
     result = {
         "model_path": model_path,
         "data_yaml": data_yaml,
-        "split": split,
+        "eval_split": eval_split,
         "mAP50": round(float(metrics.box.map50), 4),
         "mAP50_95": round(float(metrics.box.map), 4),
         "precision": round(float(metrics.box.mp), 4),

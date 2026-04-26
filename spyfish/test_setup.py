@@ -26,9 +26,9 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
     and updates the local database accordingly.
 
     Expected CSV format (all columns except DropID are optional):
-        DropID,ml_status,priority
-        KSF_20240124_BUV_KSF_085_01,ml_ready,10
-        KSF_20240124_BUV_KSF_085_02,,5
+        DropID,ml_status,priority,biigle_volume_id
+        KSF_20240124_BUV_KSF_085_01,ml_ready,10,12345
+        KSF_20240124_BUV_KSF_085_02,,5,
 
     Row order implies priority — first row has highest priority. If a 'priority'
     column is present it takes precedence; otherwise row order is used.
@@ -51,19 +51,27 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
 
     section_cols = [c for c in df.columns if c in _SECTION_COLUMNS]
     has_priority_col = "priority" in df.columns
+    has_volume_col = "biigle_volume_id" in df.columns
 
     updates = []
     for _, row in df.iterrows():
         drop_id = str(row[drop_col]).strip()
         if not drop_id or drop_id == "nan":
             continue
-        entry = {"drop_id": drop_id, "sections": {}, "priority": None}
+        entry = {
+            "drop_id": drop_id,
+            "sections": {},
+            "priority": None,
+            "biigle_volume_id": None,
+        }
         for col in section_cols:
             val = row.get(col)
             if pd.notna(val) and str(val).strip():
                 entry["sections"][col] = str(val).strip()
         if has_priority_col and pd.notna(row.get("priority")):
             entry["priority"] = int(row["priority"])
+        if has_volume_col and pd.notna(row.get("biigle_volume_id")):
+            entry["biigle_volume_id"] = str(row["biigle_volume_id"]).strip()
         updates.append(entry)
 
     if not updates:
@@ -94,15 +102,23 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
                 if entry["priority"] is not None
                 else base_priority + n - i
             )
-            db.update_deployment_fields(drop_id, priority=priority)
+            field_updates = {"priority": priority}
+            if entry["biigle_volume_id"]:
+                field_updates["biigle_volume_id"] = entry["biigle_volume_id"]
+            db.update_deployment_fields(drop_id, **field_updates)
 
             for section, value in entry["sections"].items():
                 db.update_section_status(drop_id, section, value)
 
             success_count += 1
+            extras = []
+            if entry["sections"]:
+                extras.append(f"sections={entry['sections']}")
+            if entry["biigle_volume_id"]:
+                extras.append(f"biigle_volume_id={entry['biigle_volume_id']}")
             logging.info(
                 f"Updated '{drop_id}' — priority={priority}"
-                + (f", sections={entry['sections']}" if entry["sections"] else "")
+                + ("" if not extras else ", " + ", ".join(extras))
             )
         except Exception as e:
             logging.error(f"Failed to update '{drop_id}': {e}")

@@ -180,16 +180,14 @@ biigle:
   report_download_retry_interval_secs: 0.1
 
 training:
+  image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"]
   epochs: 100
   patience: 25
   imgsz: 640
-  val_min_images: 20
-  train_pct: 0.70
+  train_pct: 0.85
   val_pct: 0.15
-  test_pct: 0.15
-  class_ceiling_pct: 0.40
+  test_pct: 0.0
   class_floor_pct: 0.02
-  ceiling_max_iterations: 3
   local_training_dir: "process_files/training"
   retrain_min_improvement_pct: 2.0
 

@@ -17,9 +17,16 @@ from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
     assemble_yolo_dataset,
+    count_boxes_per_species_in_source,
+    discover_extra_drops,
+    flatten_and_remap_labels,
+    identify_floor_species,
     prepare_from_annotations,
+    print_per_drop_species_inventory,
+    print_species_totals,
 )
 from spyfish.ml.training.split_data import split_data
+from spyfish.ml.training.sweep import run_sweep_pipeline
 from spyfish.ml.training.train import run_training_pipeline
 
 
@@ -99,9 +106,16 @@ def run_retraining(
     binary_only: bool = False,
     species_only: bool = False,
     auto_promote: bool = False,
+    sweep: bool = False,
 ) -> dict:
     """
     Run the full retraining pipeline.
+
+    When sweep=True, steps 6+7 (single train + evaluate) are replaced by
+    run_sweep_pipeline, which trains every variant in SWEEP_RUNS, evaluates
+    each on the test split (val fallback if test is empty), and writes a
+    Markdown comparison report. Auto-promotion is disabled in sweep mode —
+    pick a winner from the report manually.
     """
     logging.info("Starting Retraining Pipeline...")
 
@@ -109,9 +123,10 @@ def run_retraining(
     local_training_dir = config.local_training_dir
     images_dir = config.deployment_data_dir
 
-    labels_dir = local_training_dir / "labels_raw"
     class_map_path = local_training_dir / "class_map.json"
+    labels_staged_dir = local_training_dir / "labels_staged"
 
+    # 1. Generate per-drop YOLO labels from Biigle raw CSVs (uses class_map.json IDs)
     logging.info("Generating per-drop YOLO labels from Biigle expert CSVs...")
     class_map = biigle_to_yolo(
         deployment_data_dir=images_dir,
@@ -122,19 +137,8 @@ def run_retraining(
         logging.warning("No labels exported from Biigle. Retraining cannot proceed.")
         return {}
 
-    logging.info("Step 2b: Collecting per-drop labels into training staging area...")
-    labels_dir.mkdir(parents=True, exist_ok=True)
-    collected = 0
-    for txt in images_dir.glob("**/annotations/*.txt"):
-        shutil.copy2(txt, labels_dir / txt.name)
-        collected += 1
-    logging.info(f"  Collected {collected} label files → {labels_dir}")
-
-    spot_check_dir = local_training_dir / "spot_checks"
-    draw_frames_on_images(images_dir, labels_dir, class_map, spot_check_dir)
-
-    # 3. Balance and Prepare
-    logging.info("Step 3: Balancing annotations and preparing YOLO layout...")
+    # 2. Balance & prepare — must run before remap so we know the unified class ordering.
+    logging.info("Balancing annotations and computing unified class list...")
     balanced_df, species_names = prepare_from_annotations()
 
     if balanced_df.empty:
@@ -144,15 +148,50 @@ def run_retraining(
         )
         return {}
 
-    # 3b. Filter to drops that have BOTH labels AND images — skip drops missing either.
-    _image_exts = {".jpg", ".jpeg", ".png"}
+    # 2b. Discover extras (drops under extra_no_survey_id/ without MaxN data).
+    extra_drops, extra_species = discover_extra_drops(images_dir)
+
+    # 2c. Build candidate unified species list, then apply floor.
+    # Floor uses actual on-disk box counts (not MaxN proxies) and merges species
+    # below class_floor_pct into the 'fish' bucket — done implicitly by leaving
+    # them out of unified_names so flatten_and_remap_labels falls back to fish.
+    all_species = set(species_names) | set(extra_species) | {"fish"}
+    box_counts = count_boxes_per_species_in_source(images_dir, class_map_path)
+    floor_species = identify_floor_species(box_counts, config.training_floor_pct)
+    print_species_totals(box_counts, floor_species)
+    species_names = sorted(all_species - floor_species)
+
+    # 3. Flatten + remap class IDs into the unified ordering. Floored species
+    #    are absent from unified_names and so route to the 'fish' fallback.
+    flatten_and_remap_labels(
+        deployment_data_dir=images_dir,
+        src_class_map_path=class_map_path,
+        unified_names=species_names,
+        dst_dir=labels_staged_dir,
+    )
+
+    # 3b. Show per-drop bounding-box counts so the user sees imbalance before splits.
+    print_per_drop_species_inventory(labels_staged_dir, species_names)
+
+    # 4. Spot-check visualisation uses the remapped labels — reflects what the model actually sees.
+    unified_class_map = {name: idx for idx, name in enumerate(species_names)}
+    spot_check_dir = local_training_dir / "spot_checks"
+    draw_frames_on_images(
+        images_dir, labels_staged_dir, unified_class_map, spot_check_dir
+    )
+
+    # 5. Filter to drops that have BOTH labels AND images — skip drops missing either.
+    # Both checks resolve directly to the canonical per-drop dirs — no tree walk:
+    #   labels: labels_staged_dir/<drop_id>/*.txt   (flatten_and_remap_labels writes here)
+    #   images: deployment_data_dir/<survey>/<drop>/frames/*.{jpg,…}  (config.get_frames_dir)
+    image_exts = set(config.image_extensions)
     _trainable_drops = []
     for drop_id in balanced_df["DropID"].unique():
-        has_labels = any(labels_dir.glob(f"{drop_id}*.txt"))
-        has_images = any(
-            p
-            for p in images_dir.rglob(f"{drop_id}*")
-            if p.suffix.lower() in _image_exts
+        drop_labels_dir = labels_staged_dir / drop_id
+        has_labels = drop_labels_dir.is_dir() and any(drop_labels_dir.glob("*.txt"))
+        drop_frames_dir = config.get_frames_dir(drop_id)
+        has_images = drop_frames_dir.is_dir() and any(
+            p for p in drop_frames_dir.iterdir() if p.suffix.lower() in image_exts
         )
         if has_labels and has_images:
             _trainable_drops.append(drop_id)
@@ -169,35 +208,61 @@ def run_retraining(
     if balanced_df.empty:
         logging.error(
             "No drops have both labels and images — retraining cannot proceed.\n"
-            f"  Labels dir: {labels_dir}\n"
+            f"  Labels dir: {labels_staged_dir}\n"
             f"  Images dir: {images_dir}\n"
-            "Ensure frame extraction (step 3) and Biigle Rectangle annotation export have both run."
+            "Ensure frame extraction and Biigle Rectangle annotation export have both run."
         )
         return {}
     logging.info(
         f"  {len(_trainable_drops)} drops ready for training: {_trainable_drops}"
     )
 
-    # 4. Split
-    logging.info("Step 4: Splitting data into train/val/test...")
+    # 6. Split — only MaxN-backed drops participate in survey-aware splitting.
+    logging.info("Splitting data into train/val/test...")
     train_drops, val_drops, test_drops = split_data(
         balanced_df=balanced_df, images_dir=images_dir, output_dir=local_training_dir
     )
 
-    # 5. Assemble YOLO layout
-    logging.info("Step 5: Assembling final YOLO dataset layout...")
+    # 6b. Fold extras into train split only (no drop/survey metadata for safe val/test).
+    if extra_drops:
+        train_drops = sorted(set(train_drops) | set(extra_drops))
+        logging.info(
+            f"Added {len(extra_drops)} extra drop(s) to train split: {extra_drops}"
+        )
+
+    # 7. Assemble YOLO layout.
+    logging.info("Assembling final YOLO dataset layout...")
     species_yaml, binary_yaml = assemble_yolo_dataset(
         train_drops=train_drops,
         val_drops=val_drops,
         test_drops=test_drops,
         images_dir=images_dir,
-        species_labels_dir=labels_dir,
+        species_labels_dir=labels_staged_dir,
         output_dir=local_training_dir,
         class_names=species_names,
         build_binary=not species_only,
+        source_class_map_path=class_map_path,
+        extra_drops=set(extra_drops),
     )
 
-    # 6. Train
+    # 6. Train (single variant) OR sweep (multi-variant comparison).
+    if sweep:
+        if auto_promote:
+            logging.warning(
+                "auto_promote is ignored in sweep mode — pick a winner manually "
+                "from the generated report.md."
+            )
+        logging.info("Step 6: Running training sweep across SWEEP_RUNS...")
+        sweep_results = run_sweep_pipeline(
+            binary_data_yaml=str(binary_yaml) if binary_yaml else None,
+            species_data_yaml=str(species_yaml) if species_yaml else None,
+            train_binary=not species_only,
+            train_species=not binary_only,
+            build_reports=True,
+        )
+        logging.info("Retraining Pipeline COMPLETE (sweep mode).")
+        return {"sweep": sweep_results}
+
     logging.info("Step 6: Training YOLO models...")
     train_results = run_training_pipeline(
         binary_data_yaml=str(binary_yaml) if binary_yaml else None,
