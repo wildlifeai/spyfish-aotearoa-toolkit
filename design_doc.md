@@ -407,7 +407,7 @@ flowchart TD
 
     M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>biigle_status: expert_uploaded → expert_complete"]
 
-    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, trim dominant species, floor merge<br/>Survey-aware 70/15/15 split, oversample rare classes in train<br/>Train YOLOv12 (or sweep variants)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
+    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, identify floor species (rare → 'fish' fallback)<br/>Survey-aware 70/15/15 split<br/>Train YOLOv12 (or sweep variants)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
 
     O --> P["Updated production model<br/>All future inference uses new weights"]
 ```
@@ -1286,19 +1286,17 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 ### Training (`training` section)
 
 
-| Key                           | Default                       | Effect                                                                  |
-| ----------------------------- | ----------------------------- | ----------------------------------------------------------------------- |
-| `epochs`                      | 100                           | Max training epochs                                                     |
-| `patience`                    | 25                            | Early stopping patience                                                 |
-| `imgsz`                       | 640                           | Input image size                                                        |
-| `batch`                       | 16                            | YOLO batch size; drop to 4 at imgsz=1280, raise to 32 on 24GB+ GPUs     |
-| `class_ceiling_pct`           | 0.40                          | Anti-monoculture trigger: trim top species only if it exceeds max(ceiling, 2/N) |
-| `class_floor_pct`             | 0.02                          | Merge species below this fraction into generic "fish" label             |
-| `min_frames_per_drop`         | 10                            | Per-drop floor: never trim a drop below this total frame count          |
-| `oversample_factor`           | 3                             | Extra train-split copies of rare-class frames (0 disables)              |
-| `oversample_rare_threshold`   | 0.05                          | Classes below this post-floor fraction get oversampled in train split   |
-| `excluded_drops_file`         | `training_excluded_drops.txt` | DropIDs to skip (one per line; `#` comments OK)                         |
-| `retrain_min_improvement_pct` | 2.0                           | New model must beat production by ≥ this much mAP@0.5 to be promoted    |
+| Key                           | Default                         | Effect                                                                  |
+| ----------------------------- | ------------------------------- | ----------------------------------------------------------------------- |
+| `epochs`                      | 100                             | Max training epochs                                                     |
+| `patience`                    | 25                              | Early stopping patience                                                 |
+| `imgsz`                       | 640                             | Input image size                                                        |
+| `batch`                       | 16                              | YOLO batch size; drop to 4 at imgsz=1280, raise to 32 on 24GB+ GPUs     |
+| `class_floor_pct`             | 0.02                            | Species below this fraction of on-disk boxes are merged into "fish"     |
+| `min_frames_per_drop`         | 10                              | Per-drop floor: never trim a drop below this total frame count          |
+| `excluded_drops_file`         | `training_excluded_drops.txt`   | DropIDs to skip (one per line; `#` comments OK)                         |
+| `force_val_drops_file`        | `training_force_val_drops.txt`  | DropIDs to force into the val split, overriding survey-aware donation   |
+| `retrain_min_improvement_pct` | 2.0                             | New model must beat production by ≥ this much mAP@0.5 to be promoted    |
 
 
 ### CSV column mapping (`csv_mapping` section)
@@ -1496,11 +1494,11 @@ python run_pipeline.py --retrain
 The orchestrator (`spyfish/orchestrator/retrain_runner.py`) chains together:
 
 1. **Export BIIGLE annotations to YOLO format** (`biigle_to_yolo.py`): Reads frame annotation CSVs from `data_quality/{DropID}/biigle_frames/`, converts bounding boxes to YOLO `.txt` format, generates `class_map.json`.
-2. **Drop exclusion** (`prepare_from_annotations`): DropIDs listed in `training_excluded_drops.txt` (one per line; `#` for inline comments) are filtered out *before* any balancing. Use this to hold back deployments whose QA is still in progress — they remain invisible to the rest of the pipeline until removed from the file.
-3. **Anti-monoculture trim** (`trim_dominant_species`): Trims *only* the single most-dominant species, *only* if its fraction exceeds `max(class_ceiling_pct, 2/N)` where N is the species count. With 2 species near 50/50, the threshold is 100% — never fires. With many species and one dominant, fires at `class_ceiling_pct` (40%). Frames are removed from the species' most-populated drops first; least-diverse (monoculture) frames go first within each drop. The `min_frames_per_drop` floor (10) prevents any drop from being gutted.
-4. **Floor merge** (`apply_floor`): Species below `class_floor_pct` (2%) are remapped to a generic `"fish"` label. After this step the working class set is the dominant species plus an aggregated "fish" class.
-5. **Survey-aware split** (`split_data.py`): Drop-level 70/15/15 train/val/test. Surveys with ≥5 drops donate one each to val + test; ≥3 drops donate one to val; smaller surveys go entirely to train. No drop appears in two splits (no leakage). `val_min_images` (20) is logged as a recommendation.
-6. **Assemble + oversample** (`assemble_yolo_dataset` → `oversample_rare_in_train`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`. After assembly, classes whose post-floor fraction is below `oversample_rare_threshold` (5%) get their **train-split** frames replicated `oversample_factor` (3) times each. Val/test are never duplicated. This gives rare classes more gradient signal during training without removing dominant-class examples.
+2. **Drop exclusion** (`prepare_from_annotations`): DropIDs listed in `training_excluded_drops.txt` (one per line; `#` for inline comments) are filtered out before training. Use this to hold back deployments whose QA is still in progress — they remain invisible to the rest of the pipeline until removed from the file.
+3. **Box count + floor identification** (`count_boxes_per_species_in_source` → `identify_floor_species`): Walks every `<drop>/labels/*.txt` and counts bounding boxes per species (decoded via per-drop class_map sidecar, falling back to the global class_map). Species whose share of total boxes is below `class_floor_pct` (2%) are flagged for the floor — they will be merged into the generic `"fish"` class.
+4. **Flatten + remap labels** (`flatten_and_remap_labels`): Stages source labels into `process_files/training/labels_staged/<drop_id>/` with class IDs rewritten to a unified ordering. Floored species are absent from the unified class list, so their bounding boxes redirect to the `"fish"` fallback class. The result is one class set used by both species and binary training.
+5. **Survey-aware split** (`split_data.py`): Drop-level 70/15/15 train/val/test. Surveys with ≥5 drops donate one each to val + test; ≥3 drops donate one to val; smaller surveys go entirely to train. DropIDs in `training_force_val_drops.txt` are pinned to val regardless. No drop appears in two splits (no leakage). `val_min_images` (20) is logged as a recommendation.
+6. **Assemble** (`assemble_yolo_dataset`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`, copying or symlinking images and remapped labels into per-split `images/` and `labels/` trees. Image lookup is scoped by drop_id (`{drop_id: {stem: Path}}`) so identically-named frames from different drops can never cross-pair.
 7. **Train** (`train.py`): YOLOv12 with underwater-tuned augmentation (HSV shifts, rotation, horizontal flip), `batch=16`, `imgsz=640`. AMP disabled (prevents NaN losses on some underwater data). Stability params: `warmup_epochs=5`, `warmup_bias_lr=0.0001`, `nbs=64`, `box=5.0`.
 8. **Evaluate + promote** (`evaluate.py`): Evaluates new model vs production model on the test split. Promotes if mAP@0.5 improvement ≥ `retrain_min_improvement_pct` (2%).
 
@@ -1515,27 +1513,30 @@ The orchestrator (`spyfish/orchestrator/retrain_runner.py`) chains together:
 The retrain run prints these markers to the log — scan them to confirm the pipeline did what you expected:
 
 - `Excluded N drop(s) per training_excluded_drops.txt: [...]` — exclusion list applied
-- `No species above trigger threshold ... leaving dataset untouched` — `trim_dominant_species` was a no-op (distribution balanced enough)
-- `Trimming dominant species 'snapper': 70% → ≤40%` — trim fired on the named species
-- `Rare classes flagged for oversampling: ['fish', 'wrasse']` — which classes will be replicated
-- `Oversampled rare classes: N duplicate (image, label) pair(s) added to train split` — oversampling executed
+- `Loaded class map with X label aliases (Y classes) from ...` — class_map sidecars and global registry resolved
+- `=== Pre-floor species composition ===` followed by per-species fractions — `print_species_totals` showing which species cross the floor (those below `class_floor_pct` are tagged `→ fish`)
+- `flatten_and_remap_labels: N files → labels_staged/<drop_id>/ ...` — staged labels written with unified class IDs
+- `assemble_yolo_dataset: indexed N frame image(s) across M drop(s) under ...` — image index built per drop_id
+- `=== Pre-split species inventory (from labels_staged) ===` — per-drop species counts after the floor remap, useful for verifying class-balance assumptions before the split runs
 
 ### Experimentation: training sweeps
 
 For the model-selection phase (before a winner has been chosen), `--retrain` produces a single binary + species pair. To compare multiple configurations on the same dataset, use the sweep harness — it reuses the assembled YOLO directory, so you don't re-prepare data:
 
 ```bash
-# After --retrain has built the dataset
-python -m spyfish.ml.training.sweep \
-    --data process_files/training/species/data.yaml
+# After --retrain has built the dataset — runs both binary and species sweeps,
+# writes per-dataset Markdown reports automatically
+python -m spyfish.ml.training.sweep
 
-# Build a self-contained Markdown report (tables + training curves +
-# confusion matrices + example prediction images per run)
-python -m spyfish.ml.training.sweep_report \
-    --sweep-dir process_files/training/runs/sweep_<timestamp>
+# Or scope to one dataset
+python -m spyfish.ml.training.sweep --binary-only
+python -m spyfish.ml.training.sweep --species-only
+
+# Skip the Markdown report (useful for quick debug runs)
+python -m spyfish.ml.training.sweep --no-report
 ```
 
-Default variants in `SWEEP_RUNS` (`sweep.py`): `baseline`, `adamw` (AdamW + lr0=0.001 + dropout), `highres` (imgsz=1280, batch=4), `adamw_highres`. Edit the list to add/remove experiments. Each run produces its own `best.pt` + `results.csv`; the comparison CSV lands at `<sweep_dir>/comparison.csv` and the report at `<sweep_dir>/report.md`.
+Default variants in `SWEEP_RUNS` (`sweep.py`): `baseline` (vanilla SGD, default LR) and `adamw` (AdamW + `lr0=0.001` + dropout=0.1). Edit the list to add/remove experiments. Each run produces its own `best.pt` + `results.csv`; per-dataset comparison CSVs land at `<sweep_dir>/comparison.csv` and reports at `<sweep_dir>/report.md`. Output dirs are auto-named `sweep_<timestamp>_binary/` and `sweep_<timestamp>_species/`.
 
 ### NeSI / Slurm
 
