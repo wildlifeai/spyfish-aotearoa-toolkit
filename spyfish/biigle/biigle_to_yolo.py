@@ -233,8 +233,10 @@ def biigle_to_yolo(
         return {}
 
     class_map = load_class_map(class_map_path)
+    n_classes = len(set(class_map.values()))
     logging.info(
-        f"Loaded class map with {len(class_map)} label keys from {class_map_path}"
+        f"Loaded class map with {len(class_map)} label aliases "
+        f"({n_classes} classes) from {class_map_path}"
     )
 
     for csv_path, drop_df in zip(csv_paths, all_dfs):

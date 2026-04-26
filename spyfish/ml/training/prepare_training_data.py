@@ -1,37 +1,34 @@
 """
-prepare_training_data.py — Balance and prepare expert annotations for YOLO training.
+prepare_training_data.py — Prepare expert annotations + assemble YOLO datasets.
 
-This module is intentionally split into small, composable functions so each step
-can be run and tested independently:
+Composable functions:
 
-  prepare_from_annotations()   — Load expert annotations, apply trim-dominant + floor.
-  make_binary_labels()         — Convert existing multi-class YOLO .txt labels → binary (all → class 0).
-  generate_data_yaml()         — Write a YOLO-compatible data.yaml for a given split.
-  copy_split_files()           — Copy images + labels into clean train/val/test directory layout.
-  compute_species_fractions()  — Utility: per-species fraction of total MaxInterval counts.
-  trim_dominant_species()      — Anti-monoculture: trim only the most-dominant species if wildly over fair share.
-  apply_floor()                — Remap rare species below threshold → "fish".
-  identify_rare_classes()      — Names of species below the oversample threshold.
-  oversample_rare_in_train()   — Replicate rare-class frames in train split (no removal).
+  prepare_from_annotations()         — Load expert MaxN annotations into a DataFrame.
+  count_boxes_per_species_in_source()— Pre-scan source labels for per-species box counts.
+  identify_floor_species()           — Names of species below class_floor_pct (merged → 'fish').
+  flatten_and_remap_labels()         — Walk source labels, remap class IDs to unified ordering.
+  discover_extra_drops()             — Find drops with labels but no MaxN data.
+  copy_split_files()                 — Copy images + labels into YOLO train/val/test layout.
+  make_binary_labels()               — Convert species labels → binary (all → class 0).
+  generate_data_yaml()               — Write a YOLO data.yaml for a given split.
+  assemble_yolo_dataset()            — Top-level: builds species + binary datasets from drop lists.
 
-Typical usage order:
-  1. biigle_to_yolo.py         → writes species labels to labels_dir/
-  2. prepare_from_annotations()→ balanced df with species list
-  3. make_binary_labels()       → writes binary labels to binary_labels_dir/
-  4. split_data.py              → assigns drops to train/val/test, writes drop-level .txt files
-  5. copy_split_files()         → assembles clean YOLO dataset folders per split
-  6. generate_data_yaml()       → writes data.yaml for each of species and binary
-
-Usage (standalone):
-    python -m spyfish.ml.training.prepare_training_data --images-dir /path/images --labels-dir /path/labels --output-dir /path/training
+Typical orchestration order (see retrain_runner.py):
+  1. biigle_to_yolo.py                → writes per-drop label files
+  2. prepare_from_annotations()       → MaxN df + species list
+  3. discover_extra_drops()           → adds extras' species to the unified list
+  4. count_boxes_per_species_in_source() + identify_floor_species()
+                                       → trims unified species list (rare → fish)
+  5. flatten_and_remap_labels()       → stages labels with unified class IDs
+  6. split_data.py                    → assigns drops to train/val/test
+  7. assemble_yolo_dataset()          → writes the final YOLO dataset + data.yaml
 """
 
-import argparse
 import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 import pandas as pd
 import yaml
@@ -44,304 +41,28 @@ from spyfish.config.wrapper import config
 # ---------------------------------------------------------------------------
 
 
-def compute_species_fractions(df: pd.DataFrame) -> pd.Series:
-    """
-    Return per-species fraction of total MaxInterval annotations, sorted descending.
-
-    Args:
-        df: Annotation DataFrame with 'ScientificName' and 'MaxInterval' columns.
-
-    Returns:
-        pd.Series indexed by ScientificName.
-    """
-    total = df["MaxInterval"].sum()
-    if total == 0:
-        return pd.Series(dtype=float)
-    return (df.groupby("ScientificName")["MaxInterval"].sum() / total).sort_values(
-        ascending=False
-    )
-
-
-def _print_species_summary(df: pd.DataFrame, label: str = "Dataset") -> None:
-    """Log a readable per-species summary."""
-    fractions = compute_species_fractions(df)
-    logging.info(f"\n=== {label} summary ===")
-    for species, frac in fractions.items():
-        count = int(df[df["ScientificName"] == species]["MaxInterval"].sum())
-        logging.info(f"  {species:<40} {frac:.1%}  ({count} intervals)")
-    logging.info(f"  Total drops: {df['DropID'].nunique()}  |  Total rows: {len(df)}")
-    logging.info("=" * (len(label) + 16) + "\n")
-
-
 # ---------------------------------------------------------------------------
-# Ceiling / floor balancing
-# ---------------------------------------------------------------------------
-
-
-def trim_dominant_species(
-    df: pd.DataFrame,
-    ceiling_pct: float,
-    min_frames_per_drop: Optional[int] = None,
-) -> pd.DataFrame:
-    """
-    Trim ONLY the single most-dominant species, ONLY if it's wildly over fair share.
-
-    Anti-monoculture sanity check, not a balancing pass. Other species — even if
-    technically above ceiling_pct — are left alone. Use class oversampling
-    (`oversample_rare_in_train`) to give rare species more training signal
-    instead of removing dominant-class examples.
-
-    Trigger threshold: `max(ceiling_pct, 2/N)` where N = distinct species count.
-      - N=2 species at 50/50: threshold = 100% → never triggers.
-      - N=3, ceiling=40%: threshold = 66% → only fires for very dominant species.
-      - N=10, ceiling=40%: threshold = 40% → fires whenever any species exceeds ceiling.
-
-    The triggering species is trimmed down to the threshold (not lower).
-    Frames are removed from its most-populated drops first; within each drop,
-    least-diverse frames go first (monoculture). Per-drop floor is enforced.
-    """
-    if min_frames_per_drop is None:
-        min_frames_per_drop = config.training_min_frames_per_drop
-
-    fractions = compute_species_fractions(df)
-    if fractions.empty:
-        return df
-
-    n_species = len(fractions)
-    threshold = max(ceiling_pct, 2.0 / n_species)
-    top_species = fractions.index[0]
-    top_frac = float(fractions.iloc[0])
-
-    if top_frac <= threshold:
-        logging.info(
-            f"No species above trigger threshold ({threshold:.0%} = max of "
-            f"ceiling {ceiling_pct:.0%} and 2/N={2 / n_species:.0%} for {n_species} species). "
-            f"Top species '{top_species}' at {top_frac:.0%} — leaving dataset untouched."
-        )
-        return df.reset_index(drop=True)
-
-    logging.info(
-        f"Trimming dominant species '{top_species}': {top_frac:.0%} → ≤{threshold:.0%}"
-    )
-    df = _trim_species_to_threshold(df, top_species, threshold, min_frames_per_drop)
-    final_frac = float(compute_species_fractions(df).get(top_species, 0.0))
-    logging.info(f"  '{top_species}' now at {final_frac:.0%}")
-    return df.reset_index(drop=True)
-
-
-def _trim_species_to_threshold(
-    df: pd.DataFrame,
-    species: str,
-    threshold: float,
-    min_frames_per_drop: int,
-) -> pd.DataFrame:
-    """Trim `species` frames until its fraction ≤ threshold, respecting per-drop floor.
-
-    Whole frames (DropID, TimeOfMax) are removed atomically. Drops with the most
-    species frames are visited first; within a drop, least-diverse frames go first
-    so multi-species training signal is preserved.
-    """
-    species_mask = df["ScientificName"] == species
-    total_remaining = float(df["MaxInterval"].sum())
-    species_remaining = float(df.loc[species_mask, "MaxInterval"].sum())
-
-    if total_remaining == 0 or species_remaining / total_remaining <= threshold:
-        return df
-
-    # Pre-compute per-frame attributes once. Without these, each loop iteration
-    # would re-scan df via boolean masks — O(N²) for the trim phase.
-    grouped = df.groupby(["DropID", "TimeOfMax"])
-    frame_indices = grouped.groups  # (drop, time) → row Index
-    frame_intervals = grouped["MaxInterval"].sum().to_dict()
-    frame_diversity = grouped["ScientificName"].nunique().to_dict()
-    frame_species_intervals = (
-        df.loc[species_mask]
-        .groupby(["DropID", "TimeOfMax"])["MaxInterval"]
-        .sum()
-        .to_dict()
-    )
-    frames_per_drop = df.groupby("DropID")["TimeOfMax"].nunique().to_dict()
-
-    species_frames = df.loc[species_mask, ["DropID", "TimeOfMax"]].drop_duplicates()
-    drops_by_count = species_frames["DropID"].value_counts()
-
-    dropped_indices: set = set()
-    frames_removed = 0
-    for drop_id in drops_by_count.index:
-        if species_remaining / total_remaining <= threshold:
-            break
-
-        candidates = sorted(
-            (frame_diversity[(drop_id, t)], t)
-            for t in species_frames.loc[
-                species_frames["DropID"] == drop_id, "TimeOfMax"
-            ]
-        )
-
-        for _, time_of_max in candidates:
-            if (
-                species_remaining / total_remaining <= threshold
-                or frames_per_drop[drop_id] <= min_frames_per_drop
-            ):
-                break
-            key = (drop_id, time_of_max)
-            dropped_indices.update(frame_indices[key])
-            total_remaining -= frame_intervals[key]
-            species_remaining -= frame_species_intervals[key]
-            frames_per_drop[drop_id] -= 1
-            frames_removed += 1
-
-    if frames_removed:
-        logging.info(f"  Removed {frames_removed} frame(s) from '{species}'")
-        return df.drop(index=list(dropped_indices))
-
-    if total_remaining > 0 and species_remaining / total_remaining > threshold:
-        logging.warning(
-            f"  '{species}' still over threshold; limited by "
-            f"{min_frames_per_drop}-frame-per-drop floor."
-        )
-    return df
-
-
-def identify_rare_classes(
-    df: pd.DataFrame,
-    threshold: Optional[float] = None,
-) -> List[str]:
-    """Return species names whose post-balancing fraction is below `threshold`."""
-    if threshold is None:
-        threshold = config.training_oversample_rare_threshold
-    fractions = compute_species_fractions(df)
-    return fractions[fractions < threshold].index.tolist()
-
-
-def oversample_rare_in_train(
-    train_images_dir: Path,
-    train_labels_dir: Path,
-    rare_class_ids: List[int],
-    oversample_factor: int,
-) -> int:
-    """
-    Replicate train-split frames containing any rare class.
-
-    For each .txt label file referencing at least one rare class_id, creates
-    `oversample_factor` additional (image, label) copies with a `_copyN` suffix
-    on the stem. The duplicates are pure file copies — augmentation during
-    training (mosaic, HSV, etc.) provides the variation that prevents
-    memorization.
-
-    Train split only — never call this on val/test.
-
-    Returns the number of duplicate (image, label) pairs created.
-    """
-    if not rare_class_ids or oversample_factor < 1:
-        return 0
-
-    rare_set = set(rare_class_ids)
-    n_dup = 0
-    for label_path in sorted(train_labels_dir.glob("*.txt")):
-        lines = [ln for ln in label_path.read_text().splitlines() if ln.strip()]
-        has_rare = any(int(ln.split()[0]) in rare_set for ln in lines)
-        if not has_rare:
-            continue
-
-        stem = label_path.stem
-        img_path = None
-        for ext in config.image_extensions:
-            p = train_images_dir / (stem + ext)
-            if p.exists():
-                img_path = p
-                break
-        if img_path is None:
-            logging.debug(f"oversample: no image for label {stem}")
-            continue
-
-        for i in range(1, oversample_factor + 1):
-            new_stem = f"{stem}_copy{i}"
-            new_img = train_images_dir / (new_stem + img_path.suffix)
-            new_lbl = train_labels_dir / (new_stem + ".txt")
-            if not new_img.exists():
-                shutil.copy2(img_path, new_img)
-            if not new_lbl.exists():
-                shutil.copy2(label_path, new_lbl)
-            n_dup += 1
-
-    if n_dup:
-        logging.info(
-            f"Oversampled rare classes: {n_dup} duplicate (image, label) "
-            f"pair(s) added to train split"
-        )
-    return n_dup
-
-
-def apply_floor(df: pd.DataFrame, floor_pct: float) -> pd.DataFrame:
-    """
-    Remap rare species (below floor_pct of total MaxInterval) → 'fish'.
-    Applied *once* after the ceiling is stable.
-
-    Rows that share a (DropID, TimeOfMax) with the same merged label are collapsed
-    by summing MaxInterval so there are no duplicate frame-species pairs.
-
-    Args:
-        df: Expert annotation DataFrame.
-        floor_pct: Minimum species fraction; anything below is merged into 'fish'.
-
-    Returns:
-        DataFrame with rare species remapped.
-    """
-    fractions = compute_species_fractions(df)
-    rare_species = fractions[fractions < floor_pct].index.tolist()
-
-    if not rare_species:
-        logging.info("No species below floor threshold — no remapping needed.")
-        return df
-
-    logging.info(
-        f"Floor: remapping {len(rare_species)} rare species → 'fish': {rare_species}"
-    )
-    df = df.copy()
-    df.loc[df["ScientificName"].isin(rare_species), "ScientificName"] = "fish"
-
-    # Re-collapse duplicates after merge
-    df = df.groupby(
-        ["DropID", "ScientificName", "TimeOfMax", "AnnotatedBy"], as_index=False
-    )["MaxInterval"].sum()
-    return df
-
-
-# ---------------------------------------------------------------------------
-# DB → balanced DataFrame
+# Annotation loading
 # ---------------------------------------------------------------------------
 
 
 def prepare_from_annotations(
     deployment_data_dir: Optional[Path] = None,
-    ceiling_pct: Optional[float] = None,
-    floor_pct: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
+    """Load expert MaxN annotations and return (df, species_names).
+
+    Globs for *_biigle_expert_maxn.csv under deployment_data_dir. Drops
+    listed in `training_excluded_drops_file` are filtered out. No balancing —
+    the orchestrator applies the floor by trimming `unified_names` before
+    `flatten_and_remap_labels` so floored species fall back to 'fish'.
     """
-    Load expert annotations from local CSV files, apply trim-dominant + floor balancing.
-
-    Globs for *_biigle_expert_maxn.csv under deployment_data_dir.
-    This function is 100% offline and does NOT use the database.
-
-    Args:
-        deployment_data_dir: Root directory to search for expert CSVs. Defaults to config.deployment_data_dir.
-        ceiling_pct: Anti-monoculture trim threshold. Defaults to config training.class_ceiling_pct.
-        floor_pct: Min per-species fraction (rare → 'fish'). Defaults to config training.class_floor_pct.
-
-    Returns:
-        (balanced_df, species_class_names)
-    """
-    ceiling_pct = ceiling_pct or config.training_ceiling_pct
-    floor_pct = floor_pct or config.training_floor_pct
     deployment_data_dir = deployment_data_dir or config.deployment_data_dir
 
     logging.info(f"Loading expert MaxN annotations from {deployment_data_dir}...")
     maxn_glob = f"**/annotations/*{config.biigle_expert_maxn_suffix}"
-    all_dfs = []
-    for csv_path in deployment_data_dir.glob(maxn_glob):
-        logging.debug(f"  Found expert MaxN: {csv_path}")
-        all_dfs.append(pd.read_csv(csv_path))
+    all_dfs = [
+        pd.read_csv(csv_path) for csv_path in deployment_data_dir.glob(maxn_glob)
+    ]
 
     if not all_dfs:
         raise RuntimeError(
@@ -350,9 +71,6 @@ def prepare_from_annotations(
         )
 
     df = pd.concat(all_dfs, ignore_index=True)
-
-    # Standardize column naming to match what balancing logic expects
-    # (BiigleParser.format_count_annotations_output already does most of this)
     logging.info(
         f"Loaded {len(df)} expert MaxN rows from {df['DropID'].nunique()} drops."
     )
@@ -373,14 +91,6 @@ def prepare_from_annotations(
                 f"{len(stale)} drop(s) listed in {config.training_excluded_drops_file.name} "
                 f"were not found in loaded annotations (stale entries?): {sorted(stale)}"
             )
-
-    # Trim only the dominant species (anti-monoculture, not full balance)
-    df = trim_dominant_species(df, ceiling_pct)
-
-    # Floor: merge rare species into 'fish'
-    df = apply_floor(df, floor_pct)
-
-    _print_species_summary(df, label="Balanced dataset")
 
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
@@ -425,6 +135,103 @@ def _rewrite_label_file(
             continue
         out_lines.append(f"{new_id} " + " ".join(parts[1:]))
     dst_txt.write_text("\n".join(out_lines))
+
+
+def _iter_class_ids(label_path: Path) -> Iterator[int]:
+    """Yield class IDs from a YOLO label file, skipping blank or malformed lines."""
+    for line in label_path.read_text().splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            yield int(parts[0])
+        except ValueError:
+            continue
+
+
+def count_boxes_per_species_in_source(
+    deployment_data_dir: Path,
+    global_class_map_path: Path,
+) -> Dict[str, int]:
+    """Walk every <drop>/labels/*.txt and count bounding boxes per species name.
+
+    Class IDs resolve via the per-drop sidecar (annotations/class_map.json) if
+    present, **falling back to the global class_map** when the sidecar doesn't
+    know the id — sidecars can lag behind the global when species are added
+    after the sidecar was first written.
+    """
+    global_map = (
+        load_class_map_by_id(global_class_map_path)
+        if global_class_map_path.exists()
+        else {}
+    )
+    counts: Dict[str, int] = {}
+    for labels_dir in deployment_data_dir.glob("**/labels"):
+        drop_dir = labels_dir.parent
+        sidecar = drop_dir / "annotations" / "class_map.json"
+        local_map = load_class_map_by_id(sidecar) if sidecar.exists() else {}
+        if not local_map and not global_map:
+            continue
+        for txt in labels_dir.glob("*.txt"):
+            for cid in _iter_class_ids(txt):
+                name = local_map.get(cid) or global_map.get(cid)
+                if name:
+                    counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def print_species_totals(
+    box_counts: Dict[str, int], floor_species: Optional[Set[str]] = None
+) -> None:
+    """One-time pre-training overview of species composition.
+
+    Shows total bounding-box counts and fractions, sorted descending. Species
+    that will be merged into 'fish' by the floor are marked so the user sees
+    both the raw distribution and the floor decision in the same view.
+    """
+    if not box_counts:
+        return
+    floor_species = floor_species or set()
+    total = sum(box_counts.values())
+    sorted_items = sorted(box_counts.items(), key=lambda kv: -kv[1])
+
+    logging.info("\n=== Pre-training species totals (bounding boxes) ===")
+    for name, n in sorted_items:
+        marker = "  → merged into 'fish'" if name in floor_species else ""
+        logging.info(f"  {name:<40} {n / total:.1%}  ({n} boxes){marker}")
+    logging.info(f"  Total boxes: {total}  |  Species: {len(sorted_items)}")
+    if floor_species:
+        kept = len(sorted_items) - len(floor_species)
+        logging.info(f"  After floor: {kept} species + 'fish' bucket")
+    logging.info("=" * 60 + "\n")
+
+
+def identify_floor_species(
+    box_counts: Dict[str, int],
+    floor_pct: float,
+    fallback_species: str = "fish",
+) -> Set[str]:
+    """Species whose bounding-box fraction is below `floor_pct`.
+
+    These are merged into `fallback_species` by `flatten_and_remap_labels`
+    (via the unknown-species fallback path — the species is simply absent
+    from `unified_names`, so its source class IDs land on the fallback).
+
+    Hardcoded exemptions (never floored, even when below threshold):
+      - `fallback_species` itself (we'd have nowhere to redirect to)
+      - "bait" — domain-critical: the bait box is visible in every frame and
+        must stay a separate class so MaxN inference can exclude it from fish
+        counts. Merging into fish would inflate every drop's MaxN by ~1.
+    """
+    never_floor = {fallback_species, "bait"}
+    total = sum(box_counts.values())
+    if total == 0:
+        return set()
+    return {
+        name
+        for name, n in box_counts.items()
+        if n / total < floor_pct and name not in never_floor
+    }
 
 
 def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str]]:
@@ -629,18 +436,22 @@ def make_binary_labels(
 # ---------------------------------------------------------------------------
 
 
-def _build_image_index(images_dir: Path) -> Dict[str, Path]:
-    """Map frame-image stem → path, restricted to canonical `frames/` dirs.
+def _build_image_index(images_dir: Path) -> Dict[str, Dict[str, Path]]:
+    """Map drop_id → {frame-image stem → path}, restricted to canonical `frames/` dirs.
+
+    Scoping by drop_id prevents stem collisions across deployments from silently
+    pairing a label with the wrong drop's image.
 
     One walk of `images_dir`; downstream lookups are O(1). Excludes derivative
     dirs (qa_frames, zooniverse_frames, biigle_frames, …) by checking that the
     immediate parent is exactly `frames`.
     """
     exts = {e.lower() for e in config.image_extensions}
-    index: Dict[str, Path] = {}
+    index: Dict[str, Dict[str, Path]] = {}
     for p in images_dir.rglob("*"):
         if p.is_file() and p.suffix.lower() in exts and p.parent.name == "frames":
-            index.setdefault(p.stem, p)
+            drop_id = p.parent.parent.name
+            index.setdefault(drop_id, {}).setdefault(p.stem, p)
     return index
 
 
@@ -651,7 +462,7 @@ def copy_split_files(
     output_dir: Path,
     split_name: str,
     symlink: bool = False,
-    image_index: Optional[Dict[str, Path]] = None,
+    image_index: Optional[Dict[str, Dict[str, Path]]] = None,
 ) -> Tuple[int, int]:
     """
     Copy (or symlink) images and their corresponding label files into a
@@ -661,9 +472,9 @@ def copy_split_files(
           images/{split_name}/   ← source JPEGs
           labels/{split_name}/   ← YOLO .txt label files
 
-    Looks up each label's matching image via `image_index` (stem → Path). If
-    not provided, the index is built from `images_dir` on entry — pass a
-    pre-built index when calling this multiple times against the same
+    Looks up each label's matching image via `image_index` (drop_id → stem →
+    Path). If not provided, the index is built from `images_dir` on entry —
+    pass a pre-built index when calling this multiple times against the same
     `images_dir` to avoid redundant tree walks.
 
     Args:
@@ -673,7 +484,8 @@ def copy_split_files(
         output_dir: Root output directory.
         split_name: One of 'train', 'val', 'test'.
         symlink: Use symlinks instead of copies.
-        image_index: Optional pre-built `{stem: Path}` map; built locally if None.
+        image_index: Optional pre-built `{drop_id: {stem: Path}}` map; built
+            locally if None.
 
     Returns:
         (n_images_copied, n_labels_copied)
@@ -701,9 +513,11 @@ def copy_split_files(
             continue
 
         for lbl_path in drop_labels:
-            img_path = image_index.get(lbl_path.stem)
+            img_path = image_index.get(drop_id, {}).get(lbl_path.stem)
             if img_path is None:
-                logging.warning(f"No image found for label {lbl_path.stem} — skipping.")
+                logging.warning(
+                    f"No image found for label {drop_id}/{lbl_path.stem} — skipping."
+                )
                 continue
 
             dst_img = img_out / img_path.name
@@ -810,6 +624,56 @@ def _write_sidecar_class_map(
     return sidecar_path
 
 
+def _clean_yolo_split_dirs(yolo_root: Path) -> None:
+    """Wipe images/{train,val,test} and labels/{train,val,test} under `yolo_root`.
+
+    Called before re-assembling so each retraining run is idempotent: stale
+    files from drops no longer in the split (e.g. newly excluded via
+    training_excluded_drops.txt) don't leak into training.
+    """
+    for kind in ("images", "labels"):
+        for split in ("train", "val", "test"):
+            d = yolo_root / kind / split
+            if d.exists():
+                shutil.rmtree(d)
+
+
+def print_per_drop_species_inventory(
+    labels_staged_dir: Path, class_names: List[str]
+) -> None:
+    """Per-drop bounding-box counts in each species, one row per drop.
+
+    Reads from labels_staged_dir (post-floor, post-remap state — what the model
+    will actually see). Format: ``DropID  Species1=N  Species2=M  ...``.
+    """
+    if not labels_staged_dir.exists():
+        return
+
+    counts: Dict[str, Dict[str, int]] = {}
+    for drop_dir in sorted(labels_staged_dir.iterdir()):
+        if not drop_dir.is_dir():
+            continue
+        per_drop: Dict[str, int] = {}
+        for txt in drop_dir.glob("*.txt"):
+            for cid in _iter_class_ids(txt):
+                if 0 <= cid < len(class_names):
+                    name = class_names[cid]
+                    per_drop[name] = per_drop.get(name, 0) + 1
+        if per_drop:
+            counts[drop_dir.name] = per_drop
+
+    if not counts:
+        return
+
+    logging.info("\n=== Pre-split species inventory (from labels_staged) ===")
+    for drop in sorted(counts):
+        species_pairs = sorted(counts[drop].items(), key=lambda kv: -kv[1])
+        total = sum(n for _, n in species_pairs)
+        species_str = "  ".join(f"{name}={n}" for name, n in species_pairs)
+        logging.info(f"  {drop}  ({total} boxes)  {species_str}")
+    logging.info("=" * 60 + "\n")
+
+
 def _group_drops_by_survey(
     drops: List[str], extra_drops: Set[str]
 ) -> List[Tuple[str, List[str]]]:
@@ -849,14 +713,12 @@ def print_assembled_summary(
     """Comprehensive post-assembly summary: drops per split + bounding-box counts.
 
     Reflects the FINAL composition the model trains on — includes extras
-    (no MaxN row) and oversampled rare-class copies. Two sections:
+    (drops without MaxN data). Two sections:
 
       1. Drops per split, grouped by survey, with extras tagged separately.
       2. Per-species bounding-box counts read from the on-disk YOLO labels.
 
-    The bounding-box count is a different unit from `print_species_breakdown`
-    (which sums MaxInterval) so the totals won't match — bounding boxes are
-    raw annotation counts; MaxInterval is a peak-fish-count aggregate.
+    Bounding-box counts here are post-floor (rare species merged into 'fish').
     """
     extras = set(extra_drops or [])
 
@@ -908,8 +770,7 @@ def print_assembled_summary(
         return
 
     logging.info(
-        "\n=== Per-species bounding-box counts (post-balance, "
-        "post-oversample, includes extras) ==="
+        "\n=== Per-species bounding-box counts (post-balance, includes extras) ==="
     )
     logging.info(df.to_string())
     logging.info("=" * 90 + "\n")
@@ -926,8 +787,6 @@ def assemble_yolo_dataset(
     build_binary: bool = True,
     symlink: bool = False,
     source_class_map_path: Optional[Path] = None,
-    rare_class_names: Optional[List[str]] = None,
-    oversample_factor: Optional[int] = None,
     extra_drops: Optional[Set[str]] = None,
 ) -> Tuple[Path, Optional[Path]]:
     """
@@ -957,10 +816,19 @@ def assemble_yolo_dataset(
     species_dir = output_dir / "species"
     binary_dir = output_dir / "binary"
 
+    # Wipe previous split output so re-runs don't accumulate stale files (e.g.
+    # files from drops that have since been removed from the train/val/test
+    # lists or excluded via training_excluded_drops.txt).
+    _clean_yolo_split_dirs(species_dir)
+    if build_binary:
+        _clean_yolo_split_dirs(binary_dir)
+
     # Walk images_dir once; reused across all 6 copy_split_files calls below.
     image_index = _build_image_index(images_dir)
+    n_frames = sum(len(stems) for stems in image_index.values())
     logging.info(
-        f"assemble_yolo_dataset: indexed {len(image_index)} frame image(s) under {images_dir}"
+        f"assemble_yolo_dataset: indexed {n_frames} frame image(s) "
+        f"across {len(image_index)} drop(s) under {images_dir}"
     )
 
     for split_name, drops in [
@@ -977,22 +845,6 @@ def assemble_yolo_dataset(
             symlink=symlink,
             image_index=image_index,
         )
-
-    # Oversample rare classes in TRAIN split only (species dataset only — binary has 1 class)
-    factor = (
-        oversample_factor
-        if oversample_factor is not None
-        else config.training_oversample_factor
-    )
-    if rare_class_names and factor > 0:
-        rare_ids = [class_names.index(n) for n in rare_class_names if n in class_names]
-        if rare_ids:
-            oversample_rare_in_train(
-                species_dir / "images" / "train",
-                species_dir / "labels" / "train",
-                rare_ids,
-                factor,
-            )
 
     species_yaml = generate_data_yaml(class_names, species_dir)
     _write_sidecar_class_map(class_names, species_dir, source_class_map_path)
@@ -1027,65 +879,3 @@ def assemble_yolo_dataset(
     )
 
     return species_yaml, binary_yaml
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(
-        description="Balance expert annotations and prepare YOLO training data."
-    )
-    parser.add_argument(
-        "--images-dir", required=True, type=Path, help="Source JPEG frames directory"
-    )
-    parser.add_argument(
-        "--labels-dir",
-        required=True,
-        type=Path,
-        help="Multi-class YOLO .txt labels directory",
-    )
-    parser.add_argument(
-        "--output-dir", required=True, type=Path, help="Root output directory"
-    )
-    parser.add_argument(
-        "--ceiling-pct",
-        type=float,
-        default=None,
-        help="Max species fraction (overrides config)",
-    )
-    parser.add_argument(
-        "--floor-pct",
-        type=float,
-        default=None,
-        help="Min species fraction (overrides config)",
-    )
-    parser.add_argument(
-        "--no-binary", action="store_true", help="Skip binary dataset creation"
-    )
-    parser.add_argument(
-        "--symlink", action="store_true", help="Symlink files instead of copying"
-    )
-    args = parser.parse_args()
-
-    df, species_class_names = prepare_from_annotations(
-        ceiling_pct=args.ceiling_pct,
-        floor_pct=args.floor_pct,
-    )
-
-    # Save balanced CSV for split_data.py
-    balanced_csv = args.output_dir / "balanced_annotations.csv"
-    balanced_csv.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(balanced_csv, index=False)
-    logging.info(f"Saved balanced annotations → {balanced_csv}")
-    logging.info(f"Species classes ({len(species_class_names)}): {species_class_names}")
-    logging.info(
-        "Run split_data.py next to generate train/val/test splits, then assemble_yolo_dataset()."
-    )
-
-
-if __name__ == "__main__":
-    main()

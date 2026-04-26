@@ -173,43 +173,6 @@ def write_split_txt(
     return len(image_paths)
 
 
-def print_species_breakdown(
-    df: pd.DataFrame,
-    train_drops: List[str],
-    val_drops: List[str],
-    test_drops: List[str],
-) -> None:
-    """Print per-species annotation count per split for manual inspection."""
-    split_map = {d: "train" for d in train_drops}
-    split_map.update({d: "val" for d in val_drops})
-    split_map.update({d: "test" for d in test_drops})
-
-    df = df.copy()
-    df["split"] = df["DropID"].map(split_map)
-
-    pivot = (
-        df.groupby(["ScientificName", "split"])["MaxInterval"]
-        .sum()
-        .unstack(fill_value=0)
-    )
-    for col in ("train", "val", "test"):
-        if col not in pivot.columns:
-            pivot[col] = 0
-
-    pivot = pivot[["train", "val", "test"]]
-    pivot["total"] = pivot.sum(axis=1)
-    pivot = pivot.sort_values("total", ascending=False)
-
-    logging.info("\n=== Per-species split breakdown ===")
-    logging.info(pivot.to_string())
-    val_min_images = config.training_val_min_images
-    logging.info(
-        f"\n  ⚠ Minimum val images recommended: {val_min_images}. "
-        "If any species val count is too low, extract more frames from those deployments."
-    )
-    logging.info("====================================\n")
-
-
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -249,8 +212,6 @@ def split_data(
         force_val_drops=config.training_force_val_drops,
         seed=seed,
     )
-
-    print_species_breakdown(balanced_df, train_drops, val_drops, test_drops)
 
     # Write image list .txt files
     for split_name, drops in [

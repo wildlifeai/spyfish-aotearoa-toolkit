@@ -17,10 +17,13 @@ from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
     assemble_yolo_dataset,
+    count_boxes_per_species_in_source,
     discover_extra_drops,
     flatten_and_remap_labels,
-    identify_rare_classes,
+    identify_floor_species,
     prepare_from_annotations,
+    print_per_drop_species_inventory,
+    print_species_totals,
 )
 from spyfish.ml.training.split_data import split_data
 from spyfish.ml.training.sweep import run_sweep_pipeline
@@ -146,18 +149,29 @@ def run_retraining(
         return {}
 
     # 2b. Discover extras (drops under extra_no_survey_id/ without MaxN data).
-    # These bypass ceiling/floor balancing but still contribute to train + species list.
     extra_drops, extra_species = discover_extra_drops(images_dir)
-    if extra_species:
-        species_names = sorted(set(species_names) | set(extra_species))
 
-    # 3. Flatten + remap class IDs into the unified ordering (replaces the old labels_raw step).
+    # 2c. Build candidate unified species list, then apply floor.
+    # Floor uses actual on-disk box counts (not MaxN proxies) and merges species
+    # below class_floor_pct into the 'fish' bucket — done implicitly by leaving
+    # them out of unified_names so flatten_and_remap_labels falls back to fish.
+    all_species = set(species_names) | set(extra_species) | {"fish"}
+    box_counts = count_boxes_per_species_in_source(images_dir, class_map_path)
+    floor_species = identify_floor_species(box_counts, config.training_floor_pct)
+    print_species_totals(box_counts, floor_species)
+    species_names = sorted(all_species - floor_species)
+
+    # 3. Flatten + remap class IDs into the unified ordering. Floored species
+    #    are absent from unified_names and so route to the 'fish' fallback.
     flatten_and_remap_labels(
         deployment_data_dir=images_dir,
         src_class_map_path=class_map_path,
         unified_names=species_names,
         dst_dir=labels_staged_dir,
     )
+
+    # 3b. Show per-drop bounding-box counts so the user sees imbalance before splits.
+    print_per_drop_species_inventory(labels_staged_dir, species_names)
 
     # 4. Spot-check visualisation uses the remapped labels — reflects what the model actually sees.
     unified_class_map = {name: idx for idx, name in enumerate(species_names)}
@@ -217,9 +231,6 @@ def run_retraining(
         )
 
     # 7. Assemble YOLO layout.
-    rare_classes = identify_rare_classes(balanced_df)
-    if rare_classes:
-        logging.info(f"Rare classes flagged for oversampling: {rare_classes}")
     logging.info("Assembling final YOLO dataset layout...")
     species_yaml, binary_yaml = assemble_yolo_dataset(
         train_drops=train_drops,
@@ -231,7 +242,6 @@ def run_retraining(
         class_names=species_names,
         build_binary=not species_only,
         source_class_map_path=class_map_path,
-        rare_class_names=rare_classes,
         extra_drops=set(extra_drops),
     )
 

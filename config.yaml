@@ -165,15 +165,10 @@ training:
   patience: 25
   imgsz: 640
   batch: 4                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
-  val_min_images: 20
   train_pct: 0.85
   val_pct: 0.15
   test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
-  class_ceiling_pct: 0.40       # cap any species above 40% — subsample (iterative, max 3 rounds)
-  class_floor_pct: 0.02         # merge species below 2% into "fish"
-  min_frames_per_drop: 10       # never trim a drop below this total frame count during ceiling
-  oversample_factor: 3                 # extra train-split copies of rare-class frames (0 = disabled)
-  oversample_rare_threshold: 0.05      # classes below this fraction get oversampled in train split
+  class_floor_pct: 0.02         # merge species below 2% of total bounding boxes into "fish"
   local_training_dir: "process_files/training"
   excluded_drops_file: "training_excluded_drops.txt"   # one DropID per line; '#' comments OK
   force_val_drops_file: "training_force_val_drops.txt" # DropIDs to force into val (overrides survey-aware donation)

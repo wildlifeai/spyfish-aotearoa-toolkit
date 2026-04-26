@@ -48,6 +48,18 @@ STABILITY_PARAMS = {
     "box": 5.0,  # Lower bounding box loss penalty (default 7.5)
 }
 
+# Class-imbalance handling lives here, not in prepare_training_data.py.
+# Trim/oversample were removed — they were destructive (oversample copies whole
+# frames; trim throws away annotations). The right place for class balancing in
+# YOLO is the loss/sampler, which preserves all data:
+#   - `image_weights=True` (Ultralytics arg) → samples images more often when
+#     they contain rare classes. Pass via extra_params in the SWEEP_RUNS or
+#     here directly. Verify the running ultralytics version supports it.
+#   - Per-class loss weighting: subclass the loss or use a custom dataset.
+# Defer enabling either until a real training run shows the model collapses on
+# tail species. For our current data the tail is so sparse (1–10 examples for
+# several species) that floor-merging into 'fish' is doing most of the work.
+
 
 def _clear_yolo_cache(training_dir: Path) -> None:
     """
