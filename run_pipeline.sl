@@ -25,7 +25,8 @@ source /nesi/project/wildlife03546/kso_venv_0627/bin/activate
 cd /nesi/project/wildlife03546/spyfish-play-new
 
 # Run video preprocessing with YOLO detection and frame selection
-python run_pipeline.py --set-targets --ml --zooniverse-clip
+python run_pipeline.py --set-targets --ml 
+# python run_pipeline.py --set-targets --ml --zooniverse-clip
 # python run_pipeline.py --set-targets --zooniverse-clip
 # python run_pipeline.py --set-targets --ingest --ml --zooniverse-clip
 # python run_pipeline.py --biigle-upload
