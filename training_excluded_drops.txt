@@ -19,3 +19,6 @@
 # This file is the canonical list — edit it here and commit. Not in config.yaml.
 
 # --- Excluded DropIDs ---
+TON_20211026_BUV_TON_050_01 
+TON_20211026_BUV_TON_053_01  
+TON_20211026_BUV_TON_071_01 

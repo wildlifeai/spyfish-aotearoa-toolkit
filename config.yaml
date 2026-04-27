@@ -74,7 +74,7 @@ paths:
 
 
 ml_inference:
-  limit_processing: 5 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
@@ -161,10 +161,10 @@ biigle:
 
 training:
   image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"]   # canonical image suffixes accepted anywhere in the pipeline
-  epochs: 1
+  epochs: 100
   patience: 25
   imgsz: 640
-  batch: 4                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  batch: 32                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
   train_pct: 0.85
   val_pct: 0.15
   test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
