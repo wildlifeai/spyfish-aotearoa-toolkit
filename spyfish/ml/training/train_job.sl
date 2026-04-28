@@ -10,12 +10,15 @@
 
 # Spyfish Aotearoa training job wrapper.
 #
-# Runs a full sweep over SWEEP_RUNS from sweep.py, then auto-generates the
-# Markdown comparison report. Assumes prepare+split+assemble has already run
-# (i.e. process_files/training/{binary,species}/data.yaml exist).
+# Runs the retraining pipeline end-to-end: data prep + binary + species training.
+# Optimizer / lr / dropout come from config.yaml's training section.
+# Auto-promotion is on — models that beat production by `retrain_min_improvement_pct`
+# are copied into pipeline_model/ at the end of the run.
 #
-# To also run the data-prep steps on NeSI, swap the python command for:
-#   python run_pipeline.py --retrain --sweep
+# To scope the run, pass any subset of --data-prep / --binary / --species:
+#   python run_pipeline.py --retrain --species              # just species training
+#   python run_pipeline.py --retrain --data-prep            # rebuild dataset only
+#   python run_pipeline.py --retrain --data-prep --binary   # data prep + binary
 #
 # Before first use, update the three placeholders marked TODO:
 #   1. SBATCH --account above
@@ -35,9 +38,9 @@ source "${VENV}"
 cd "${PROJECT_DIR}"
 mkdir -p logs
 
-echo "Starting Spyfish training sweep on $(hostname)"
+echo "Starting Spyfish retraining on $(hostname)"
 nvidia-smi || true
 
-python -m spyfish.ml.training.sweep
+python run_pipeline.py --retrain
 
-echo "Training job complete. Reports in process_files/training/runs/sweep_*/report.md"
+echo "Retraining job complete. Outputs in process_files/training/runs/ and process_files/training/results/."

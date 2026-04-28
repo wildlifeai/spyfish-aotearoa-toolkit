@@ -171,6 +171,9 @@ def train_model(
         "workers": workers,
         "project": str(project_dir),
         "name": run_name,
+        "optimizer": config.training_optimizer,
+        "lr0": config.training_lr0,
+        "dropout": config.training_dropout,
         **WATER_AUG_PARAMS,
         **STABILITY_PARAMS,
     }

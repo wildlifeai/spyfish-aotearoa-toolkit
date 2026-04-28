@@ -131,8 +131,12 @@ def _run_biigle_sync() -> None:
     sync_biigle_annotations()
 
 
-def _run_retrain(sweep: bool = False) -> None:
-    run_retraining(auto_promote=True, sweep=sweep)
+def _run_retrain(
+    data_prep: bool = True, binary: bool = True, species: bool = True
+) -> None:
+    run_retraining(
+        data_prep=data_prep, binary=binary, species=species, auto_promote=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -312,10 +316,20 @@ def main() -> None:
         help="Skip all S3 uploads (DB, models, results)",
     )
     parser.add_argument(
-        "--sweep",
+        "--data-prep",
         action="store_true",
-        help="On --retrain, run multi-variant training sweep (SWEEP_RUNS in sweep.py) "
-        "and produce a Markdown comparison report instead of a single train+evaluate.",
+        help="On --retrain, include the data prep step. If no step flags "
+        "(--data-prep, --binary, --species) are passed, all three run.",
+    )
+    parser.add_argument(
+        "--binary",
+        action="store_true",
+        help="On --retrain, include the binary training step.",
+    )
+    parser.add_argument(
+        "--species",
+        action="store_true",
+        help="On --retrain, include the species training step.",
     )
     parser.add_argument(
         "--ping",
@@ -341,7 +355,20 @@ def main() -> None:
                 s, fn=functools.partial(_run_set_targets, push_s3=not args.no_upload)
             )
         if s.flag == "retrain":
-            return replace(s, fn=functools.partial(_run_retrain, sweep=args.sweep))
+            # Compose-style: no flags = all steps; any flag = only those steps.
+            no_step_specified = not (args.data_prep or args.binary or args.species)
+            do_data_prep = args.data_prep or no_step_specified
+            do_binary = args.binary or no_step_specified
+            do_species = args.species or no_step_specified
+            return replace(
+                s,
+                fn=functools.partial(
+                    _run_retrain,
+                    data_prep=do_data_prep,
+                    binary=do_binary,
+                    species=do_species,
+                ),
+            )
         return s
 
     patched_stages = [_patch_stage(s) for s in STAGES]

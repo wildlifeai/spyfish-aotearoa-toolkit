@@ -126,9 +126,14 @@ def compare_with_production(
     data_yaml: str,
     split: str = "test",
     imgsz: int = 640,
+    output_dir: Optional[Path] = None,
 ) -> Tuple[dict, bool]:
     """
     Compare new model vs production model on the same test set.
+
+    `output_dir` is used as the production eval's write destination so YOLO
+    doesn't fall back to the production checkpoint's embedded `project=`,
+    which can point at a stale or cross-project filesystem location.
 
     Returns:
         (production_metrics, should_promote) where should_promote is True if
@@ -146,7 +151,11 @@ def compare_with_production(
 
     logging.info(f"Evaluating production model for comparison: {production_model_path}")
     prod_metrics = evaluate_model(
-        production_model_path, data_yaml, split=split, imgsz=imgsz
+        production_model_path,
+        data_yaml,
+        split=split,
+        imgsz=imgsz,
+        output_dir=output_dir,
     )
 
     improvement = new_metrics["mAP50"] - prod_metrics["mAP50"]
@@ -220,7 +229,12 @@ def run_evaluation_pipeline(
         production_model_path = ""
 
     prod_metrics, should_promote = compare_with_production(
-        new_metrics, production_model_path, data_yaml, split=split, imgsz=imgsz
+        new_metrics,
+        production_model_path,
+        data_yaml,
+        split=split,
+        imgsz=imgsz,
+        output_dir=local_results_dir / "production_eval",
     )
 
     # Save metrics CSV

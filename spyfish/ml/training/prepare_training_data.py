@@ -4,24 +4,22 @@ prepare_training_data.py — Prepare expert annotations + assemble YOLO datasets
 Composable functions:
 
   prepare_from_annotations()         — Load expert MaxN annotations into a DataFrame.
-  count_boxes_per_species_in_source()— Pre-scan source labels for per-species box counts.
-  identify_floor_species()           — Names of species below class_floor_pct (merged → 'fish').
   flatten_and_remap_labels()         — Walk source labels, remap class IDs to unified ordering.
   discover_extra_drops()             — Find drops with labels but no MaxN data.
   copy_split_files()                 — Copy images + labels into YOLO train/val/test layout.
   make_binary_labels()               — Convert species labels → binary (all → class 0).
   generate_data_yaml()               — Write a YOLO data.yaml for a given split.
   assemble_yolo_dataset()            — Top-level: builds species + binary datasets from drop lists.
+  apply_post_assembly_floor()        — Merge classes below class_floor_min_images train images into 'fish'.
 
 Typical orchestration order (see retrain_runner.py):
   1. biigle_to_yolo.py                → writes per-drop label files
   2. prepare_from_annotations()       → MaxN df + species list
   3. discover_extra_drops()           → adds extras' species to the unified list
-  4. count_boxes_per_species_in_source() + identify_floor_species()
-                                       → trims unified species list (rare → fish)
-  5. flatten_and_remap_labels()       → stages labels with unified class IDs
-  6. split_data.py                    → assigns drops to train/val/test
-  7. assemble_yolo_dataset()          → writes the final YOLO dataset + data.yaml
+  4. flatten_and_remap_labels()       → stages labels with unified class IDs
+  5. split_data.py                    → assigns drops to train/val/test
+  6. assemble_yolo_dataset()          → writes the final YOLO dataset + data.yaml
+  7. apply_post_assembly_floor()      → merges classes with too few train images into 'fish'
 """
 
 import json
@@ -60,8 +58,13 @@ def prepare_from_annotations(
 
     logging.info(f"Loading expert MaxN annotations from {deployment_data_dir}...")
     maxn_glob = f"**/annotations/*{config.biigle_expert_maxn_suffix}"
+    # Skip frozen video-era exports — they retain stale label vocabulary
+    # (e.g. 'Interesting Sighting') that's no longer in the current Biigle tree.
+    # Same filter as biigle_to_yolo.py — keep the two readers consistent.
     all_dfs = [
-        pd.read_csv(csv_path) for csv_path in deployment_data_dir.glob(maxn_glob)
+        pd.read_csv(csv_path)
+        for csv_path in deployment_data_dir.glob(maxn_glob)
+        if not csv_path.name.startswith("legacy_video_")
     ]
 
     if not all_dfs:
@@ -149,98 +152,19 @@ def _iter_class_ids(label_path: Path) -> Iterator[int]:
             continue
 
 
-def count_boxes_per_species_in_source(
+def discover_extra_drops(
     deployment_data_dir: Path,
-    global_class_map_path: Path,
-) -> Dict[str, int]:
-    """Walk every <drop>/labels/*.txt and count bounding boxes per species name.
-
-    Class IDs resolve via the per-drop sidecar (annotations/class_map.json) if
-    present, **falling back to the global class_map** when the sidecar doesn't
-    know the id — sidecars can lag behind the global when species are added
-    after the sidecar was first written.
-    """
-    global_map = (
-        load_class_map_by_id(global_class_map_path)
-        if global_class_map_path.exists()
-        else {}
-    )
-    counts: Dict[str, int] = {}
-    for labels_dir in deployment_data_dir.glob("**/labels"):
-        drop_dir = labels_dir.parent
-        sidecar = drop_dir / "annotations" / "class_map.json"
-        local_map = load_class_map_by_id(sidecar) if sidecar.exists() else {}
-        if not local_map and not global_map:
-            continue
-        for txt in labels_dir.glob("*.txt"):
-            for cid in _iter_class_ids(txt):
-                name = local_map.get(cid) or global_map.get(cid)
-                if name:
-                    counts[name] = counts.get(name, 0) + 1
-    return counts
-
-
-def print_species_totals(
-    box_counts: Dict[str, int], floor_species: Optional[Set[str]] = None
-) -> None:
-    """One-time pre-training overview of species composition.
-
-    Shows total bounding-box counts and fractions, sorted descending. Species
-    that will be merged into 'fish' by the floor are marked so the user sees
-    both the raw distribution and the floor decision in the same view.
-    """
-    if not box_counts:
-        return
-    floor_species = floor_species or set()
-    total = sum(box_counts.values())
-    sorted_items = sorted(box_counts.items(), key=lambda kv: -kv[1])
-
-    logging.info("\n=== Pre-training species totals (bounding boxes) ===")
-    for name, n in sorted_items:
-        marker = "  → merged into 'fish'" if name in floor_species else ""
-        logging.info(f"  {name:<40} {n / total:.1%}  ({n} boxes){marker}")
-    logging.info(f"  Total boxes: {total}  |  Species: {len(sorted_items)}")
-    if floor_species:
-        kept = len(sorted_items) - len(floor_species)
-        logging.info(f"  After floor: {kept} species + 'fish' bucket")
-    logging.info("=" * 60 + "\n")
-
-
-def identify_floor_species(
-    box_counts: Dict[str, int],
-    floor_pct: float,
-    fallback_species: str = "fish",
-) -> Set[str]:
-    """Species whose bounding-box fraction is below `floor_pct`.
-
-    These are merged into `fallback_species` by `flatten_and_remap_labels`
-    (via the unknown-species fallback path — the species is simply absent
-    from `unified_names`, so its source class IDs land on the fallback).
-
-    Hardcoded exemptions (never floored, even when below threshold):
-      - `fallback_species` itself (we'd have nowhere to redirect to)
-      - "bait" — domain-critical: the bait box is visible in every frame and
-        must stay a separate class so MaxN inference can exclude it from fish
-        counts. Merging into fish would inflate every drop's MaxN by ~1.
-    """
-    never_floor = {fallback_species, "bait"}
-    total = sum(box_counts.values())
-    if total == 0:
-        return set()
-    return {
-        name
-        for name, n in box_counts.items()
-        if n / total < floor_pct and name not in never_floor
-    }
-
-
-def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str]]:
+    excluded_drops: Optional[Set[str]] = None,
+) -> Tuple[List[str], List[str]]:
     """Find drops with labels + frames but no MaxN CSV (extras from download-volume
     or manually-dropped datasets).
 
     Returns (drop_ids, extra_species_names). Extras bypass ceiling/floor balancing
     by design; their species are unioned into the unified class list so they get
     their own class IDs rather than falling back to "fish".
+
+    Drops in `excluded_drops` are skipped — their species don't enter the
+    unified class list.
 
     Species detection order:
       1. Read the raw Biigle CSV if present (authoritative label names).
@@ -249,12 +173,15 @@ def discover_extra_drops(deployment_data_dir: Path) -> Tuple[List[str], List[str
 
     Drops without either are skipped with a warning.
     """
+    excluded = excluded_drops or set()
     extras: List[str] = []
     species_set: set[str] = set()
 
     for labels_dir in deployment_data_dir.glob("**/labels"):
         drop_dir = labels_dir.parent
         drop_id = drop_dir.name
+        if drop_id in excluded:
+            continue
         annotations_dir = drop_dir / "annotations"
         frames_dir = drop_dir / "frames"
 
@@ -340,6 +267,7 @@ def flatten_and_remap_labels(
     unified_names: List[str],
     dst_dir: Path,
     fallback_species: str = "fish",
+    excluded_drops: Optional[Set[str]] = None,
 ) -> int:
     """Walk per-drop `labels/*.txt`, remap class IDs to the unified ordering
     (index in `unified_names`), write into `dst_dir/<drop_id>/`. Returns file count.
@@ -347,18 +275,30 @@ def flatten_and_remap_labels(
     Per-drop subdir layout decouples the downstream lookup from filename
     prefixes — works for UUID-stemmed labels (e.g. Biigle web-UI uploads)
     that don't naturally start with their drop_id.
+
+    Drops in `excluded_drops` are skipped so their labels never enter the
+    staged label tree.
     """
+    excluded = excluded_drops or set()
     id_remap = _build_id_remap(src_class_map_path, unified_names, fallback_species)
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     n = 0
+    skipped_drops: set[str] = set()
     for src_txt in deployment_data_dir.glob("**/labels/*.txt"):
         drop_id = src_txt.parent.parent.name
+        if drop_id in excluded:
+            skipped_drops.add(drop_id)
+            continue
         drop_dst = dst_dir / drop_id
         drop_dst.mkdir(parents=True, exist_ok=True)
         _rewrite_label_file(src_txt, drop_dst / src_txt.name, id_remap)
         n += 1
 
+    if skipped_drops:
+        logging.info(
+            f"flatten_and_remap_labels: skipped {len(skipped_drops)} excluded drop(s)"
+        )
     logging.info(
         f"flatten_and_remap_labels: {n} files → {dst_dir}/<drop_id>/ "
         f"(unified classes: {len(unified_names)})"
@@ -463,6 +403,7 @@ def copy_split_files(
     split_name: str,
     symlink: bool = False,
     image_index: Optional[Dict[str, Dict[str, Path]]] = None,
+    frame_filter: Optional[Dict[str, Set[str]]] = None,
 ) -> Tuple[int, int]:
     """
     Copy (or symlink) images and their corresponding label files into a
@@ -486,6 +427,9 @@ def copy_split_files(
         symlink: Use symlinks instead of copies.
         image_index: Optional pre-built `{drop_id: {stem: Path}}` map; built
             locally if None.
+        frame_filter: Optional `{drop_id: {allowed_stems}}`. When provided,
+            only frames whose stem is in the drop's allowed set are copied —
+            implements per-drop subsampling (see assemble_yolo_dataset).
 
     Returns:
         (n_images_copied, n_labels_copied)
@@ -512,7 +456,11 @@ def copy_split_files(
             )
             continue
 
+        allowed_stems = frame_filter.get(drop_id) if frame_filter is not None else None
+
         for lbl_path in drop_labels:
+            if allowed_stems is not None and lbl_path.stem not in allowed_stems:
+                continue
             img_path = image_index.get(drop_id, {}).get(lbl_path.stem)
             if img_path is None:
                 logging.warning(
@@ -665,13 +613,17 @@ def print_per_drop_species_inventory(
     if not counts:
         return
 
-    logging.info("\n=== Pre-split species inventory (from labels_staged) ===")
+    # Build the whole inventory as one multi-line string and emit a single log
+    # record — keeps the block contiguous in console/file output and trivial to
+    # copy-paste, instead of N separate timestamped lines.
+    lines = ["=== Pre-split species inventory (from labels_staged) ==="]
     for drop in sorted(counts):
         species_pairs = sorted(counts[drop].items(), key=lambda kv: -kv[1])
         total = sum(n for _, n in species_pairs)
         species_str = "  ".join(f"{name}={n}" for name, n in species_pairs)
-        logging.info(f"  {drop}  ({total} boxes)  {species_str}")
-    logging.info("=" * 60 + "\n")
+        lines.append(f"  {drop}  ({total} boxes)  {species_str}")
+    lines.append("=" * 60)
+    logging.info("\n".join(lines))
 
 
 def _group_drops_by_survey(
@@ -785,7 +737,7 @@ def assemble_yolo_dataset(
     output_dir: Path,
     class_names: List[str],
     build_binary: bool = True,
-    symlink: bool = False,
+    symlink: bool = True,
     source_class_map_path: Optional[Path] = None,
     extra_drops: Optional[Set[str]] = None,
 ) -> Tuple[Path, Optional[Path]]:
@@ -807,7 +759,12 @@ def assemble_yolo_dataset(
         output_dir: Root output directory.
         class_names: Ordered species class names (unified ID space).
         build_binary: Also build a binary (fish/no-fish) dataset.
-        symlink: Use symlinks instead of copying files.
+        symlink: When True (default), images/labels are symlinked instead of
+            copied — saves ~30 GB on each retrain since species + binary splits
+            no longer duplicate the same JPEGs. Source dirs (images_dir,
+            species_labels_dir, binary_labels_staging) must remain in place
+            during training. Set False if you need a portable, self-contained
+            dataset bundle (e.g. for archival or moving to another machine).
         source_class_map_path: Canonical class_map used as metadata source for the sidecar.
 
     Returns:
@@ -831,6 +788,78 @@ def assemble_yolo_dataset(
         f"across {len(image_index)} drop(s) under {images_dir}"
     )
 
+    # MVP per-drop frame filter — see claude_docs/todo.md "Per-drop training-frame
+    # selection" entry for the smarter design that's still pending.
+    # Rules:
+    #   1. Empty .txt files (no surviving labels post workflow-skip) → drop.
+    #   2. Frames whose only labels are in `dominant_species` (e.g. Pagrus
+    #      auratus, Parapercis colias — overrepresented in the corpus) →
+    #      deprioritized: kept if there's spare budget, dropped first when
+    #      over the per-drop cap.
+    #   3. Cap at config.training_cap_frames_per_drop frames per drop.
+    #   Extras (no_survey_id drops — bulk-imported BIIGLE volumes) bypass the
+    #   cap entirely: they're externally curated, often hundreds of frames,
+    #   and capping them throws away expensive annotation work.
+    import random as _random
+
+    dominant_names = set(config.training_dominant_species or [])
+    dominant_class_ids: Set[int] = {
+        i for i, n in enumerate(class_names) if n in dominant_names
+    }
+    cap = config.training_cap_frames_per_drop
+    rng = _random.Random(config.training_split_seed)  # None = system entropy
+    extras_set = set(extra_drops or [])
+
+    frame_filter: Dict[str, Set[str]] = {}
+    n_dom_dropped = 0
+    n_interesting_sampled = 0
+    n_under_budget = 0
+    n_extras_uncapped = 0
+
+    for drop_id in sorted(set(train_drops) | set(val_drops) | set(test_drops)):
+        drop_lbl_dir = species_labels_dir / drop_id
+        if not drop_lbl_dir.is_dir():
+            continue
+
+        interesting: List[str] = []
+        dominant_only: List[str] = []
+        for txt in drop_lbl_dir.glob("*.txt"):
+            cls_ids = set(_iter_class_ids(txt))
+            if not cls_ids:
+                continue  # empty .txt — drop
+            if cls_ids <= dominant_class_ids:
+                dominant_only.append(txt.stem)
+            else:
+                interesting.append(txt.stem)
+
+        if drop_id in extras_set:
+            kept = set(interesting) | set(dominant_only)
+            n_extras_uncapped += 1
+        else:
+            total = len(interesting) + len(dominant_only)
+            if total <= cap:
+                kept = set(interesting) | set(dominant_only)
+                n_under_budget += 1
+            elif len(interesting) >= cap:
+                kept = set(rng.sample(interesting, cap))
+                n_dom_dropped += len(dominant_only)
+                n_interesting_sampled += 1
+            else:
+                budget = cap - len(interesting)
+                kept = set(interesting) | set(rng.sample(dominant_only, budget))
+                n_dom_dropped += len(dominant_only) - budget
+
+        frame_filter[drop_id] = kept
+
+    logging.info(
+        f"assemble_yolo_dataset: per-drop cap={cap} "
+        f"({n_under_budget} drop(s) under budget; "
+        f"{n_interesting_sampled} drop(s) sampled from interesting only; "
+        f"{n_dom_dropped} dominant-only frame(s) dropped overall; "
+        f"{n_extras_uncapped} extras drop(s) bypassed the cap). "
+        f"Dominant species deprioritized: {sorted(dominant_names) if dominant_names else 'none'}"
+    )
+
     for split_name, drops in [
         ("train", train_drops),
         ("val", val_drops),
@@ -844,6 +873,7 @@ def assemble_yolo_dataset(
             split_name,
             symlink=symlink,
             image_index=image_index,
+            frame_filter=frame_filter,
         )
 
     species_yaml = generate_data_yaml(class_names, species_dir)
@@ -866,6 +896,7 @@ def assemble_yolo_dataset(
                 split_name,
                 symlink=symlink,
                 image_index=image_index,
+                frame_filter=frame_filter,
             )
         binary_yaml = generate_data_yaml(["fish"], binary_dir)
 
@@ -879,3 +910,109 @@ def assemble_yolo_dataset(
     )
 
     return species_yaml, binary_yaml
+
+
+def apply_post_assembly_floor(
+    species_dir: Path,
+    min_images: int,
+    fallback_species: str = "fish",
+) -> Tuple[Set[str], List[str]]:
+    """Merge classes with too few train images into `fallback_species`.
+
+    Counts distinct frames-with-species in `species_dir/labels/train/` and
+    merges any class below `min_images` into `fallback_species` by:
+      1. Rewriting all .txt files in train/val/test to remap the weak class IDs
+         to the fallback ID.
+      2. Updating `species_dir/data.yaml` so the weak class names are gone and
+         remaining class IDs are renumbered to be contiguous.
+
+    Image count (not box count) is the metric because variety of visual contexts
+    is what makes a class learnable — a school of 50 fish in 5 frames gives the
+    model 5 contexts; 1 fish in 200 frames gives it 200. This runs *after* the
+    per-drop cap and train/val/test split, so the count reflects exactly what
+    the model will actually train on.
+
+    Hardcoded exemptions (never merged, even when below threshold):
+      - `fallback_species` itself (we'd have nowhere to redirect to)
+      - "bait" — domain-critical: the bait box is visible in every frame and
+        must stay a separate class so MaxN inference can exclude it from fish
+        counts. Merging into fish would inflate every drop's MaxN by ~1.
+
+    Returns (merged_names, surviving_class_names). `merged_names` is the set of
+    species that were folded into `fallback_species`; `surviving_class_names` is
+    the new ordered list of classes in the rewritten `data.yaml`. When nothing
+    is merged, returns (empty set, original class_names).
+    """
+    data_yaml_path = species_dir / "data.yaml"
+    if not data_yaml_path.exists():
+        return set(), []
+
+    with open(data_yaml_path) as f:
+        data = yaml.safe_load(f)
+    class_names: List[str] = list(data.get("names", []))
+    if fallback_species not in class_names:
+        logging.warning(
+            f"apply_post_assembly_floor: '{fallback_species}' not in {data_yaml_path} "
+            f"names — skipping post-assembly floor"
+        )
+        return set(), class_names
+    fish_id = class_names.index(fallback_species)
+
+    train_label_dir = species_dir / "labels" / "train"
+    image_counts: Dict[int, int] = {}
+    for txt in train_label_dir.glob("*.txt"):
+        ids_in_frame = set(_iter_class_ids(txt))
+        for cid in ids_in_frame:
+            image_counts[cid] = image_counts.get(cid, 0) + 1
+
+    never_floor_ids = {fish_id}
+    if "bait" in class_names:
+        never_floor_ids.add(class_names.index("bait"))
+    weak_ids = {
+        cid
+        for cid in range(len(class_names))
+        if image_counts.get(cid, 0) < min_images and cid not in never_floor_ids
+    }
+    if not weak_ids:
+        logging.info(
+            f"apply_post_assembly_floor: no classes below {min_images} train images"
+        )
+        return set(), class_names
+
+    weak_names = sorted(class_names[cid] for cid in weak_ids)
+    logging.info(
+        f"apply_post_assembly_floor: merging {weak_names} into '{fallback_species}' "
+        f"(below {min_images} train images each)"
+    )
+
+    surviving_ids = [i for i in range(len(class_names)) if i not in weak_ids]
+    new_class_names = [class_names[i] for i in surviving_ids]
+    new_fish_id = new_class_names.index(fallback_species)
+    id_remap: Dict[int, int] = {}
+    for old_id in range(len(class_names)):
+        if old_id in weak_ids:
+            id_remap[old_id] = new_fish_id
+        else:
+            id_remap[old_id] = surviving_ids.index(old_id)
+
+    for split in ("train", "val", "test"):
+        split_dir = species_dir / "labels" / split
+        if not split_dir.is_dir():
+            continue
+        for txt in split_dir.glob("*.txt"):
+            new_lines = []
+            for line in txt.read_text().splitlines():
+                parts = line.strip().split()
+                if len(parts) != 5:
+                    continue
+                old_id = int(parts[0])
+                new_id = id_remap.get(old_id, new_fish_id)
+                new_lines.append(f"{new_id} " + " ".join(parts[1:]))
+            txt.write_text("\n".join(new_lines))
+
+    data["nc"] = len(new_class_names)
+    data["names"] = new_class_names
+    with open(data_yaml_path, "w") as f:
+        yaml.dump(data, f, sort_keys=False)
+
+    return set(weak_names), new_class_names

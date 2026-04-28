@@ -11,22 +11,21 @@ This module coordinates the full flow:
 import logging
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
 from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
+    apply_post_assembly_floor,
     assemble_yolo_dataset,
-    count_boxes_per_species_in_source,
     discover_extra_drops,
     flatten_and_remap_labels,
-    identify_floor_species,
     prepare_from_annotations,
+    print_assembled_summary,
     print_per_drop_species_inventory,
-    print_species_totals,
 )
 from spyfish.ml.training.split_data import split_data
-from spyfish.ml.training.sweep import run_sweep_pipeline
 from spyfish.ml.training.train import run_training_pipeline
 
 
@@ -103,21 +102,25 @@ def _promote_model_locally(model_path: str, model_type: str):
 
 
 def run_retraining(
-    binary_only: bool = False,
-    species_only: bool = False,
+    data_prep: bool = True,
+    binary: bool = True,
+    species: bool = True,
     auto_promote: bool = False,
-    sweep: bool = False,
 ) -> dict:
     """
-    Run the full retraining pipeline.
+    Run the retraining pipeline. Steps are composable — pass any subset of
+    `data_prep`, `binary`, `species` to scope the run.
 
-    When sweep=True, steps 6+7 (single train + evaluate) are replaced by
-    run_sweep_pipeline, which trains every variant in SWEEP_RUNS, evaluates
-    each on the test split (val fallback if test is empty), and writes a
-    Markdown comparison report. Auto-promotion is disabled in sweep mode —
-    pick a winner from the report manually.
+    Defaults run all three. Skipping `data_prep` reuses the existing data.yaml
+    on disk (faster iteration on hyperparameter changes). Skipping `binary`
+    or `species` runs only the other model. The optimizer / lr / dropout
+    used for training come from `config.yaml` (training section).
     """
     logging.info("Starting Retraining Pipeline...")
+    logging.info(
+        f"Steps: data_prep={data_prep}, binary={binary}, species={species}, "
+        f"auto_promote={auto_promote}"
+    )
 
     # Configuration for retraining
     local_training_dir = config.local_training_dir
@@ -125,6 +128,31 @@ def run_retraining(
 
     class_map_path = local_training_dir / "class_map.json"
     labels_staged_dir = local_training_dir / "labels_staged"
+    species_yaml: Optional[Path] = local_training_dir / "species" / "data.yaml"
+    binary_yaml: Optional[Path] = local_training_dir / "binary" / "data.yaml"
+
+    if not data_prep:
+        # Reuse the existing dataset on disk — skip every walk/extract/flatten step.
+        logging.info(
+            "Skipping data prep (data_prep=False). Reusing existing data.yaml files."
+        )
+        if binary and not binary_yaml.exists():
+            logging.error(
+                f"Binary data.yaml not found: {binary_yaml}\n"
+                "  Run with --data-prep first, or include binary in a full retrain."
+            )
+            return {}
+        if species and not species_yaml.exists():
+            logging.error(
+                f"Species data.yaml not found: {species_yaml}\n"
+                "  Run with --data-prep first, or include species in a full retrain."
+            )
+            return {}
+        return _train_and_evaluate(
+            binary_yaml=binary_yaml if binary else None,
+            species_yaml=species_yaml if species else None,
+            auto_promote=auto_promote,
+        )
 
     # 1. Generate per-drop YOLO labels from Biigle raw CSVs (uses class_map.json IDs)
     logging.info("Generating per-drop YOLO labels from Biigle expert CSVs...")
@@ -148,26 +176,31 @@ def run_retraining(
         )
         return {}
 
+    # `training_excluded_drops` is consulted by every label-walking helper below
+    # so a single exclusion list propagates through floor decisions, extras
+    # discovery, and the staged label tree.
+    excluded_drops = config.training_excluded_drops
+
     # 2b. Discover extras (drops under extra_no_survey_id/ without MaxN data).
-    extra_drops, extra_species = discover_extra_drops(images_dir)
+    extra_drops, extra_species = discover_extra_drops(
+        images_dir, excluded_drops=excluded_drops
+    )
 
-    # 2c. Build candidate unified species list, then apply floor.
-    # Floor uses actual on-disk box counts (not MaxN proxies) and merges species
-    # below class_floor_pct into the 'fish' bucket — done implicitly by leaving
-    # them out of unified_names so flatten_and_remap_labels falls back to fish.
+    # 2c. Build the unified species list. The post-assembly floor (step 7b)
+    # decides which species to merge into 'fish' based on actual train image
+    # counts after cap + split — so flatten just keeps every species here.
     all_species = set(species_names) | set(extra_species) | {"fish"}
-    box_counts = count_boxes_per_species_in_source(images_dir, class_map_path)
-    floor_species = identify_floor_species(box_counts, config.training_floor_pct)
-    print_species_totals(box_counts, floor_species)
-    species_names = sorted(all_species - floor_species)
+    species_names = sorted(all_species)
 
-    # 3. Flatten + remap class IDs into the unified ordering. Floored species
-    #    are absent from unified_names and so route to the 'fish' fallback.
+    # 3. Flatten + remap class IDs into the unified ordering. Species that
+    #    don't survive the post-assembly floor will be merged into 'fish'
+    #    after assembly via apply_post_assembly_floor.
     flatten_and_remap_labels(
         deployment_data_dir=images_dir,
         src_class_map_path=class_map_path,
         unified_names=species_names,
         dst_dir=labels_staged_dir,
+        excluded_drops=excluded_drops,
     )
 
     # 3b. Show per-drop bounding-box counts so the user sees imbalance before splits.
@@ -240,41 +273,67 @@ def run_retraining(
         species_labels_dir=labels_staged_dir,
         output_dir=local_training_dir,
         class_names=species_names,
-        build_binary=not species_only,
+        build_binary=binary,
         source_class_map_path=class_map_path,
         extra_drops=set(extra_drops),
     )
 
-    # 6. Train (single variant) OR sweep (multi-variant comparison).
-    if sweep:
-        if auto_promote:
-            logging.warning(
-                "auto_promote is ignored in sweep mode — pick a winner manually "
-                "from the generated report.md."
-            )
-        logging.info("Step 6: Running training sweep across SWEEP_RUNS...")
-        sweep_results = run_sweep_pipeline(
-            binary_data_yaml=str(binary_yaml) if binary_yaml else None,
-            species_data_yaml=str(species_yaml) if species_yaml else None,
-            train_binary=not species_only,
-            train_species=not binary_only,
-            build_reports=True,
+    # 7b. Post-assembly floor — re-merge any class whose actual train image count
+    # (after cap + split) is below class_floor_min_images. The source-level floor
+    # works on pre-cap counts; this catches classes that pass that floor but lose
+    # most of their frames to per-drop capping or splitter quirks. Always runs
+    # when the species dataset was assembled — the data.yaml on disk reflects
+    # what training will see, so the floor needs to run regardless of whether
+    # the user requested species training in this same invocation. Re-prints the
+    # assembled summary so the user sees the final post-floor composition (the
+    # one printed inside assemble_yolo_dataset reflects the pre-floor state).
+    if species_yaml:
+        species_dir = species_yaml.parent
+        merged, post_floor_class_names = apply_post_assembly_floor(
+            species_dir=species_dir,
+            min_images=config.training_floor_min_images,
         )
-        logging.info("Retraining Pipeline COMPLETE (sweep mode).")
-        return {"sweep": sweep_results}
+        if merged:
+            logging.info("Re-printing summary after post-assembly floor merge:")
+            print_assembled_summary(
+                species_dir=species_dir,
+                class_names=post_floor_class_names,
+                train_drops=train_drops,
+                val_drops=val_drops,
+                test_drops=test_drops,
+                extra_drops=set(extra_drops),
+            )
 
-    logging.info("Step 6: Training YOLO models...")
+    if not (binary or species):
+        logging.info(
+            "Data prep complete; binary=False and species=False so skipping training."
+        )
+        return {"data_prep_complete": True}
+
+    return _train_and_evaluate(
+        binary_yaml=binary_yaml if binary else None,
+        species_yaml=species_yaml if species else None,
+        auto_promote=auto_promote,
+    )
+
+
+def _train_and_evaluate(
+    binary_yaml: Optional[Path],
+    species_yaml: Optional[Path],
+    auto_promote: bool,
+) -> dict:
+    """Train the requested models, evaluate each, optionally promote on improvement."""
+    logging.info("Training YOLO models...")
     train_results = run_training_pipeline(
         binary_data_yaml=str(binary_yaml) if binary_yaml else None,
         species_data_yaml=str(species_yaml) if species_yaml else None,
-        train_binary=not species_only,
-        train_species=not binary_only,
+        train_binary=binary_yaml is not None,
+        train_species=species_yaml is not None,
     )
 
-    # 7. Evaluate & Promote
     eval_results = {}
     if "binary" in train_results:
-        logging.info("Step 7a: Evaluating binary model...")
+        logging.info("Evaluating binary model...")
         eval_results["binary"] = run_evaluation_pipeline(
             model_path=train_results["binary"]["local"],
             data_yaml=str(binary_yaml),
@@ -284,14 +343,12 @@ def run_retraining(
             _promote_model_locally(train_results["binary"]["local"], "binary")
 
     if "species" in train_results:
-        logging.info("Step 7b: Evaluating species model...")
+        logging.info("Evaluating species model...")
         eval_results["species"] = run_evaluation_pipeline(
             model_path=train_results["species"]["local"],
             data_yaml=str(species_yaml),
             model_type="species",
         )
-        # TODO: decide whether the species model should use the same auto_promote threshold
-        # as the binary model, or require a separate manual promotion review.
         if auto_promote and eval_results["species"].get("should_promote"):
             _promote_model_locally(train_results["species"]["local"], "species")
 
