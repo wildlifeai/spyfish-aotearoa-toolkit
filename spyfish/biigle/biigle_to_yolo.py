@@ -60,6 +60,29 @@ def _read_image_dimensions(img_path: Path) -> Optional[Tuple[int, int]]:
         return None
 
 
+# Workflow / admin labels (Biigle tree 3375) that should NEVER train as fish.
+# These are state markers, not detections — annotators apply them to mark
+# images as "in progress", "scale bar visible", "couldn't annotate", etc.
+# Rows with these labels are dropped from the YOLO export entirely.
+_WORKFLOW_LABEL_SKIP = {
+    "In progress",
+    "Nothing here",
+    "Scale bar",
+    "Can't annotate (e.g. bad visibility)",
+}
+
+
+def _is_workflow_label(name: str) -> bool:
+    """True if a label is an admin/workflow marker that should be skipped from training."""
+    if name in _WORKFLOW_LABEL_SKIP:
+        return True
+    if name.startswith(
+        "Done "
+    ):  # Done Video, Done Sizes, Done Volume, Done QA Review, ...
+        return True
+    return False
+
+
 def convert_annotations_to_yolo(
     df: pd.DataFrame,
     class_map: Dict[str, int],
@@ -84,6 +107,23 @@ def convert_annotations_to_yolo(
     Returns:
         {filename: annotation_count} summary.
     """
+    # Drop workflow/admin annotations entirely (don't even route to fish bucket).
+    n_pre = len(df)
+    skip_mask = df["label_name"].astype(str).map(_is_workflow_label)
+    if skip_mask.any():
+        skipped_labels = sorted(df.loc[skip_mask, "label_name"].astype(str).unique())
+        logging.info(
+            f"Skipping {int(skip_mask.sum())} workflow/admin annotation(s) — "
+            f"these are status markers, not detections. Labels: {skipped_labels}"
+        )
+        df = df.loc[~skip_mask].copy()
+    if df.empty:
+        logging.warning(
+            f"All {n_pre} annotations were workflow/admin labels — nothing to write."
+        )
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        return {}
+
     incoming_labels = set(df["label_name"].dropna().astype(str).unique())
     unknown = sorted(incoming_labels - set(class_map.keys()))
     fish_class_id = class_map.get("fish")  # generic-fish fallback bucket
@@ -142,7 +182,7 @@ def convert_annotations_to_yolo(
         txt_path.write_text("\n".join(lines))
         summary[str(filename)] = len(lines)
 
-    logging.info(f"Wrote {len(summary)} label files to {labels_dir}")
+    logging.debug(f"Wrote {len(summary)} label files to {labels_dir}")
     if n_default_fallback:
         logging.warning(
             f"  {n_default_fallback}/{len(summary)} image(s) were not on disk — "
@@ -278,7 +318,7 @@ def biigle_to_yolo(
         labels_dir = drop_dir / "labels"
         images_dir = drop_dir / "frames"
         convert_annotations_to_yolo(drop_df, class_map, labels_dir, images_dir)
-        logging.info(f"  Wrote labels for {drop_dir.name} → {labels_dir}")
+        logging.debug(f"  Wrote labels for {drop_dir.name} → {labels_dir}")
 
     return class_map
 

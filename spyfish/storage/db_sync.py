@@ -116,13 +116,29 @@ def sync_annotations() -> bool:
         filters += ["--include", f"{pattern}.jpeg"]
         filters += ["--include", f"{pattern}.png"]
 
-    # Include training results (models, metrics, curves)
-    training_prefix = "training"
-    filters += ["--include", f"{training_prefix}/**"]
+    # NOTE: training/ outputs are intentionally NOT synced here.
+    # The directory contains a mix of useful artifacts (model weights, metrics,
+    # data.yaml) and noise (YOLO debug-image dumps, tensorboard event files,
+    # symlinked dataset trees that re-resolve to deployment_data/ frames,
+    # intermediate label-staging dirs, spot-check audits). A proper home for
+    # training artifacts in S3 — and the right include/exclude rules — is a
+    # design decision for later. Promoted models still flow to S3 via the
+    # models/ prefix below.
+    # See claude_docs/todo.md "ML pipeline" entry.
 
     # Include promoted models
     models_prefix = "models"
     filters += ["--include", f"{models_prefix}/**"]
+
+    # Exclude external Biigle volumes that live under extra_no_survey_id/.
+    # Those are pre-curated bulk imports already hosted on Biigle's storage
+    # (disk-134) — re-uploading them to the project bucket duplicates GBs of
+    # frames + annotations for no benefit. Drop annotations + class_map + frames
+    # were synced once at download time; if a volume needs to be re-shared,
+    # re-pull from Biigle rather than relying on this bucket as backup.
+    # Filter ordering matters: this `--exclude` must come AFTER the includes
+    # above so it overrides them for paths under extra_no_survey_id/.
+    filters += ["--exclude", "extra_no_survey_id/*"]
 
     # This sync is additive only (no --delete flag is passed to aws s3 sync inside sync_local_to_s3)
     return s3.sync_local_to_s3(str(local_dq_dir), s3_prefix, filters=filters)

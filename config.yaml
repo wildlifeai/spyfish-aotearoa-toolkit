@@ -141,7 +141,8 @@ biigle:
   done_labels: ["Done Volume", "Done QA Review"]
   # Default fish label for ML annotations uploaded to Biigle
   # This is the exact fallback if a species is not found in label_mapping below.
-  default_fish_label_id: 531298   # "Fish - review required" label
+  default_fish_label_id: 531298   # tree 3375 → "Fish: review required" — fallback for fish-bucket / unknown ML predictions
+  default_bait_label_id: 537309   # tree 3375 → "Bait" — used when an ML annotation's class resolves to 'bait'
   default_label_tree_id: 3511 # 3375
 
   # Map species scientific/common names (from COCO JSON) to specific Biigle label IDs.
@@ -164,15 +165,24 @@ training:
   epochs: 100
   patience: 25
   imgsz: 640
-  batch: 32                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  batch: 16                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
+  lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
+  dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
   train_pct: 0.85
   val_pct: 0.15
   test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
-  class_floor_pct: 0.02         # merge species below 2% of total bounding boxes into "fish"
+  class_floor_min_images: 200   # merge species appearing in fewer than this many distinct frames into "fish"
   local_training_dir: "process_files/training"
-  excluded_drops_file: "training_excluded_drops.txt"   # one DropID per line; '#' comments OK
-  force_val_drops_file: "training_force_val_drops.txt" # DropIDs to force into val (overrides survey-aware donation)
+  excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
+  force_val_drops_file: "process_files/training_lists/force_val_drops.txt" # drops to force into val (overrides survey-aware donation)
   retrain_min_improvement_pct: 2.0
+  # Per-drop frame filter (applied in assemble_yolo_dataset)
+  cap_frames_per_drop: 100               # max frames per drop in the assembled YOLO dataset (extras bypass this cap)
+  dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
+    - "Pagrus auratus"                   # snapper — overrepresented in current corpus
+    - "Parapercis colias"                # blue cod — overrepresented in current corpus
+  split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
 
 
 validation_patterns:

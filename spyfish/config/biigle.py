@@ -58,6 +58,16 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_section, "default_fish_label_id", "biigle"))
 
     @property
+    def default_bait_label_id(self) -> int:
+        """Biigle label ID used when an ML annotation's class resolves to 'bait'.
+
+        Distinct from `default_fish_label_id` so bait predictions land in the
+        Biigle 'Bait' label (tree 3375 → 537309) instead of getting lumped with
+        fish predictions in the Fish review bucket.
+        """
+        return int(get_required(self.biigle_section, "default_bait_label_id", "biigle"))
+
+    @property
     def label_mapping(self) -> dict:
         mapping = get_required(self.biigle_section, "label_mapping", "biigle")
         return mapping if mapping is not None else {}

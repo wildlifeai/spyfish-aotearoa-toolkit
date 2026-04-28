@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import List, Optional
 
 from spyfish.config.base import BaseConfig, get_required
 
@@ -76,8 +77,68 @@ class MLConfig(BaseConfig):
         return int(get_required(self.training_config, "batch", "training"))
 
     @property
-    def training_floor_pct(self) -> float:
-        return float(get_required(self.training_config, "class_floor_pct", "training"))
+    def training_optimizer(self) -> str:
+        return get_required(self.training_config, "optimizer", "training")
+
+    @property
+    def training_lr0(self) -> float:
+        return float(get_required(self.training_config, "lr0", "training"))
+
+    @property
+    def training_dropout(self) -> float:
+        return float(get_required(self.training_config, "dropout", "training"))
+
+    @property
+    def training_floor_min_images(self) -> int:
+        """Image-count floor — species appearing in fewer distinct frames get merged into 'fish'."""
+        return int(
+            get_required(self.training_config, "class_floor_min_images", "training")
+        )
+
+    @property
+    def training_split_seed(self) -> Optional[int]:
+        """Random seed for reproducible train/val/test splits and per-drop frame filtering.
+
+        Set to an integer (default 42) for deterministic, reproducible results
+        across retrain runs — same drops + same labels always produce the same
+        splits and the same frame selections.
+
+        Set to `null` in config.yaml for fresh randomness each run (Python uses
+        system entropy when seed is None). Useful for ablation experiments where
+        you want to measure result variance, or for exploring multiple
+        independent splits of the same dataset.
+        """
+        val = self.training_config.get("split_seed", 42)
+        return int(val) if val is not None else None
+
+    @property
+    def training_cap_frames_per_drop(self) -> int:
+        """Max frames per drop in the assembled YOLO dataset.
+
+        Applied per-drop in `assemble_yolo_dataset`. When a drop has more than
+        this many annotated frames, dominant-species-only frames are dropped
+        first (see `training_dominant_species`). Default 60 fits ~20 drops at
+        small scale; raise as the dataset grows.
+
+        **Extras (drops under `extra_no_survey_id/`) bypass this cap entirely** —
+        they're externally curated bulk imports (BIIGLE volume uploads) where
+        every annotated frame is high-signal training data; capping them throws
+        away expensive expert annotation work.
+        """
+        return int(
+            get_required(self.training_config, "cap_frames_per_drop", "training")
+        )
+
+    @property
+    def training_dominant_species(self) -> List[str]:
+        """Species whose frames are deprioritized when over the per-drop cap.
+
+        A frame whose only labels are in this list is treated as 'dominant-only'
+        and dropped first when the drop exceeds `cap_frames_per_drop`. Frames
+        containing at least one species *not* in this list are kept by default.
+        Empty list = no deprioritization (cap-only behavior).
+        """
+        return list(self.training_config.get("dominant_species", []) or [])
 
     @property
     def training_train_pct(self) -> float:

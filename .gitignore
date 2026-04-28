@@ -163,7 +163,16 @@ cython_debug/
 .vscode/
 
 # Spyfish specific
-process_files/
+# Ignore all contents of process_files/ — except the curated training-list files,
+# which are hand-edited config (inputs, not generated artifacts) and belong in git.
+# Pattern note: `process_files/*` ignores immediate children; the negation chain
+# below re-includes the training_lists/ subdir and only its .txt / .csv files.
+# Files added to training_lists/ with other extensions stay ignored by default.
+process_files/*
+!process_files/training_lists
+process_files/training_lists/*
+!process_files/training_lists/*.txt
+!process_files/training_lists/*.csv
 runs/
 __pycache__/
 *.mp4

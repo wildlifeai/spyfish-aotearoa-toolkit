@@ -289,13 +289,28 @@ class BiigleParser:
         """
         Format MaxN results into the standard Spyfish annotation output format,
         matching the column names expected by ingest.py.
+
+        Resolves label_name → scientific_name via class_map. Unknown workflow
+        labels (e.g. 'Final', 'Interesting Sighting', 'Done Video') route to the
+        'fish' bucket — same fallback discipline as biigle_to_yolo.py and
+        discover_extra_drops, so workflow markers can never leak into the
+        unified species list.
         """
+        from spyfish.biigle.class_map import load_class_map, load_class_map_by_id
+
         annotations_df = annotations_df.copy()
+
+        name_to_id = load_class_map(config.class_map_path)
+        id_to_name = load_class_map_by_id(config.class_map_path)
+
+        def _resolve(label_name: str) -> str:
+            if " - " in label_name:
+                return label_name.split(" - ", 1)[1].strip()
+            cid = name_to_id.get(label_name)
+            return id_to_name.get(cid, "fish") if cid is not None else "fish"
+
         annotations_df[config.csv_scientific_name_column] = (
-            annotations_df["label_name"]
-            .str.split(" - ")
-            .str[1]
-            .fillna(annotations_df["label_name"])
+            annotations_df["label_name"].astype(str).apply(_resolve)
         )
         return annotations_df.rename(
             columns={

@@ -16,9 +16,10 @@ def _make_records(n: int) -> list[dict]:
     ]
 
 
+@patch("spyfish.orchestrator.ml_runner.os.makedirs")
 @patch("spyfish.orchestrator.ml_runner.DatabaseManager")
 @patch("spyfish.orchestrator.ml_runner.S3Handler")
-def test_get_inference_targets(mock_s3_class, mock_db_class):
+def test_get_inference_targets(mock_s3_class, mock_db_class, mock_makedirs):
     mock_db = mock_db_class.return_value
     mock_s3 = mock_s3_class.return_value
 
@@ -43,10 +44,13 @@ def test_get_inference_targets(mock_s3_class, mock_db_class):
     assert targets[0]["drop_id"] == "KSF_20240124_BUV_KSF_085_01"
 
 
+@patch("spyfish.orchestrator.ml_runner.os.makedirs")
 @patch("spyfish.orchestrator.ml_runner.os.path.exists")
 @patch("spyfish.orchestrator.ml_runner.DatabaseManager")
 @patch("spyfish.orchestrator.ml_runner.S3Handler")
-def test_get_inference_targets_caps_at_limit(mock_s3_class, mock_db_class, mock_exists):
+def test_get_inference_targets_caps_at_limit(
+    mock_s3_class, mock_db_class, mock_exists, mock_makedirs
+):
     """With 5 eligible drops and limit=3, only 3 downloads should be attempted."""
     mock_db = mock_db_class.return_value
     mock_s3 = mock_s3_class.return_value
@@ -69,11 +73,12 @@ def test_get_inference_targets_caps_at_limit(mock_s3_class, mock_db_class, mock_
     assert mock_s3.download_object_from_s3.call_count == 3
 
 
+@patch("spyfish.orchestrator.ml_runner.os.makedirs")
 @patch("spyfish.orchestrator.ml_runner.os.path.exists")
 @patch("spyfish.orchestrator.ml_runner.DatabaseManager")
 @patch("spyfish.orchestrator.ml_runner.S3Handler")
 def test_get_inference_targets_backfills_on_download_failure(
-    mock_s3_class, mock_db_class, mock_exists
+    mock_s3_class, mock_db_class, mock_exists, mock_makedirs
 ):
     """Regression: limit used to be applied BEFORE download loop, so failures
     silently reduced the batch size. Now failures should be backfilled from
@@ -98,11 +103,12 @@ def test_get_inference_targets_backfills_on_download_failure(
     ]
 
 
+@patch("spyfish.orchestrator.ml_runner.os.makedirs")
 @patch("spyfish.orchestrator.ml_runner.os.path.exists")
 @patch("spyfish.orchestrator.ml_runner.DatabaseManager")
 @patch("spyfish.orchestrator.ml_runner.S3Handler")
 def test_get_inference_targets_all_downloads_fail(
-    mock_s3_class, mock_db_class, mock_exists
+    mock_s3_class, mock_db_class, mock_exists, mock_makedirs
 ):
     mock_db = mock_db_class.return_value
     mock_s3 = mock_s3_class.return_value

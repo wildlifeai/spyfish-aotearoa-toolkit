@@ -19,6 +19,11 @@
 # This file is the canonical list — edit it here and commit. Not in config.yaml.
 
 # --- Excluded DropIDs ---
-TON_20211026_BUV_TON_050_01 
-TON_20211026_BUV_TON_053_01  
-TON_20211026_BUV_TON_071_01 
+
+# Local frames are 1440×1080 but Biigle annotators saw the source at ~1920×1080
+# (audit 2026-04-26: max annotation x reaches ~1934, ~34% over local width).
+# This is a horizontal crop — coordinates can't be linearly remapped, so labels
+# don't align to local image content. Re-pull Biigle source frames to recover.
+TON_20211026_BUV_TON_050_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080
+TON_20211026_BUV_TON_053_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080
+TON_20211026_BUV_TON_071_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080

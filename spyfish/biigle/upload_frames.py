@@ -196,8 +196,16 @@ def upload_coco_annotations_to_biigle(
         cat_id = ann.get("category_id")
         species_name = coco_cat_id_to_name.get(cat_id, "unknown")
 
-        # If species exists in config mapping, use its ID. Otherwise, use the fallback label_id.
-        assigned_label_id = label_mapping.get(species_name, label_id)
+        # Routing precedence:
+        #   1. Explicit per-species mapping in label_mapping (config.yaml)
+        #   2. 'bait' class → default_bait_label_id (tree 3375 → "Bait")
+        #   3. Anything else → label_id (fallback, default = default_fish_label_id)
+        if species_name in label_mapping:
+            assigned_label_id = label_mapping[species_name]
+        elif species_name == "bait":
+            assigned_label_id = config.default_bait_label_id
+        else:
+            assigned_label_id = label_id
 
         biigle_annotations.append(
             {

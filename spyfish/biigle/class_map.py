@@ -162,7 +162,16 @@ _MANUAL_OVERRIDES: List[dict] = [
         "scientific_name": "fish",
         "common_name": "fish",
         "aphia_id": None,
-        "aliases": ["Fish - Final", "To review", "Fish: review required"],
+        # Both "Fish - Final" and "Fish: final" listed because Biigle export
+        # vocabulary has used both forms; safe to keep both.
+        # Unknown labels also fall through to this bucket via the convert/parser
+        # fallback path — these aliases are just for explicit, warning-free routing.
+        "aliases": [
+            "Fish - Final",
+            "Fish: final",
+            "Fish: review required",
+            "To review",
+        ],
     },
     {
         "scientific_name": "bait",

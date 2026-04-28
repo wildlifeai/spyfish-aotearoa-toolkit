@@ -477,7 +477,20 @@ class S3Handler:
             # We use subprocess to leverage the highly optimized 'aws s3 sync' command.
             # NOTE: We intentionally do NOT use the '--delete' flag. This ensures
             # that files deleted locally persist in S3 for backup/recovery.
-            cmd = ["aws", "s3", "sync", local_dir, s3_uri, "--no-progress"]
+            # NOTE: '--size-only' makes the comparison size-based only, ignoring
+            # last-modified timestamps. Without this flag, aws s3 sync re-uploads
+            # any file whose mtime differs from S3 — which causes spurious
+            # re-uploads when files are touched, regenerated, or copied between
+            # machines (timestamps drift even when content is identical).
+            cmd = [
+                "aws",
+                "s3",
+                "sync",
+                local_dir,
+                s3_uri,
+                "--no-progress",
+                "--size-only",
+            ]
             if filters:
                 cmd.extend(filters)
             if extra_args:

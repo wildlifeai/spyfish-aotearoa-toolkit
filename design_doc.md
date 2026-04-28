@@ -407,7 +407,7 @@ flowchart TD
 
     M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>biigle_status: expert_uploaded → expert_complete"]
 
-    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, identify floor species (rare → 'fish' fallback)<br/>Survey-aware 70/15/15 split<br/>Train YOLOv12 (or sweep variants)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
+    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, identify floor species (rare → 'fish' fallback)<br/>Survey-aware 70/15/15 split (with force-val overrides)<br/>Train YOLOv12 (optimizer/lr/dropout from config)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
 
     O --> P["Updated production model<br/>All future inference uses new weights"]
 ```
@@ -956,10 +956,10 @@ Sequenced by dependency, not assigned dates.
 ### Phase 3 — Model Improvement Loop
 
 - BIIGLE annotation → YOLO label conversion
-- Training data balancing — anti-monoculture trim + floor merge + rare-class oversampling
-- Drop exclusion list (`training_excluded_drops.txt`) for in-progress QA holds
-- YOLOv12 retraining pipeline (train → evaluate → promote)
-- Multi-variant training sweep (`sweep.py`) + auto-generated Markdown report (`sweep_report.py`)
+- Training data preparation — drop exclusion + on-disk floor (rare → `fish` fallback)
+- Curated drop lists (`excluded_drops.txt`, `force_val_drops.txt`) for QA holds and val-split pinning
+- YOLOv12 retraining pipeline (train → evaluate → promote) with config-driven optimizer/lr/dropout
+- Composable retrain CLI: `--data-prep` / `--binary` / `--species` flags scope the run
 - Slurm wrapper for NeSI submission (`train_job.sl`)
 - Per-species evaluation metrics surfaced in Streamlit dashboard
 - Formal per-species model promotion tracking
@@ -1286,17 +1286,19 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 ### Training (`training` section)
 
 
-| Key                           | Default                         | Effect                                                                  |
-| ----------------------------- | ------------------------------- | ----------------------------------------------------------------------- |
-| `epochs`                      | 100                             | Max training epochs                                                     |
-| `patience`                    | 25                              | Early stopping patience                                                 |
-| `imgsz`                       | 640                             | Input image size                                                        |
-| `batch`                       | 16                              | YOLO batch size; drop to 4 at imgsz=1280, raise to 32 on 24GB+ GPUs     |
-| `class_floor_pct`             | 0.02                            | Species below this fraction of on-disk boxes are merged into "fish"     |
-| `min_frames_per_drop`         | 10                              | Per-drop floor: never trim a drop below this total frame count          |
-| `excluded_drops_file`         | `training_excluded_drops.txt`   | DropIDs to skip (one per line; `#` comments OK)                         |
-| `force_val_drops_file`        | `training_force_val_drops.txt`  | DropIDs to force into the val split, overriding survey-aware donation   |
-| `retrain_min_improvement_pct` | 2.0                             | New model must beat production by ≥ this much mAP@0.5 to be promoted    |
+| Key                           | Default                                                | Effect                                                                  |
+| ----------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `epochs`                      | 100                                                    | Max training epochs                                                     |
+| `patience`                    | 25                                                     | Early stopping patience                                                 |
+| `imgsz`                       | 640                                                    | Input image size                                                        |
+| `batch`                       | 16                                                     | YOLO batch size; drop to 4 at imgsz=1280, raise to 32 on 24GB+ GPUs     |
+| `optimizer`                   | `AdamW`                                                | YOLO optimizer; `SGD` is the alternative (use `lr0=0.01` if so)         |
+| `lr0`                         | 0.001                                                  | Initial learning rate (paired with optimizer choice)                    |
+| `dropout`                     | 0.1                                                    | Head-dropout rate; helps small-dataset overfitting (0.0 = disabled)     |
+| `class_floor_min_images`      | 100                                                    | Species appearing in fewer than this many distinct frames are merged into "fish" |
+| `excluded_drops_file`         | `process_files/training_lists/excluded_drops.txt`      | DropIDs to skip (one per line; `#` comments OK)                         |
+| `force_val_drops_file`        | `process_files/training_lists/force_val_drops.txt`     | DropIDs to force into val (overrides survey-aware donation)             |
+| `retrain_min_improvement_pct` | 2.0                                                    | New model must beat production by ≥ this much mAP@0.5 to be promoted    |
 
 
 ### CSV column mapping (`csv_mapping` section)
@@ -1488,59 +1490,48 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 Run with `--retrain` (typically after `--biigle-sync`):
 
 ```bash
-python run_pipeline.py --retrain
+python run_pipeline.py --retrain                              # data prep + binary + species + auto-promote
+python run_pipeline.py --retrain --data-prep                  # rebuild dataset only, no training
+python run_pipeline.py --retrain --binary                     # binary training using existing data.yaml
+python run_pipeline.py --retrain --species                    # species training using existing data.yaml
+python run_pipeline.py --retrain --data-prep --species        # rebuild + train species, skip binary
 ```
+
+**Compose-style flags**: passing no step flag runs all three steps; passing any step flag runs only the named subset. Skipping `--data-prep` reuses the existing `process_files/training/{species,binary}/data.yaml` — useful for fast hyperparameter iteration without re-walking the label tree.
 
 The orchestrator (`spyfish/orchestrator/retrain_runner.py`) chains together:
 
 1. **Export BIIGLE annotations to YOLO format** (`biigle_to_yolo.py`): Reads frame annotation CSVs from `data_quality/{DropID}/biigle_frames/`, converts bounding boxes to YOLO `.txt` format, generates `class_map.json`.
-2. **Drop exclusion** (`prepare_from_annotations`): DropIDs listed in `training_excluded_drops.txt` (one per line; `#` for inline comments) are filtered out before training. Use this to hold back deployments whose QA is still in progress — they remain invisible to the rest of the pipeline until removed from the file.
-3. **Box count + floor identification** (`count_boxes_per_species_in_source` → `identify_floor_species`): Walks every `<drop>/labels/*.txt` and counts bounding boxes per species (decoded via per-drop class_map sidecar, falling back to the global class_map). Species whose share of total boxes is below `class_floor_pct` (2%) are flagged for the floor — they will be merged into the generic `"fish"` class.
-4. **Flatten + remap labels** (`flatten_and_remap_labels`): Stages source labels into `process_files/training/labels_staged/<drop_id>/` with class IDs rewritten to a unified ordering. Floored species are absent from the unified class list, so their bounding boxes redirect to the `"fish"` fallback class. The result is one class set used by both species and binary training.
-5. **Survey-aware split** (`split_data.py`): Drop-level 70/15/15 train/val/test. Surveys with ≥5 drops donate one each to val + test; ≥3 drops donate one to val; smaller surveys go entirely to train. DropIDs in `training_force_val_drops.txt` are pinned to val regardless. No drop appears in two splits (no leakage). `val_min_images` (20) is logged as a recommendation.
-6. **Assemble** (`assemble_yolo_dataset`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`, copying or symlinking images and remapped labels into per-split `images/` and `labels/` trees. Image lookup is scoped by drop_id (`{drop_id: {stem: Path}}`) so identically-named frames from different drops can never cross-pair.
-7. **Train** (`train.py`): YOLOv12 with underwater-tuned augmentation (HSV shifts, rotation, horizontal flip), `batch=16`, `imgsz=640`. AMP disabled (prevents NaN losses on some underwater data). Stability params: `warmup_epochs=5`, `warmup_bias_lr=0.0001`, `nbs=64`, `box=5.0`.
-8. **Evaluate + promote** (`evaluate.py`): Evaluates new model vs production model on the test split. Promotes if mAP@0.5 improvement ≥ `retrain_min_improvement_pct` (2%).
+2. **Drop exclusion** (`prepare_from_annotations` + helpers): DropIDs in `excluded_drops_file` (default `process_files/training_lists/excluded_drops.txt`) are filtered out everywhere — MaxN filtering, on-disk box counts, label staging, and extras discovery. Bad drops can't tilt floor decisions or leak labels into training.
+3. **Image count + floor identification** (`count_images_per_species_in_source` → `identify_floor_species`): Walks every `<drop>/labels/*.txt` and counts distinct frames-with-species (each frame contributes at most 1 per species, regardless of how many boxes it contains — variety of visual contexts is what drives learnability, not box count). Drops without local frames are skipped (their labels can't reach training). Species appearing in fewer than `class_floor_min_images` (default 100) frames are flagged for the floor. `bait` is exempted from flooring because it must stay its own class so MaxN inference can exclude bait-cage detections from fish counts.
+4. **Flatten + remap labels** (`flatten_and_remap_labels`): Stages source labels into `process_files/training/labels_staged/<drop_id>/` with class IDs rewritten to a unified ordering. Floored species are absent from the unified class list, so their bounding boxes redirect to the `"fish"` fallback class.
+5. **Survey-aware split** (`split_data.py`): Drop-level 70/15/15 train/val/test. Surveys with ≥5 drops donate one each to val + test; ≥3 drops donate one to val; smaller surveys go entirely to train. DropIDs in `force_val_drops_file` (default `process_files/training_lists/force_val_drops.txt`) are pinned to val regardless. No drop appears in two splits (no leakage).
+6. **Assemble** (`assemble_yolo_dataset`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`, copying or symlinking images and remapped labels into per-split `images/` and `labels/` trees. Image lookup is scoped by drop_id (`{drop_id: {stem: Path}}`) so identically-named frames from different drops can never cross-pair. Per-drop frame cap (`cap_frames_per_drop`, default 60) limits each canonical BUV drop to its top-N most-informative frames (dominant-species-only frames are dropped first). **Extras (drops under `extra_no_survey_id/`) bypass the cap** — they're externally curated bulk imports where every annotated frame is high-signal training data.
+7. **Train** (`train.py`): YOLOv12 with optimizer / `lr0` / `dropout` from `config.yaml`'s `training:` section (defaults: AdamW + 0.001 + 0.1, validated 2026-04). Underwater-tuned augmentation (HSV shifts, rotation, horizontal flip), `imgsz=640`. AMP disabled (prevents NaN losses on some underwater data). Stability params: `warmup_epochs=5`, `warmup_bias_lr=0.0001`, `nbs=64`, `box=5.0`.
+8. **Evaluate + promote** (`evaluate.py`): Evaluates new model vs production model on the val/test split. Promotes if mAP@0.5 improvement ≥ `retrain_min_improvement_pct` (2%). Auto-promotion can be disabled by passing `auto_promote=False` to `run_retraining`.
 
 **Model paths:**
 
 - Production model weights: `process_files/models/pipeline_model/`
-- Base model (evaluation baseline): `process_files/models/base_model/`
+- Base model (training starting weights): `process_files/models/base_model/`
 - Model name is read from the filename stem and embedded in output CSV names (e.g. `{DropID}_ml_{model_name}_maxn.csv`), so annotations are always traceable to the exact model version that produced them.
 
-### Visibility into balancing decisions
+### Visibility into retraining decisions
 
 The retrain run prints these markers to the log — scan them to confirm the pipeline did what you expected:
 
-- `Excluded N drop(s) per training_excluded_drops.txt: [...]` — exclusion list applied
-- `Loaded class map with X label aliases (Y classes) from ...` — class_map sidecars and global registry resolved
-- `=== Pre-floor species composition ===` followed by per-species fractions — `print_species_totals` showing which species cross the floor (those below `class_floor_pct` are tagged `→ fish`)
-- `flatten_and_remap_labels: N files → labels_staged/<drop_id>/ ...` — staged labels written with unified class IDs
-- `assemble_yolo_dataset: indexed N frame image(s) across M drop(s) under ...` — image index built per drop_id
+- `Steps: data_prep=..., binary=..., species=...` — which subset of steps will run
+- `Excluded N drop(s) per excluded_drops.txt: [...]` — exclusion list applied to MaxN data
+- `count_images_per_species_in_source: skipped N excluded drop(s), M drop(s) without local frames` — exclusion list and frame-availability check applied (so floor decisions only count what's actually trainable)
+- `flatten_and_remap_labels: skipped N excluded drop(s)` — exclusion list applied to staged labels
+- `Loaded class map with X label aliases (Y classes) from ...` — class_map sidecars + global registry resolved
+- `=== Pre-floor species composition ===` followed by per-species image counts — `print_species_totals` showing which species cross the floor (those below `class_floor_min_images` are tagged `→ fish`)
 - `=== Pre-split species inventory (from labels_staged) ===` — per-drop species counts after the floor remap, useful for verifying class-balance assumptions before the split runs
-
-### Experimentation: training sweeps
-
-For the model-selection phase (before a winner has been chosen), `--retrain` produces a single binary + species pair. To compare multiple configurations on the same dataset, use the sweep harness — it reuses the assembled YOLO directory, so you don't re-prepare data:
-
-```bash
-# After --retrain has built the dataset — runs both binary and species sweeps,
-# writes per-dataset Markdown reports automatically
-python -m spyfish.ml.training.sweep
-
-# Or scope to one dataset
-python -m spyfish.ml.training.sweep --binary-only
-python -m spyfish.ml.training.sweep --species-only
-
-# Skip the Markdown report (useful for quick debug runs)
-python -m spyfish.ml.training.sweep --no-report
-```
-
-Default variants in `SWEEP_RUNS` (`sweep.py`): `baseline` (vanilla SGD, default LR) and `adamw` (AdamW + `lr0=0.001` + dropout=0.1). Edit the list to add/remove experiments. Each run produces its own `best.pt` + `results.csv`; per-dataset comparison CSVs land at `<sweep_dir>/comparison.csv` and reports at `<sweep_dir>/report.md`. Output dirs are auto-named `sweep_<timestamp>_binary/` and `sweep_<timestamp>_species/`.
+- `assemble_yolo_dataset: indexed N frame image(s) across M drop(s)` — image index built per drop_id
 
 ### NeSI / Slurm
 
-`spyfish/ml/training/train_job.sl` is a Slurm wrapper that runs sweep + report under one `sbatch`. Three placeholders need to be set before first use: `--account`, venv path, project dir.
+`spyfish/ml/training/train_job.sl` is a Slurm wrapper that runs the full retrain end-to-end under one `sbatch`. Three placeholders need to be set before first use: `--account`, venv path, project dir. To scope the run, edit the `python run_pipeline.py --retrain ...` line in the script with any subset of `--data-prep` / `--binary` / `--species`.
 
 ```bash
 sbatch spyfish/ml/training/train_job.sl
