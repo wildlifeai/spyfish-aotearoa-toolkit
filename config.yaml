@@ -148,9 +148,13 @@ biigle:
   # Map species scientific/common names (from COCO JSON) to specific Biigle label IDs.
   # The upload script will check this dictionary first, then fall back to default_fish_label_id.
   # Empty dict = no species-specific mappings; everything goes to default_fish_label_id.
-  label_mapping: {}
-    # "Pagrus auratus": 12345
-    # "Notolabrus fucicola": 67890
+
+  label_mapping:
+    'Jasus edwardsii': 477401
+    'Notolabrus celidotus': 477425
+    'Pagrus auratus': 477416
+    'Parapercis colias': 477318
+    'Pseudolabrus miles': 477406
   # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
   # on slow or unreachable endpoints.
   request_timeout_secs: 30
@@ -178,10 +182,10 @@ training:
   force_val_drops_file: "process_files/training_lists/force_val_drops.txt" # drops to force into val (overrides survey-aware donation)
   retrain_min_improvement_pct: 2.0
   # Per-drop frame filter (applied in assemble_yolo_dataset)
-  cap_frames_per_drop: 100               # max frames per drop in the assembled YOLO dataset (extras bypass this cap)
+  cap_frames_per_drop: 120               # max frames per drop in the assembled YOLO dataset (extras bypass this cap)
   dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
-    - "Pagrus auratus"                   # snapper — overrepresented in current corpus
-    - "Parapercis colias"                # blue cod — overrepresented in current corpus
+    # - "Pagrus auratus"                   # snapper — overrepresented in current corpus
+    # - "Parapercis colias"                # blue cod — overrepresented in current corpus
   split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
 
 
