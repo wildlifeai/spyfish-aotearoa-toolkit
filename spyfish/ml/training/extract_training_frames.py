@@ -241,10 +241,27 @@ def extract_frames_for_drop(
 # ── Inference ────────────────────────────────────────────────────────────────
 
 
+def load_inference_model(annotation_type: Optional[str] = None):
+    """Load the configured pipeline model into memory.
+
+    Centralised here so survey runs can load once at the top of the loop and
+    pass the loaded instance through `process_drop → run_inference_to_csv`,
+    avoiding ~1-3s of per-drop reload (weights + GPU init) overhead.
+
+    Single-drop CLI runs let `run_inference_to_csv` lazy-load instead.
+    """
+    from ultralytics import YOLO
+
+    kind = annotation_type or config.training_extraction_annotation_type
+    model_path = config.get_pipeline_model(kind)
+    logging.info(f"loading {kind} pipeline model: {model_path.name}")
+    return YOLO(str(model_path))
+
+
 def run_inference_to_csv(
     extraction: ExtractionResult,
     *,
-    model_path: Optional[Path] = None,
+    model=None,
     annotation_type: Optional[str] = None,
     confidence: Optional[float] = None,
     imgsz: Optional[int] = None,
@@ -255,16 +272,18 @@ def run_inference_to_csv(
 
     Output schema: ``frame, time_seconds, class, confidence, x, y, w, h``
 
-    The output path is `{training_frames}/{drop_id}_{kind}_raw.csv`, mirroring
-    the `_raw.csv` convention for inference outputs in this project.
-    """
-    # Lazy import: ultralytics pulls in torch which is heavy. Most callers of
-    # this module only need `_quadratic_timestamps` (e.g. unit tests).
-    from ultralytics import YOLO
+    Inference is batched: the entire frame list is passed to `model.predict()`
+    in one call, which is significantly faster than per-frame predict()
+    invocations (especially on GPU, where it amortises kernel launch and
+    host↔device transfer overhead).
 
+    If `model` is None, lazy-loads via `load_inference_model(annotation_type)`.
+    Survey runs should pre-load and pass `model` to avoid reloading per drop.
+    """
     kind = annotation_type or config.training_extraction_annotation_type
-    if model_path is None:
-        model_path = config.get_pipeline_model(kind)
+    if model is None:
+        model = load_inference_model(annotation_type=kind)
+
     conf = (
         float(confidence)
         if confidence is not None
@@ -274,11 +293,21 @@ def run_inference_to_csv(
 
     out_csv = extraction.output_dir / f"{extraction.drop_id}_{kind}_raw.csv"
     logging.info(
-        f"{extraction.drop_id}: running '{kind}' inference "
-        f"on {len(extraction.frame_paths)} frame(s) using {model_path.name}"
+        f"{extraction.drop_id}: running '{kind}' inference on "
+        f"{len(extraction.frame_paths)} frame(s) (batched)"
     )
 
-    model = YOLO(str(model_path))
+    # Batched predict — single call across the whole frame list amortises
+    # GPU/CPU dispatch overhead vs. one predict() call per frame.
+    sources = [str(p) for p in extraction.frame_paths]
+    all_results = model.predict(
+        source=sources,
+        conf=conf,
+        imgsz=img_size,
+        verbose=False,
+        project=None,
+        save=False,
+    )
 
     with open(out_csv, "w", newline="") as fh:
         writer = csv.writer(fh)
@@ -287,22 +316,13 @@ def run_inference_to_csv(
         )
 
         n_detections = 0
-        for path, t in zip(extraction.frame_paths, extraction.timestamps):
+        for result, t in zip(all_results, extraction.timestamps):
             # Synthesized frame index — there's no contiguous decode here
             # (we ran cv2 .set/.read per timestamp), so this is the nominal
             # frame number for the seek time. Downstream COCO matching uses
             # `time_seconds`, not `frame`, so this is informational.
             frame_idx = int(round(t * extraction.fps))
-            results = model.predict(
-                source=str(path),
-                conf=conf,
-                imgsz=img_size,
-                verbose=False,
-                project=None,
-                save=False,
-            )
-            r = results[0]
-            for box in r.boxes:
+            for box in result.boxes:
                 x, y, w, h = box.xywh[0].tolist()
                 cls_id = int(box.cls[0])
                 writer.writerow(
@@ -412,7 +432,11 @@ class DropResult:
 
 
 def process_drop(
-    drop_id: str, *, force: bool = False, no_upload: bool = False
+    drop_id: str,
+    *,
+    force: bool = False,
+    no_upload: bool = False,
+    model=None,
 ) -> DropResult:
     """Full lifecycle for one drop: extract → infer → (upload → DB update).
 
@@ -448,7 +472,7 @@ def process_drop(
         return DropResult(drop_id=drop_id, ok=False, stage="extract", error=str(e))
 
     try:
-        raw_csv = run_inference_to_csv(extraction)
+        raw_csv = run_inference_to_csv(extraction, model=model)
     except Exception as e:
         logging.error(f"{drop_id}: inference failed — {e}")
         return DropResult(
@@ -513,11 +537,19 @@ def process_survey(
         )
         return []
 
+    # Load the pipeline model once for the whole survey — re-loading per drop
+    # costs 1-3s of disk + GPU init each, which compounds badly across
+    # hundreds of drops. process_drop accepts model=None when called from the
+    # single-drop CLI path; here we pre-load and pass it through.
+    model = load_inference_model()
+
     logging.info(f"{survey_id}: processing {len(drops)} drop(s)")
     results: List[DropResult] = []
     for i, drop_id in enumerate(drops, start=1):
         logging.info(f"━━━ [{i}/{len(drops)}] {drop_id} ━━━")
-        results.append(process_drop(drop_id, force=force, no_upload=no_upload))
+        results.append(
+            process_drop(drop_id, force=force, no_upload=no_upload, model=model)
+        )
 
     n_ok = sum(1 for r in results if r.ok)
     failures = [r for r in results if not r.ok]
