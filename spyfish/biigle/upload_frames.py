@@ -76,6 +76,81 @@ def upload_frames_to_s3(
     return uploaded
 
 
+# ── Find-or-create-and-append: idempotent survey-level volume management ─────
+
+
+def find_or_create_volume_and_add_frames(
+    volume_name: str,
+    s3_frames_prefix: str,
+    file_names: list[str],
+    project_id: Optional[int] = None,
+    media_type: str = "image",
+) -> int:
+    """Land `file_names` into the Biigle volume named `volume_name`, creating
+    the volume if it doesn't exist.
+
+    Idempotency lives at two layers we don't manage here:
+      - S3: `upload_frames_to_s3` skips objects already in the prefix.
+      - Biigle: per-volume filename uniqueness. POSTing existing names is
+        expected to be a no-op for those names; we don't pre-diff.
+
+    The expected re-run pattern is governed upstream by
+    `db.get_training_biigle_volume_id()` — that already prevents re-uploads
+    in the common case, leaving only `--force` re-runs to land here.
+
+    Args:
+        volume_name: Exact volume name (used as a lookup key — keep stable
+            across runs).
+        s3_frames_prefix: S3 prefix the frames live under, used only when
+            creating a new volume (Biigle stores it as the volume's `url`).
+        file_names: Basenames to ensure are in the volume.
+        project_id: Defaults to `config.biigle_project_id`.
+        media_type: "image" or "video". Default "image".
+
+    Returns:
+        Biigle volume_id (existing or newly created).
+    """
+    if not file_names:
+        raise ValueError(
+            f"find_or_create_volume_and_add_frames({volume_name!r}): empty file list"
+        )
+
+    handler = BiigleHandler()
+    project_id = project_id or config.biigle_project_id
+
+    matches = [
+        v for v in handler.get_volumes(project_id) if v.get("name") == volume_name
+    ]
+
+    if not matches:
+        logging.info(
+            f"Creating new volume {volume_name!r} with {len(file_names)} file(s)."
+        )
+        info = handler.create_volume_from_s3_files(
+            volume_name=volume_name,
+            s3_url=handler.build_s3_url(s3_frames_prefix),
+            files=file_names,
+            project_id=project_id,
+            media_type=media_type,
+        )
+        return int(info["id"])
+
+    # Biigle does not enforce volume-name uniqueness — pick most recent.
+    matches.sort(key=lambda v: v.get("created_at", ""), reverse=True)
+    volume_id = int(matches[0]["id"])
+    if len(matches) > 1:
+        logging.warning(
+            f"{len(matches)} volumes named {volume_name!r}; using most recent "
+            f"(id={volume_id})."
+        )
+    logging.info(
+        f"Adding {len(file_names)} file(s) to existing volume {volume_name!r} "
+        f"(id={volume_id})."
+    )
+    handler.add_files_to_volume(volume_id, file_names)
+    return volume_id
+
+
 # ── Step 2: Biigle volume creation ───────────────────────────────────────────
 
 

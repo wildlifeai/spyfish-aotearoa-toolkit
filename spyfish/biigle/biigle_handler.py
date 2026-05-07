@@ -175,7 +175,12 @@ class BiigleHandler:
     def setup_volume_with_files(
         self, pending_volume_id: int, volume_name: str, s3_url: str, files: List[str]
     ) -> Dict[str, Any]:
-        """Configure a pending volume with name, S3 URL, and file list."""
+        """Configure a *pending* volume with name, S3 URL, and file list.
+
+        Pending volumes are configured atomically in a single PUT (name + url +
+        files). After Biigle finalizes the volume, this endpoint no longer
+        applies — to append more files later, use `add_files_to_volume`.
+        """
         try:
             payload = {"name": volume_name, "url": s3_url, "files": files}
             response = self.api.put(
@@ -288,6 +293,48 @@ class BiigleHandler:
             f"Could not find finalized volume '{volume_name}' after {max_tries} attempts."
         )
         return None
+
+    def add_files_to_volume(
+        self, volume_id: int, files: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Add filenames to an existing (finalized) image volume.
+
+        Counterpart to `setup_volume_with_files`: that one configures a
+        *pending* volume in one shot via PUT, this one appends to a
+        *finalized* one. Use the right method for the lifecycle stage.
+
+        API: ``POST volumes/{id}/files`` with body ``{"files": [...]}`` —
+        verified against the Biigle apidoc (group "Volumes", title
+        "Add images/videos"). Caller must be a project admin. Filenames must
+        already be present in the volume's S3 folder; this call only registers
+        them in the Biigle volume.
+
+        Args:
+            volume_id: Finalized Biigle volume ID (NOT a pending-volume ID).
+            files: Filenames (basenames) to add.
+
+        Returns:
+            List of ``{"id": <image_id>, "filename": <name>}`` for the
+            newly-added images, per the documented response shape.
+        """
+        if not files:
+            logging.info(f"add_files_to_volume({volume_id}): no files to add")
+            return []
+        try:
+            response = self.api.post(
+                f"volumes/{volume_id}/files", json={"files": files}
+            )
+            payload = response.json() if response.content else []
+            logging.info(
+                f"Added {len(files)} file(s) to volume {volume_id} "
+                f"(API returned {len(payload) if isinstance(payload, list) else '?'} entries)"
+            )
+            return payload if isinstance(payload, list) else []
+        except Exception as e:
+            logging.error(
+                f"Failed to add {len(files)} file(s) to volume {volume_id}: {e}"
+            )
+            raise
 
     def build_s3_url(self, s3_path: str, disk_id: Optional[int] = None) -> str:
         """

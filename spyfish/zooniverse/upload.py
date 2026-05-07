@@ -3,10 +3,15 @@ Upload extracted Zooniverse clips or frames to a Zooniverse project as a new sub
 
 The two public entry points — upload_clips_to_zooniverse and
 upload_frames_to_zooniverse — share the same credential check, subject-set
-setup, already-uploaded filtering, and per-row upload loop. The per-type
-differences (path column, mimetype, subject set name prefix, upload-time
-computation) are captured in a small SubjectKind dataclass and consumed by
-the internal `_upload_subjects_to_zooniverse` helper.
+existence check, and per-row upload loop. The per-type differences (path
+column, mimetype, subject set name prefix, upload-time computation) are
+captured in a small SubjectKind dataclass and consumed by the internal
+`_upload_subjects_to_zooniverse` helper.
+
+Idempotency contract: if a subject set with the target display name already
+exists in the project, count its subjects. Match the expected upload count
+→ skip cleanly (drop is already on Zooniverse). Mismatch → raise (state is
+inconsistent, needs human investigation).
 """
 
 import logging
@@ -36,31 +41,6 @@ def _get_site_reserve_meta(site_id: str) -> dict:
         SubjectKeys.LINK_TO_RESERVE: site.get(config.link_to_marine_reserve_column, ""),
         "ProtectionStatus": site.get(config.protection_status_column, ""),
     }
-
-def _get_uploaded_keys(subject_set) -> set:
-    """Return {(DropID, UplAbsSeconds)} tuples already uploaded to a subject set.
-
-    Used to skip re-uploading on interrupted runs. Filename-based dedup does
-    not work because Panoptes rewrites uploads to content-addressed URLs
-    (e.g. .../subject_location/<uuid>.mp4), so the original filename never
-    appears in the location URL. The (DropID, UplAbsSeconds) tuple is set on
-    every subject by `_build_base_subject_meta` and is deterministic per
-    clip/frame, so it survives reruns.
-    """
-    uploaded = set()
-    for subject in Subject.where(subject_set_id=subject_set.id):
-        meta = subject.metadata or {}
-        drop_id = meta.get("DropID")
-        upl_seconds = meta.get(SubjectKeys.UPL_SECONDS)
-        if drop_id is None or upl_seconds is None:
-            continue
-        # Panoptes returns metadata as strings — normalise both sides.
-        uploaded.add((str(drop_id), str(upl_seconds)))
-    if uploaded:
-        logging.info(
-            f"Found {len(uploaded)} already-uploaded subjects in set — will skip duplicates."
-        )
-    return uploaded
 
 
 def _build_base_subject_meta(
@@ -154,9 +134,9 @@ def _upload_subjects_to_zooniverse(
     """Shared upload loop for clips and frames.
 
     Responsible for: credential check, filtering uploadable rows, connecting
-    to Panoptes, creating or reusing the subject set, skipping already-
-    uploaded filenames, and building per-row subject metadata. The only
-    per-type logic is pulled from `kind`.
+    to Panoptes, checking for an existing subject set (early-exit on count
+    match, raise on mismatch), creating the set if absent, and building
+    per-row subject metadata. The only per-type logic is pulled from `kind`.
     """
     if not all([config.user, config.password, config.zooniverse_project_id]):
         raise EnvironmentError(
@@ -178,9 +158,8 @@ def _upload_subjects_to_zooniverse(
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
-    survey_id = config.get_survey_id_from_drop(drop_id)
     site_id = config.get_site_id_from_drop(drop_id)
-    video_filename = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
+    video_filename = config.get_video_s3_key(drop_id)
     site_reserve_meta = _get_site_reserve_meta(site_id)
 
     logging.info(f"Connecting to Zooniverse as {config.user}...")
@@ -189,21 +168,33 @@ def _upload_subjects_to_zooniverse(
 
     set_name = subject_set_name or f"{kind.set_name_prefix}{drop_id}"
 
-    # Reuse subject set if it exists, otherwise create it.
+    # If the subject set already exists, the drop has already been uploaded.
+    # Compare its subject count to the expected count: match → skip cleanly,
+    # mismatch → raise (state is inconsistent, needs human investigation).
     existing_sets = list(
         SubjectSet.where(project_id=zoo_project.id, display_name=set_name)
     )
     if existing_sets:
-        logging.info(f"Using existing subject set: '{set_name}'")
         subject_set = existing_sets[0]
-    else:
-        subject_set = SubjectSet()
-        subject_set.links.project = zoo_project
-        subject_set.display_name = set_name
-        subject_set.save()
-        logging.info(f"Subject set created: '{set_name}'")
+        existing_count = sum(1 for _ in subject_set.subjects)
+        if existing_count == n:
+            logging.info(
+                f"Subject set '{set_name}' already exists with {existing_count} "
+                f"{kind.noun_plural} (matches expected). Skipping upload — drop "
+                f"already on Zooniverse."
+            )
+            return
+        raise RuntimeError(
+            f"Subject set '{set_name}' already exists with {existing_count} subjects "
+            f"but {n} {kind.noun_plural} were expected. State is inconsistent — "
+            f"investigate in Zooniverse Lab before re-running."
+        )
 
-    already_uploaded = _get_uploaded_keys(subject_set)
+    subject_set = SubjectSet()
+    subject_set.links.project = zoo_project
+    subject_set.display_name = set_name
+    subject_set.save()
+    logging.info(f"Subject set created: '{set_name}'")
 
     new_subjects = []
     for _, row in uploadable.iterrows():
@@ -214,9 +205,6 @@ def _upload_subjects_to_zooniverse(
             )
             continue
         upl_seconds = kind.upl_seconds_fn(row)
-        if (str(drop_id), str(upl_seconds)) in already_uploaded:
-            logging.info(f"  Already uploaded, skipping: {file_path.name}")
-            continue
 
         meta = {
             **_build_base_subject_meta(

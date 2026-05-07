@@ -212,13 +212,61 @@ class PathsConfig(BaseConfig):
                 return pt_files[0]
         return None
 
+    def get_pipeline_model(self, kind: str) -> Path:
+        """Find a specific pipeline model variant in pipeline_model_dir by filename prefix.
+
+        Files in pipeline_model_dir are expected to follow the convention
+        `{kind}_*.pt`, e.g.:
+          - binary_cfd_water_20260301.pt
+          - species_cfd_20260426_234352.pt
+
+        If multiple files match, the most recently modified is returned.
+
+        Args:
+            kind: Model variant — must be "binary" or "species".
+
+        Raises:
+            ValueError: kind is not one of {"binary", "species"}.
+            FileNotFoundError: no `{kind}_*.pt` file in pipeline_model_dir.
+        """
+        if kind not in {"binary", "species"}:
+            raise ValueError(f"kind must be 'binary' or 'species', got {kind!r}")
+        if not self.pipeline_model_dir.exists():
+            raise FileNotFoundError(
+                f"Model directory does not exist: {self.pipeline_model_dir}"
+            )
+        candidates = sorted(
+            self.pipeline_model_dir.glob(f"{kind}_*.pt"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            raise FileNotFoundError(
+                f"No '{kind}_*.pt' model found in {self.pipeline_model_dir}. "
+                f"Expected naming convention: {kind}_*.pt (e.g. {kind}_cfd_20260101.pt)"
+            )
+        return candidates[0]
+
     @property
     def pipeline_model_path(self) -> Path:
-        """Find the local pipeline model weights (.pt) from pipeline_model_dir."""
-        path = self._first_model_file(self.pipeline_model_dir)
-        if path is None:
-            raise FileNotFoundError(f"No model file found in {self.pipeline_model_dir}")
-        return path
+        """Find the local pipeline model weights (.pt) from pipeline_model_dir.
+
+        Defaults to the species model when both binary and species coexist.
+        For explicit selection between variants, use `get_pipeline_model(kind)`.
+
+        Falls back to the first .pt file in the directory if no `species_*.pt`
+        is present — preserves backward compatibility with single-model setups
+        that pre-date the binary/species naming convention.
+        """
+        try:
+            return self.get_pipeline_model("species")
+        except FileNotFoundError:
+            path = self._first_model_file(self.pipeline_model_dir)
+            if path is None:
+                raise FileNotFoundError(
+                    f"No model file found in {self.pipeline_model_dir}"
+                )
+            return path
 
     @property
     def base_model_path(self) -> Path:
@@ -281,8 +329,31 @@ class PathsConfig(BaseConfig):
         survey_id = self.get_survey_id_from_drop(validated)
         return f"{self.s3_deployment_data_dir}/{survey_id}/{validated}/frames/"
 
+    def get_training_frames_s3_prefix(self, survey_id: str) -> str:
+        """S3 prefix for the survey-level training-frames Biigle volume.
+
+        All drops in a survey upload their training frames to the same S3
+        prefix (filenames carry drop_id, so they're unique). This is the
+        URL Biigle's volume points at.
+        """
+        return f"{self.s3_deployment_data_dir}/{survey_id}/training_frames/"
+
     def get_video_path(self, drop_id: str) -> Path:
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
+
+    def get_video_s3_key(self, drop_id: str) -> str:
+        """Canonical S3 key for a drop's source video file.
+
+        Format: ``media/{survey_id}/{drop_id}/{drop_id}.mp4``
+
+        Single source of truth for this convention — previously inlined in
+        `orchestrator/ingest.py`, `zooniverse/upload.py`, and the
+        training-frames extractor. Use this method instead of constructing
+        the string inline.
+        """
+        validated = self.validate_drop_id(drop_id)
+        survey_id = self.get_survey_id_from_drop(validated)
+        return f"media/{survey_id}/{validated}/{validated}.mp4"
 
     def get_maxn_csv_path(self, drop_id: str, model_name: str) -> Path:
         return (

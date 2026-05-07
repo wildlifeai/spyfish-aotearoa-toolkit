@@ -202,3 +202,40 @@ class MLConfig(BaseConfig):
     @property
     def training_results_s3_prefix(self) -> str:
         return self.training_results_dir.relative_to(self.project_root).as_posix()
+
+    # ── Training-frame extraction (bootstrap dataset) ────────────────────
+    # These settings drive `spyfish.ml.training.extract_training_frames`,
+    # the standalone tool that pulls N frames per drop directly from S3
+    # (via cv2 + presigned URL) for upload to Biigle as a training-data
+    # annotation campaign.
+
+    @property
+    def _training_extraction(self) -> dict:
+        return get_required(self._yaml_config, "training_extraction", "")
+
+    @property
+    def training_extraction_n_frames(self) -> int:
+        """How many frames to extract per drop (default 10)."""
+        return int(
+            get_required(self._training_extraction, "n_frames", "training_extraction")
+        )
+
+    @property
+    def training_extraction_annotation_type(self) -> str:
+        """Which model to run on extracted frames — 'binary' or 'species'.
+
+        Resolves to `config.get_pipeline_model(annotation_type)` at runtime.
+        """
+        kind = str(
+            get_required(
+                self._training_extraction,
+                "annotation_type",
+                "training_extraction",
+            )
+        )
+        if kind not in {"binary", "species"}:
+            raise ValueError(
+                f"training_extraction.annotation_type must be 'binary' or "
+                f"'species', got {kind!r}"
+            )
+        return kind
