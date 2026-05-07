@@ -130,7 +130,7 @@ ffmpeg:
 
 
 biigle:
-  project_id:  3711        #  4081 playground 3711 Spyfish Aotearoa project (override with BIIGLE_PROJECT_ID env var)
+  project_id:  4626        #  4081 playground 3711 Spyfish Aotearoa project 4626 spyfish model(override with BIIGLE_PROJECT_ID env var)
   disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
   # Report type IDs
   annotation_report_type_video: 8          # Video annotation CSV report
@@ -183,6 +183,14 @@ training:
     - "Pagrus auratus"                   # snapper — overrepresented in current corpus
     - "Parapercis colias"                # blue cod — overrepresented in current corpus
   split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
+
+
+training_extraction:
+  # Standalone tool: pulls N frames per drop directly from S3 (cv2 + presigned URL),
+  # runs the configured model, uploads to a survey-level Biigle volume.
+  # See `python -m spyfish.ml.training.extract_training_frames --help`.
+  n_frames: 10                # frames per drop; back-loaded toward sampling_end (more fish later)
+  annotation_type: binary     # "binary" or "species" — picks `{kind}_*.pt` from pipeline_model/
 
 
 validation_patterns:

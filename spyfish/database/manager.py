@@ -69,11 +69,22 @@ class DatabaseManager:
                     citsci_annotations INTEGER DEFAULT 0,
                     expert_annotations INTEGER DEFAULT 0,
                     biigle_volume_id TEXT,
+                    training_biigle_volume_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """
             )
+
+            # Idempotent migration for pre-existing DBs created before
+            # training_biigle_volume_id was part of the schema.
+            try:
+                cursor.execute(
+                    "ALTER TABLE deployments ADD COLUMN training_biigle_volume_id INTEGER"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
 
             cursor.execute(
                 """
@@ -375,6 +386,62 @@ class DatabaseManager:
                 (str(volume_id), drop_id),
             )
             conn.commit()
+
+    def update_training_biigle_volume_id(self, drop_id: str, volume_id: int) -> None:
+        """Sets the training_biigle_volume_id for a specific deployment.
+
+        Called only after the training-frames batch has been successfully uploaded
+        to a Biigle volume — a non-NULL value means "this drop's training frames
+        are in Biigle volume <id>".
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE deployments SET training_biigle_volume_id = ? WHERE drop_id = ?",
+                (int(volume_id), drop_id),
+            )
+            conn.commit()
+
+    def get_training_biigle_volume_id(self, drop_id: str) -> Optional[int]:
+        """Returns the training_biigle_volume_id for a drop, or None if not set."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT training_biigle_volume_id FROM deployments WHERE drop_id = ?",
+                (drop_id,),
+            )
+            row = cursor.fetchone()
+        if row is None or row["training_biigle_volume_id"] is None:
+            return None
+        return int(row["training_biigle_volume_id"])
+
+    def get_drops_for_survey_with_video_window(self, survey_id: str) -> List[str]:
+        """Returns drop_ids in `survey_id` that have a downloadable video AND a
+        defined sampling window — the eligibility set for training-frame extraction.
+
+        Filters:
+          - drop_id starts with `{survey_id}_` (e.g. AHE_20250513_BUV → AHE_20250513_BUV_*)
+          - video_presence = 'present' (excludes ABSENT, ARCHIVED, NO_VIDEO_BAD_DEP)
+          - sampling_start AND sampling_end are both set
+
+        Deliberately does NOT filter on is_bad_deployment or ingest_status —
+        per-spec, bad/short deployments still produce useful training frames
+        as long as they have a video and a sampling window.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                r"""
+                SELECT drop_id FROM deployments
+                WHERE drop_id LIKE ? || '\_%' ESCAPE '\'
+                  AND video_presence = ?
+                  AND sampling_start IS NOT NULL
+                  AND sampling_end IS NOT NULL
+                ORDER BY drop_id
+                """,
+                (survey_id, VideoPresence.PRESENT),
+            )
+            return [row["drop_id"] for row in cursor.fetchall()]
 
     def get_deployments_by_section_status(
         self, section: str, status: str

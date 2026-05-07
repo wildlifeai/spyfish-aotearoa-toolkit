@@ -46,6 +46,8 @@ STABILITY_PARAMS = {
     "nbs": 64,
     "amp": False,  # Disable AMP — fp16 causes NaN on some underwater datasets
     "box": 5.0,  # Lower bounding box loss penalty (default 7.5)
+    "cache": True,  # auto: tries RAM, falls back to disk-cached if RAM insufficient
+    "workers": 8,  # parallel dataloader processes for epoch 1's disk reads
 }
 
 # Class-imbalance handling lives here, not in prepare_training_data.py.

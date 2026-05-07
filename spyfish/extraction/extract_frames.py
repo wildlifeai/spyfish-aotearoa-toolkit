@@ -45,6 +45,48 @@ def _read_video_rotation(cap: cv2.VideoCapture) -> int:
         return 0
 
 
+def _extract_one_frame_from_cap(
+    cap: cv2.VideoCapture,
+    seek_seconds: float,
+    out_path: Path,
+    frame_index: Optional[int] = None,
+    rotation: int = 0,
+) -> bool:
+    """Seek into an already-open cv2.VideoCapture and write one JPEG.
+
+    Caller owns the lifecycle of `cap` — open it once, call this in a loop,
+    release at the end. This avoids re-opening the video (and re-fetching the
+    moov atom over HTTP for remote videos) per frame.
+
+    Caller also passes the pre-computed `rotation` so we don't re-read container
+    metadata on every call.
+    """
+    if frame_index is not None:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    else:
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_seconds * 1000.0)
+
+    ret, frame = cap.read()
+    if not ret:
+        logging.error(
+            f"cv2 failed to read frame at "
+            f"{'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}"
+        )
+        return False
+
+    if rotation:
+        frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
+    cv2.imwrite(str(out_path), frame)
+    # Embed EXIF Orientation = 1: rotation is already baked into the pixels,
+    # so no viewer should attempt to rotate again.
+    try:
+        exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Orientation: 1}})
+        piexif.insert(exif_bytes, str(out_path))
+    except Exception as e:
+        logging.debug(f"Could not embed EXIF orientation for {out_path}: {e}")
+    return True
+
+
 def extract_frame(
     video_path: str,
     seek_seconds: float,
@@ -58,6 +100,11 @@ def extract_frame(
     Rotation metadata from the video container is read and applied to the pixel data,
     then EXIF Orientation = 1 is embedded so downstream tools (e.g. Biigle) do not
     attempt a second rotation.
+
+    For multi-frame extraction from the same video, prefer opening one
+    cv2.VideoCapture and calling `_extract_one_frame_from_cap` in a loop —
+    that avoids re-fetching the MP4 moov atom on every call (significant
+    over remote/HTTP video URLs).
 
     Args:
         video_path: Path to the source video.
@@ -73,31 +120,12 @@ def extract_frame(
     rotation = _read_video_rotation(cap)
     if rotation:
         logging.debug(f"Video rotation metadata: {rotation}° — will apply to frames.")
-
-    if frame_index is not None:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-    else:
-        cap.set(cv2.CAP_PROP_POS_MSEC, seek_seconds * 1000.0)
-
-    ret, frame = cap.read()
-    if ret:
-        if rotation:
-            frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
-        cv2.imwrite(str(out_path), frame)
-        # Embed EXIF Orientation = 1: rotation is already baked into the pixels,
-        # so no viewer should attempt to rotate again.
-        try:
-            exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Orientation: 1}})
-            piexif.insert(exif_bytes, str(out_path))
-        except Exception as e:
-            logging.debug(f"Could not embed EXIF orientation for {out_path}: {e}")
-    else:
-        logging.error(
-            f"cv2 failed to read frame at {'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}"
+    try:
+        return _extract_one_frame_from_cap(
+            cap, seek_seconds, out_path, frame_index=frame_index, rotation=rotation
         )
-
-    cap.release()
-    return ret
+    finally:
+        cap.release()
 
 
 # ── YOLO → COCO conversion ───────────────────────────────────────────────────
@@ -253,68 +281,78 @@ def extract_frames_from_selections(
         pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
     )
 
-    # Read video dimensions and rotation once from metadata.
+    # Open the video once and reuse the cap for every frame in this drop —
+    # avoids re-fetching the MP4 moov atom per call, which matters for remote
+    # videos and is non-trivial even locally for many selections.
     # extract_frame() applies rotation to pixel data, so swap w/h for 90°/270° videos
     # so that COCO image dimensions match the actual saved frame orientation.
     cap = cv2.VideoCapture(str(video_path))
-    vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    rotation = _read_video_rotation(cap)
-    cap.release()
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video with cv2: {video_path}")
+    try:
+        vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        rotation = _read_video_rotation(cap)
 
-    if rotation in (90, 270):
-        vid_w, vid_h = vid_h, vid_w
+        if rotation in (90, 270):
+            vid_w, vid_h = vid_h, vid_w
 
-    if vid_w == 0 or vid_h == 0:
-        logging.warning(
-            f"Could not read video dimensions for {video_path}. COCO image sizes will default to 0."
-        )
-
-    frame_records = []
-    frame_paths = []
-
-    for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-        # TimeOfMaxAbsSeconds is an absolute video timestamp — use it directly.
-        seek_seconds = float(row[config.csv_clip_max_time_column])
-        frame_index = None
-
-        if not raw_df.empty:
-            # Find the nearest frame in the raw ML CSV to this peak time
-            # Using the exact same matching logic as the COCO builder ensures alignment
-            nearest = raw_df.iloc[
-                (raw_df["time_seconds"] - seek_seconds).abs().argsort()[:1]
-            ]
-            if not nearest.empty:
-                frame_index = int(nearest["frame"].iloc[0])
-
-        out_filename = generate_frame_filename(drop_id, seek_seconds)
-        out_path = out_dir / out_filename
-
-        if out_path.exists():
-            logging.debug(
-                f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}"
+        if vid_w == 0 or vid_h == 0:
+            logging.warning(
+                f"Could not read video dimensions for {video_path}. COCO image sizes will default to 0."
             )
-            frame_paths.append(str(out_path))
-        else:
-            logging.info(
-                f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
-            )
-            success = extract_frame(
-                video_path, seek_seconds, out_path, frame_index=frame_index
-            )
-            frame_paths.append(str(out_path) if success else None)
 
-        frame_records.append(
-            {
-                "image_id": img_id,
-                "file_name": out_filename,
-                "time_of_max": seek_seconds,
-                "drop_id": drop_id,
-                "selection_reason": row.get("SelectionReason", ""),
-                "img_w": vid_w,
-                "img_h": vid_h,
-            }
-        )
+        frame_records = []
+        frame_paths = []
+
+        for img_id, (_, row) in enumerate(df.iterrows(), start=1):
+            # TimeOfMaxAbsSeconds is an absolute video timestamp — use it directly.
+            seek_seconds = float(row[config.csv_clip_max_time_column])
+            frame_index = None
+
+            if not raw_df.empty:
+                # Find the nearest frame in the raw ML CSV to this peak time
+                # Using the exact same matching logic as the COCO builder ensures alignment
+                nearest = raw_df.iloc[
+                    (raw_df["time_seconds"] - seek_seconds).abs().argsort()[:1]
+                ]
+                if not nearest.empty:
+                    frame_index = int(nearest["frame"].iloc[0])
+
+            out_filename = generate_frame_filename(drop_id, seek_seconds)
+            out_path = out_dir / out_filename
+
+            if out_path.exists():
+                logging.debug(
+                    f"  [{img_id}/{len(df)}] Already extracted, skipping: {out_filename}"
+                )
+                frame_paths.append(str(out_path))
+            else:
+                logging.info(
+                    f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
+                )
+                success = _extract_one_frame_from_cap(
+                    cap,
+                    seek_seconds,
+                    out_path,
+                    frame_index=frame_index,
+                    rotation=rotation,
+                )
+                frame_paths.append(str(out_path) if success else None)
+
+            frame_records.append(
+                {
+                    "image_id": img_id,
+                    "file_name": out_filename,
+                    "time_of_max": seek_seconds,
+                    "drop_id": drop_id,
+                    "selection_reason": row.get("SelectionReason", ""),
+                    "img_w": vid_w,
+                    "img_h": vid_h,
+                }
+            )
+    finally:
+        cap.release()
 
     df["FramePath"] = frame_paths
 
