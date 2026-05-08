@@ -394,8 +394,11 @@ def run_inference_to_csv(
             # Synthesized frame index — there's no contiguous decode here
             # (we ran cv2 .set/.read per timestamp), so this is the nominal
             # frame number for the seek time. Downstream COCO matching uses
-            # `time_seconds`, not `frame`, so this is informational.
-            frame_idx = int(round(t * extraction.fps))
+            # `time_seconds`, not `frame`, so this is informational. Resume
+            # paths reconstruct ExtractionResult from disk and don't recover
+            # fps (filenames carry time, not fps); we emit -1 there as an
+            # explicit "unknown" rather than a misleading 0.
+            frame_idx = int(round(t * extraction.fps)) if extraction.fps > 0 else -1
             for box in result.boxes:
                 x, y, w, h = box.xywh[0].tolist()
                 cls_id = int(box.cls[0])

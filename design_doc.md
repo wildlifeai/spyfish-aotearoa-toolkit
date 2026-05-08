@@ -455,11 +455,14 @@ marine-buv/   (production, DOC-managed)
 └── process_files/                              # Synced from local after each run
     ├── db/                                     # spyfish_pipeline.db, spyfish_annotations.db
     ├── deployment_data/
-    │   └── {SurveyID}/{DropID}/
-    │       ├── annotations/                    # MaxN CSVs, raw CSVs, selections, COCO JSON
-    │       ├── clips/                          # 10s MP4 clips for Zooniverse
-    │       ├── frames/                         # JPEG frames (Zooniverse + BIIGLE disk 134)
-    │       └── qa_frames/                      # ML-annotated frames with boxes for QA
+    │   └── {SurveyID}/
+    │       ├── {DropID}/
+    │       │   ├── annotations/                # MaxN CSVs, raw CSVs, selections, COCO JSON
+    │       │   ├── clips/                      # 10s MP4 clips for Zooniverse
+    │       │   ├── frames/                     # JPEG frames (Zooniverse + BIIGLE disk 134)
+    │       │   ├── qa_frames/                  # ML-annotated frames with boxes for QA
+    │       │   └── training_frames/            # Bootstrap training JPEGs + raw CSV + COCO JSON
+    │       └── training_frames/                # Survey-level S3 prefix flat across drops (BIIGLE disk 134)
     ├── models/                                 # YOLO weights
     └── training/                               # Retraining results
 ```
@@ -493,6 +496,11 @@ deployment_data/{SurveyID}/{DropID}/
   clips/                                 10s MP4 clips (Zooniverse)
   frames/                                JPEG frames (Zooniverse + BIIGLE disk 134)
   qa_frames/                             JPEG frames with ML boxes drawn (for review)
+  training_frames/                       Bootstrap-extraction artefacts (extract_training_frames):
+    {DropID}__frame_{t:.3f}s.jpg           N back-loaded JPEGs (default N=10)
+    {DropID}_{kind}_raw.csv                YOLO detections from training_extraction.annotation_type
+    {DropID}_coco_annotations_for_biigle.json
+                                           COCO sidecar uploaded with the JPEGs to Biigle
 
 models/
   pipeline_model/                        Active production YOLO weights
@@ -596,6 +604,7 @@ erDiagram
 | `citsci_annotations` | INTEGER   | Count of volunteer annotations — same ownership rule                                                                            |
 | `expert_annotations` | INTEGER   | Count of expert annotations                                                                                                     |
 | `biigle_volume_id`   | TEXT      | BIIGLE volume ID, set when the volume is created                                                                                |
+| `training_biigle_volume_id` | INTEGER | BIIGLE volume ID for the survey-level training-frames volume (`extract_training_frames`). Non-NULL = drop's training frames + ML annotations are uploaded; used as the "drop is done" gate for re-runs. |
 | `created_at`         | TIMESTAMP | Record creation time                                                                                                            |
 | `updated_at`         | TIMESTAMP | Last update time                                                                                                                |
 
@@ -1430,6 +1439,24 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 ### `spyfish/extraction/select_frames.py` — Frame selection (for BIIGLE)
 
 `**select_frames(raw_csv, output_csv, drop_id)**`: Same MaxN/confusing/start strategy as clips, at frame resolution. Applies `frame_multiplier` for denser BIIGLE coverage.
+
+---
+
+### `spyfish/ml/training/extract_training_frames.py` — Standalone training-data bootstrap
+
+CLI tool, not invoked from `run_pipeline.py`. Pulls N frames per drop directly from S3 via cv2 byte-range seeking (no full-video download), runs the configured detector for pre-annotation, and uploads to a survey-level Biigle volume. Used to seed an annotation campaign when there isn't enough labeled data to retrain. See §18 "Bootstrapping training data" for the design narrative.
+
+`**process_drop(drop_id, *, force=False, no_upload=False, model=None)**`: Full lifecycle for one drop — extract → infer → upload → DB write — with auto-resume from on-disk artefacts. `_try_load_from_disk` checks `training_frames/` for existing JPGs (parses timestamps from filenames, reads dims from one JPG) and the matching `_raw.csv` per current annotation_type config; the function then skips whichever stages are already done.
+
+`**process_survey(survey_id, *, force=False, no_upload=False)**`: Iterates `process_drop` over every eligible drop in a survey (must have `video_presence='present'` AND `sampling_start` AND `sampling_end`); pre-loads the YOLO model once. Continues past per-drop failures, writing a timestamped `training_frames_failures_{YYYYMMDD_HHMMSS}.csv` next to the survey's training-frames area.
+
+`**extract_frames_for_drop(drop_id, *, n_frames=None, force=False)**`: Single `cv2.VideoCapture` open over a presigned S3 URL, N seeks at quadratic-back-loaded timestamps in `[sampling_start, sampling_end]`. Returns an `ExtractionResult` (paths, timestamps, fps, image dims, output dir).
+
+`**run_inference_to_csv(extraction, *, model=None, ...)**`: Batched `model.predict()` across all frames in one call (amortises GPU dispatch). Writes `{drop_id}_{annotation_type}_raw.csv` in the same schema as `ml.run_inference` so `build_coco_from_raw_csv` consumes it without modification.
+
+`**upload_drop_to_survey_volume(extraction, raw_csv_path)**`: Builds COCO, uploads JPGs to `get_training_frames_s3_prefix(survey_id)` (idempotent), calls `find_or_create_volume_and_add_frames` (returns volume_id + filename→biigle_id map), pushes annotations via the map (skipping the per-drop full image fetch).
+
+CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass DB and on-disk skips), `--no-upload` (stop after inference).
 
 ---
 
