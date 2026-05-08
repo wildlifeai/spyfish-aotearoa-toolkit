@@ -93,13 +93,21 @@ def _quadratic_timestamps(
 
 @dataclass
 class ExtractionResult:
-    """Output of `extract_frames_for_drop`."""
+    """Output of `extract_frames_for_drop`.
+
+    ``fps`` is ``Optional[float]`` because the resume path
+    (``_try_load_from_disk``) reconstructs this dataclass from on-disk
+    artefacts and can't recover the source video's fps without re-opening
+    the video. ``None`` is the explicit "unknown" signal — callers that
+    use fps arithmetically must guard with ``is not None``. In the real
+    extraction path it's always a positive float.
+    """
 
     drop_id: str
     survey_id: str
     frame_paths: List[Path]
     timestamps: List[float]
-    fps: float
+    fps: Optional[float]
     img_w: int
     img_h: int
     output_dir: Path
@@ -255,9 +263,12 @@ def _try_load_from_disk(
     (``{drop_id}__frame_{t:.3f}s.jpg`` — written by
     ``generate_frame_filename`` at 3-decimal precision, which round-trips
     losslessly with the floats produced by ``_quadratic_timestamps``).
-    Image dimensions are read from the first JPG via cv2. ``fps`` is set
-    to 0.0 because nothing in the upload path consumes it — only
-    ``run_inference_to_csv`` does, and that's the step we may be skipping.
+    Image dimensions are read from the first JPG via cv2. ``fps`` is
+    ``None`` because we don't re-open the video here — the upload path
+    doesn't consume it, and ``run_inference_to_csv`` (used in the
+    JPGs-but-no-CSV branch) treats ``None`` as "unknown" and emits
+    ``-1`` in the raw CSV's ``frame`` column instead of synthesising a
+    misleading value.
     """
     out_dir = _training_frames_dir(drop_id)
     if not out_dir.exists():
@@ -295,7 +306,7 @@ def _try_load_from_disk(
         survey_id=config.get_survey_id_from_drop(drop_id),
         frame_paths=paths,
         timestamps=timestamps,
-        fps=0.0,
+        fps=None,
         img_w=int(img_w),
         img_h=int(img_h),
         output_dir=out_dir,
@@ -395,10 +406,12 @@ def run_inference_to_csv(
             # (we ran cv2 .set/.read per timestamp), so this is the nominal
             # frame number for the seek time. Downstream COCO matching uses
             # `time_seconds`, not `frame`, so this is informational. Resume
-            # paths reconstruct ExtractionResult from disk and don't recover
-            # fps (filenames carry time, not fps); we emit -1 there as an
+            # paths reconstruct ExtractionResult from disk and pass fps=None
+            # because the video isn't re-opened; we emit -1 there as an
             # explicit "unknown" rather than a misleading 0.
-            frame_idx = int(round(t * extraction.fps)) if extraction.fps > 0 else -1
+            frame_idx = (
+                int(round(t * extraction.fps)) if extraction.fps is not None else -1
+            )
             for box in result.boxes:
                 x, y, w, h = box.xywh[0].tolist()
                 cls_id = int(box.cls[0])
