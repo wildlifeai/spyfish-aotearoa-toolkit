@@ -1537,6 +1537,46 @@ The retrain run prints these markers to the log — scan them to confirm the pip
 sbatch spyfish/ml/training/train_job.sl
 ```
 
+### Bootstrapping training data — `extract_training_frames`
+
+Standalone CLI for seeding an annotation campaign when there isn't yet enough labeled data to retrain (early phase of a new species or new survey area). Pulls N frames per drop directly from S3 via cv2 byte-range seeking — **no full-video download** — runs the configured detector for pre-annotation, and uploads to a survey-level Biigle volume for expert annotation.
+
+```bash
+python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV
+python -m spyfish.ml.training.extract_training_frames --drop-id  KSF_20240124_BUV_KSF_085_01
+python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV --no-upload   # dry run
+python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV --force       # bypass skips
+```
+
+**Per-drop flow.** N back-loaded timestamps in `[sampling_start, sampling_end]` (`_quadratic_timestamps`, density biased toward the end where bait-attracted fish density peaks; N from `training_extraction.n_frames`, default 10) → cv2 over presigned S3 URL → batched YOLO predict (model from `config.get_pipeline_model(training_extraction.annotation_type)`, `binary` or `species`) → COCO build (reuses `build_coco_from_raw_csv`) → S3 upload at `get_training_frames_s3_prefix(survey_id)` (flat per-survey prefix; filenames carry the drop_id) → Biigle volume `"{survey_id} — Training frames"` (created on first drop, appended to thereafter) → annotation push → write `training_biigle_volume_id` to the deployment row.
+
+**Per-survey volumes, not per-drop.** Annotators reviewing one inbox per drop across 30+ drops would face 30 inboxes. One survey-level volume = one inbox + one set of label-tree decisions. Per-drop traceability lives in the embedded drop_id in every filename.
+
+**Auto-resume.** Re-running on a survey after any partial failure (rate-limit, killed process) resumes automatically — no flag, no manifest. `process_drop` checks state in this order:
+
+1. `training_biigle_volume_id` set in DB → skip the drop entirely.
+2. `training_frames/{drop_id}__frame_*.jpg` + matching `_raw.csv` on disk → skip extract + inference, go straight to upload.
+3. JPGs but no raw CSV → re-run inference, then upload.
+4. Nothing → full pipeline.
+
+Filenames round-trip the timestamp losslessly (`{drop_id}__frame_{t:.3f}s.jpg`), so timestamps are recovered by parsing names; image dimensions come from one `cv2.imread` of the first JPG. `--force` bypasses both the DB skip and the on-disk reuse.
+
+**Biigle call pattern.** `find_or_create_volume_and_add_frames` returns `(volume_id, filename_to_biigle_id)` populated from `add_files_to_volume`'s response. `upload_coco_annotations_to_biigle` accepts the map and skips a per-drop full `get_volume_images` fetch — that fetch was the dominant rate-limit-burner because the volume's image count grows with every drop and the helper does ~N concurrent GETs. Net per-survey cost dropped from O(K²) image fetches (K = drops processed) to O(n_frames) (only on the first-drop-of-fresh-volume case). A defensive fallback fires `get_volume_images` once if the map is incomplete — handles partial-state retries where files were already registered in the volume from a prior crashed run.
+
+**No duplicate-annotation guard, deliberately.** With current config (~50 annotations per drop, well under `upload_image_annotations`'s 100-batch threshold), annotation upload is a single atomic POST. `training_biigle_volume_id` is therefore a reliable "drop is done" signal — re-running can't create duplicates because the failure mode a guard would protect against (mid-batch partial state) isn't reachable. Revisit if `training_extraction.n_frames` scales past ~20 or species detection pushes per-drop annotations past 100 (see `claude_docs/todo.md`).
+
+### Biigle Rectangle → YOLO HBB conversion (`biigle_rect_to_yolo`)
+
+Each Biigle Rectangle is stored as 8 flat floats — the 4 corner points of a quadrilateral. **The Biigle drawing tool allows rotation**, so corners are not guaranteed to be axis-aligned: a "Rectangle" can be a rotated parallelogram. Volume 32392 (a recent SLI image volume) showed 33.5% of its 1497 Rectangles rotated >5°, with a max of 45° — so this is current annotator behaviour, not a hypothetical.
+
+The converter applies three transforms in pixel space, then normalises:
+
+1. **AABB envelope.** `min/max` over all four corner x's and y's. Correct for both axis-aligned and rotated inputs; an earlier version of the function picked fixed indices (`points[0,1,2,5]`) and produced 7-pixel slivers for any rotated box. The AABB has more background than a true OBB, but downstream training is HBB-only so the trade is right.
+2. **Image-bound clamp.** `max(0, min(img_w, x))` on every corner before computing the centre/size. Rotated rectangles can have corners outside the frame (volume 26571 had a snapper with `y=-33`, above the top edge); YOLO rejects labels whose box edges fall outside `[0,1]`, so we must clip in pixel space rather than after normalisation.
+3. **Per-axis shrink.** For each AABB axis, find the closest non-corner edge midpoint to the AABB edge — those midpoints are the visible fish features (head/tail tips and back/belly midpoints). Shrink each axis by `SHRINK_SAFETY × midpoint_margin`, where `SHRINK_SAFETY = 0.5` uses half the geometric safety margin. Axis-aligned rectangles get exactly zero shrink (midpoints sit on the AABB edges and the formula self-disables). Rotated rectangles recover background pixels — up to ~20% on each axis at high rotation — without clipping anatomy.
+
+`SHRINK_SAFETY` is a module-level constant; set to `0` to disable the shrink entirely (e.g. for an A/B retrain comparison).
+
 ### Legacy BIIGLE volumes (outside the pipeline)
 
 For BIIGLE volumes that were created manually (not through the pipeline), use:

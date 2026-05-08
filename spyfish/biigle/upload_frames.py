@@ -35,7 +35,7 @@ def upload_frames_to_s3(
         frames_df: DataFrame with a 'FramePath' column (output of extract_frames_from_selections).
                    Rows with None FramePath (extraction failures) are skipped.
         s3_frames_prefix: S3 key prefix for the upload destination, e.g.
-                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/"
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/" # pragma: allowlist secret
 
     Returns:
         List of uploaded filenames (basename only, as used in the Biigle volume file list).
@@ -202,7 +202,7 @@ def create_biigle_volume(
     Args:
         drop_id: Deployment identifier, used as the volume name.
         s3_frames_prefix: S3 key prefix matching what was uploaded (e.g.
-                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/").
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/"). # pragma: allowlist secret
         file_names: List of JPEG filenames within the S3 prefix (basenames only).
         project_id: Biigle project ID. Defaults to config.biigle_project_id.
 
@@ -296,7 +296,9 @@ def upload_coco_annotations_to_biigle(
                 "get_volume_images."
             )
         volume_images = handler.get_volume_images(volume_id)
-        filename_to_biigle_id = {img["filename"]: img["id"] for img in volume_images}
+        filename_to_biigle_id = {
+            img["filename"]: int(img["id"]) for img in volume_images
+        }
 
     # Map COCO category IDs to species names
     coco_cat_id_to_name = {
