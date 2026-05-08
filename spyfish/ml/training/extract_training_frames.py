@@ -93,13 +93,21 @@ def _quadratic_timestamps(
 
 @dataclass
 class ExtractionResult:
-    """Output of `extract_frames_for_drop`."""
+    """Output of `extract_frames_for_drop`.
+
+    ``fps`` is ``Optional[float]`` because the resume path
+    (``_try_load_from_disk``) reconstructs this dataclass from on-disk
+    artefacts and can't recover the source video's fps without re-opening
+    the video. ``None`` is the explicit "unknown" signal — callers that
+    use fps arithmetically must guard with ``is not None``. In the real
+    extraction path it's always a positive float.
+    """
 
     drop_id: str
     survey_id: str
     frame_paths: List[Path]
     timestamps: List[float]
-    fps: float
+    fps: Optional[float]
     img_w: int
     img_h: int
     output_dir: Path
@@ -238,6 +246,83 @@ def extract_frames_for_drop(
     )
 
 
+def _try_load_from_disk(
+    drop_id: str,
+) -> Optional[tuple[ExtractionResult, Optional[Path]]]:
+    """Reconstruct extraction state from artefacts already on disk so a
+    partial-failure re-run can skip the slow extract + infer stages.
+
+    Returns:
+        - ``None`` — no usable JPGs on disk; caller runs the full pipeline.
+        - ``(extraction, None)`` — JPGs present but no inference CSV;
+          caller runs inference on the existing frames.
+        - ``(extraction, raw_csv)`` — JPGs and raw CSV both present;
+          caller jumps straight to upload.
+
+    Timestamps are recovered by parsing filenames
+    (``{drop_id}__frame_{t:.3f}s.jpg`` — written by
+    ``generate_frame_filename`` at 3-decimal precision, which round-trips
+    losslessly with the floats produced by ``_quadratic_timestamps``).
+    Image dimensions are read from the first JPG via cv2. ``fps`` is
+    ``None`` because we don't re-open the video here — the upload path
+    doesn't consume it, and ``run_inference_to_csv`` (used in the
+    JPGs-but-no-CSV branch) treats ``None`` as "unknown" and emits
+    ``-1`` in the raw CSV's ``frame`` column instead of synthesising a
+    misleading value.
+    """
+    out_dir = _training_frames_dir(drop_id)
+    if not out_dir.exists():
+        return None
+
+    prefix = f"{drop_id}__frame_"
+    suffix = "s.jpg"
+    timestamped: List[tuple[float, Path]] = []
+    for p in out_dir.glob("*.jpg"):
+        if not (p.name.startswith(prefix) and p.name.endswith(suffix)):
+            continue
+        try:
+            t = float(p.name[len(prefix) : -len(suffix)])
+        except ValueError:
+            continue
+        timestamped.append((t, p))
+    if not timestamped:
+        return None
+
+    timestamped.sort(key=lambda x: x[0])
+    timestamps = [t for t, _ in timestamped]
+    paths = [p for _, p in timestamped]
+
+    sample = cv2.imread(str(paths[0]))
+    if sample is None:
+        logging.warning(
+            f"{drop_id}: existing JPG {paths[0].name} unreadable — "
+            "falling back to full extraction."
+        )
+        return None
+    img_h, img_w = sample.shape[:2]
+
+    extraction = ExtractionResult(
+        drop_id=drop_id,
+        survey_id=config.get_survey_id_from_drop(drop_id),
+        frame_paths=paths,
+        timestamps=timestamps,
+        fps=None,
+        img_w=int(img_w),
+        img_h=int(img_h),
+        output_dir=out_dir,
+    )
+
+    # Match the CSV name to the *current* annotation_type config. If the
+    # user toggled binary↔species between runs, the old CSV is stale and
+    # we force re-inference under the new config.
+    expected_csv = (
+        out_dir / f"{drop_id}_{config.training_extraction_annotation_type}_raw.csv"
+    )
+    raw_csv = expected_csv if expected_csv.exists() else None
+
+    return extraction, raw_csv
+
+
 # ── Inference ────────────────────────────────────────────────────────────────
 
 
@@ -320,8 +405,13 @@ def run_inference_to_csv(
             # Synthesized frame index — there's no contiguous decode here
             # (we ran cv2 .set/.read per timestamp), so this is the nominal
             # frame number for the seek time. Downstream COCO matching uses
-            # `time_seconds`, not `frame`, so this is informational.
-            frame_idx = int(round(t * extraction.fps))
+            # `time_seconds`, not `frame`, so this is informational. Resume
+            # paths reconstruct ExtractionResult from disk and pass fps=None
+            # because the video isn't re-opened; we emit -1 there as an
+            # explicit "unknown" rather than a misleading 0.
+            frame_idx = (
+                int(round(t * extraction.fps)) if extraction.fps is not None else -1
+            )
             for box in result.boxes:
                 x, y, w, h = box.xywh[0].tolist()
                 cls_id = int(box.cls[0])
@@ -400,9 +490,13 @@ def upload_drop_to_survey_volume(
             f"{extraction.drop_id}: no frames uploaded to S3 — aborting Biigle step."
         )
 
-    # 3. Find or create the survey volume; attach our files.
+    # 3. Find or create the survey volume; attach our files. The returned
+    #    filename→ID map covers the just-added images directly from
+    #    add_files_to_volume's response, so the annotation step below can
+    #    skip a per-drop full image fetch (the dominant Biigle call cost
+    #    in survey-level batch runs).
     volume_name = SURVEY_VOLUME_NAME_TEMPLATE.format(survey_id=extraction.survey_id)
-    volume_id = find_or_create_volume_and_add_frames(
+    volume_id, filename_to_id = find_or_create_volume_and_add_frames(
         volume_name=volume_name,
         s3_frames_prefix=s3_prefix,
         file_names=file_names,
@@ -410,7 +504,9 @@ def upload_drop_to_survey_volume(
     )
 
     # 4. Push the ML annotations into the volume.
-    upload_coco_annotations_to_biigle(volume_id, coco)
+    upload_coco_annotations_to_biigle(
+        volume_id, coco, filename_to_biigle_id=filename_to_id
+    )
     logging.info(
         f"{extraction.drop_id}: training frames in Biigle volume {volume_id} "
         f"({volume_name})"
@@ -440,20 +536,17 @@ def process_drop(
 ) -> DropResult:
     """Full lifecycle for one drop: extract → infer → (upload → DB update).
 
+    Auto-resume: existing JPGs and matching raw CSV under
+    ``training_frames/`` are reused, skipping the slow extract / infer
+    stages. A re-run after a partial failure (e.g. Biigle rate-limit)
+    just picks up where it left off — no flag required. ``force=True``
+    bypasses both the DB-level skip and the on-disk reuse.
+
     Returns a `DropResult` whether successful or not — survey runs use this
     so a single failed drop doesn't abort the batch.
 
-    Skips the work entirely if the drop already has a `training_biigle_volume_id`
-    set in the DB and `force` is False.
-
-    If `no_upload` is set, stops after inference. Useful for dry-runs that
-    confirm extraction + binary detector behave correctly without touching
-    Biigle. Re-running with `no_upload=False` will still do the upload step.
-
-    Note: after a `--no-upload` run, the next run on the same drop will hit
-    `FileExistsError` from `extract_frames_for_drop` because training_frames/
-    is now populated. To proceed with the upload step, pass `force=True` —
-    the existing JPGs get overwritten and the upload step runs.
+    If ``no_upload`` is set, stops after inference. JPGs and raw CSV are
+    left on disk; a subsequent plain run will pick them up automatically.
     """
     db = DatabaseManager()
 
@@ -465,23 +558,40 @@ def process_drop(
         )
         return DropResult(drop_id=drop_id, ok=True, volume_id=existing, stage="skipped")
 
-    try:
-        extraction = extract_frames_for_drop(drop_id, force=force)
-    except Exception as e:
-        logging.error(f"{drop_id}: extraction failed — {e}")
-        return DropResult(drop_id=drop_id, ok=False, stage="extract", error=str(e))
+    on_disk = None if force else _try_load_from_disk(drop_id)
 
-    try:
-        raw_csv = run_inference_to_csv(extraction, model=model)
-    except Exception as e:
-        logging.error(f"{drop_id}: inference failed — {e}")
-        return DropResult(
-            drop_id=drop_id,
-            ok=False,
-            n_frames=len(extraction.frame_paths),
-            stage="inference",
-            error=str(e),
-        )
+    if on_disk is None:
+        try:
+            extraction = extract_frames_for_drop(drop_id, force=force)
+        except Exception as e:
+            logging.error(f"{drop_id}: extraction failed — {e}")
+            return DropResult(drop_id=drop_id, ok=False, stage="extract", error=str(e))
+        raw_csv = None
+    else:
+        extraction, raw_csv = on_disk
+        if raw_csv is not None:
+            logging.info(
+                f"{drop_id}: reusing existing frames + raw CSV "
+                "(skipping extract + inference)."
+            )
+        else:
+            logging.info(
+                f"{drop_id}: reusing existing frames; raw CSV missing "
+                "— running inference only."
+            )
+
+    if raw_csv is None:
+        try:
+            raw_csv = run_inference_to_csv(extraction, model=model)
+        except Exception as e:
+            logging.error(f"{drop_id}: inference failed — {e}")
+            return DropResult(
+                drop_id=drop_id,
+                ok=False,
+                n_frames=len(extraction.frame_paths),
+                stage="inference",
+                error=str(e),
+            )
 
     if no_upload:
         logging.info(

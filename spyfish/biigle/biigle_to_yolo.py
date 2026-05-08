@@ -20,28 +20,78 @@ from spyfish.config.wrapper import config
 # Core conversion helpers
 # ---------------------------------------------------------------------------
 
+# Per-axis AABB shrink fraction. For a rotated rectangle, the closest non-
+# corner feature to each AABB edge is one of the 4 edge midpoints (head,
+# tail, back, belly of the fish silhouette). Shrinking each AABB axis by
+# this fraction of that midpoint's margin recovers background pixels without
+# clipping anatomy. 0 disables; 0.5 (half the geometric safety margin)
+# leaves the rest as buffer against annotator slop and float noise.
+SHRINK_SAFETY = 0.5
+
 
 def biigle_rect_to_yolo(
     points: List[float], img_w: int, img_h: int
 ) -> Tuple[float, float, float, float]:
     """
-    Convert a Biigle Rectangle annotation to normalised YOLO format.
+    Convert a Biigle Rectangle annotation to normalised YOLO HBB format.
 
-    Biigle stores rectangles as 8 flat coordinates (4 corners, duplicated):
-        [x1, y1, x2, y1, x2, y2, x1, y2]  (top-left → clockwise)
+    Biigle's Rectangle is a quadrilateral with 4 corner points stored as 8
+    flat floats. The drawing tool allows rotation, so corners aren't
+    guaranteed to be axis-aligned. We take the AABB envelope (min/max over
+    all four corners), clamp it to image bounds, then apply a per-axis
+    shrink toward the AABB centre based on the closest edge midpoint to
+    each AABB edge. Those midpoints are the visible fish features
+    (head/tail tips and back/belly midpoints), so shrinking by half their
+    margin recovers background pixels without clipping anatomy. For
+    axis-aligned rectangles the shrink is zero — midpoints sit on the AABB
+    edges and the formula self-disables.
 
     Returns:
         (cx, cy, w, h) each normalised to [0, 1] by image dimensions.
     """
-    x1, y1, x2 = points[0], points[1], points[2]
-    y2 = points[5]
+    if len(points) != 8:
+        raise ValueError(
+            f"Expected 8 floats (4 corners) for a Biigle Rectangle, got {len(points)}"
+        )
+    xs = points[0::2]
+    ys = points[1::2]
+    # Clamp raw corners to image bounds — rotated rectangles can have
+    # corners outside the frame, and YOLO rejects labels whose edges fall
+    # outside [0, 1].
+    x_min = max(0.0, min(float(img_w), min(xs)))
+    x_max = max(0.0, min(float(img_w), max(xs)))
+    y_min = max(0.0, min(float(img_h), min(ys)))
+    y_max = max(0.0, min(float(img_h), max(ys)))
 
-    cx = (x1 + x2) / 2.0 / img_w
-    cy = (y1 + y2) / 2.0 / img_h
-    w = abs(x2 - x1) / img_w
-    h = abs(y2 - y1) / img_h
+    half_w = (x_max - x_min) / 2.0
+    half_h = (y_max - y_min) / 2.0
+    if half_w > 0 and half_h > 0:
+        midpoints = [
+            (
+                (points[2 * i] + points[2 * ((i + 1) % 4)]) / 2.0,
+                (points[2 * i + 1] + points[2 * ((i + 1) % 4) + 1]) / 2.0,
+            )
+            for i in range(4)
+        ]
+        # max(0, ...) handles midpoints outside the clamped AABB — they
+        # contribute zero margin, so shrink on that axis self-disables.
+        min_x_margin = min(
+            min(max(0.0, mx - x_min), max(0.0, x_max - mx)) for mx, _ in midpoints
+        )
+        min_y_margin = min(
+            min(max(0.0, my - y_min), max(0.0, y_max - my)) for _, my in midpoints
+        )
+        cx_px = (x_min + x_max) / 2.0
+        cy_px = (y_min + y_max) / 2.0
+        half_w *= 1 - SHRINK_SAFETY * min_x_margin / half_w
+        half_h *= 1 - SHRINK_SAFETY * min_y_margin / half_h
+        x_min, x_max = cx_px - half_w, cx_px + half_w
+        y_min, y_max = cy_px - half_h, cy_px + half_h
 
-    cx, cy, w, h = (max(0.0, min(1.0, v)) for v in (cx, cy, w, h))
+    cx = (x_min + x_max) / 2.0 / img_w
+    cy = (y_min + y_max) / 2.0 / img_h
+    w = (x_max - x_min) / img_w
+    h = (y_max - y_min) / img_h
     return round(cx, 6), round(cy, 6), round(w, 6), round(h, 6)
 
 
@@ -167,7 +217,9 @@ def convert_annotations_to_yolo(
             else:
                 points = list(points_raw)
 
-            if len(points) < 6:
+            # Skip non-Rectangle shapes (Points, Circles, LineStrings, polygons
+            # with !=4 corners). Biigle Rectangles always come as 8 flat floats.
+            if len(points) != 8:
                 continue
 
             cx, cy, w, h = biigle_rect_to_yolo(points, img_w, img_h)

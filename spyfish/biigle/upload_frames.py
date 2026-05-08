@@ -12,7 +12,7 @@ Ported and structured from:
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -35,7 +35,7 @@ def upload_frames_to_s3(
         frames_df: DataFrame with a 'FramePath' column (output of extract_frames_from_selections).
                    Rows with None FramePath (extraction failures) are skipped.
         s3_frames_prefix: S3 key prefix for the upload destination, e.g.
-                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/"
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/" # pragma: allowlist secret
 
     Returns:
         List of uploaded filenames (basename only, as used in the Biigle volume file list).
@@ -85,7 +85,7 @@ def find_or_create_volume_and_add_frames(
     file_names: list[str],
     project_id: Optional[int] = None,
     media_type: str = "image",
-) -> int:
+) -> Tuple[int, Dict[str, int]]:
     """Land `file_names` into the Biigle volume named `volume_name`, creating
     the volume if it doesn't exist.
 
@@ -108,7 +108,14 @@ def find_or_create_volume_and_add_frames(
         media_type: "image" or "video". Default "image".
 
     Returns:
-        Biigle volume_id (existing or newly created).
+        ``(volume_id, filename_to_biigle_id)``. The map covers the files we
+        just landed (returned directly by ``add_files_to_volume`` on an
+        existing volume; empty on a freshly created one — the caller's
+        annotation step handles the create-case fallback). Pass it to
+        ``upload_coco_annotations_to_biigle`` to skip a per-drop full
+        ``get_volume_images`` sweep, which is the dominant Biigle call
+        cost in survey-level batch runs (the volume's image count grows
+        per drop and the helper does ~N concurrent GETs).
     """
     if not file_names:
         raise ValueError(
@@ -133,7 +140,11 @@ def find_or_create_volume_and_add_frames(
             project_id=project_id,
             media_type=media_type,
         )
-        return int(info["id"])
+        # On creation we don't get image IDs back — the caller's annotation
+        # step will fall back to one get_volume_images call. That fetch is
+        # bounded (just-this-drop's files) since the volume is brand-new,
+        # which is the only situation where a fetch is now necessary.
+        return int(info["id"]), {}
 
     # Biigle does not enforce volume-name uniqueness — pick most recent.
     matches.sort(key=lambda v: v.get("created_at", ""), reverse=True)
@@ -147,8 +158,30 @@ def find_or_create_volume_and_add_frames(
         f"Adding {len(file_names)} file(s) to existing volume {volume_name!r} "
         f"(id={volume_id})."
     )
-    handler.add_files_to_volume(volume_id, file_names)
-    return volume_id
+    added = handler.add_files_to_volume(volume_id, file_names)
+    filename_to_id = {
+        item["filename"]: int(item["id"])
+        for item in added
+        if isinstance(item, dict) and "filename" in item and "id" in item
+    }
+
+    # Defensive fallback: if the response didn't include entries for some
+    # of our filenames (e.g. they were already in the volume from a prior
+    # partial run that didn't reach the annotation step), do a single full
+    # image fetch to fill the gaps. This is the only path that triggers
+    # the heavyweight call — the rate-limit-clean case avoids it.
+    missing = [n for n in file_names if n not in filename_to_id]
+    if missing:
+        logging.info(
+            f"add_files_to_volume returned IDs for {len(filename_to_id)}/"
+            f"{len(file_names)} filenames; fetching full image list to "
+            f"resolve {len(missing)} missing entr(y/ies) — likely already "
+            "in the volume from a prior run."
+        )
+        all_imgs = handler.get_volume_images(volume_id)
+        filename_to_id = {img["filename"]: int(img["id"]) for img in all_imgs}
+
+    return volume_id, filename_to_id
 
 
 # ── Step 2: Biigle volume creation ───────────────────────────────────────────
@@ -169,7 +202,7 @@ def create_biigle_volume(
     Args:
         drop_id: Deployment identifier, used as the volume name.
         s3_frames_prefix: S3 key prefix matching what was uploaded (e.g.
-                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/").
+                          "process_files/deployment_data/KSF_20240124/KSF_20240124_BUV_KSF_085_01/frames/"). # pragma: allowlist secret
         file_names: List of JPEG filenames within the S3 prefix (basenames only).
         project_id: Biigle project ID. Defaults to config.biigle_project_id.
 
@@ -208,6 +241,7 @@ def upload_coco_annotations_to_biigle(
     volume_id: int,
     coco_data: dict,
     label_id: int = config.default_fish_label_id,
+    filename_to_biigle_id: Optional[Dict[str, int]] = None,
 ) -> dict:
     """
     Upload COCO annotations to a Biigle volume.
@@ -218,6 +252,13 @@ def upload_coco_annotations_to_biigle(
         volume_id: Biigle volume ID.
         coco_data: COCO annotations dict (from extract_frames_from_selections).
         label_id: The Biigle label ID to apply to all annotations. Defaults to config value.
+        filename_to_biigle_id: Optional pre-supplied ``{filename: biigle_image_id}``
+            map. When supplied AND it covers every filename referenced in
+            ``coco_data["images"]``, the per-volume image fetch is skipped —
+            saving a 20-thread parallel GET burst that scales with the
+            volume's image count and dominates rate-limit consumption in
+            survey-level batch runs. Falls back to the full fetch when
+            the map is absent or incomplete.
 
     Returns:
         The API response dict from the bulk upload endpoint.
@@ -228,14 +269,36 @@ def upload_coco_annotations_to_biigle(
 
     handler = BiigleHandler()
 
-    # Fetch images from the new volume to map filenames to Biigle image IDs
-    volume_images = handler.get_volume_images(volume_id)
-    filename_to_biigle_id = {img["filename"]: img["id"] for img in volume_images}
-
     # Map COCO image IDs to actual filenames
     coco_img_id_to_filename = {
         img["id"]: img["file_name"] for img in coco_data.get("images", [])
     }
+
+    # Resolve filename → Biigle image_id. The caller (typically
+    # find_or_create_volume_and_add_frames) can pre-supply this map from
+    # add_files_to_volume's response, which costs zero extra Biigle calls.
+    # Fall back to a full image-list fetch only when the map is missing or
+    # doesn't cover every filename we need to annotate.
+    needed_names = set(coco_img_id_to_filename.values())
+    if filename_to_biigle_id is not None and needed_names.issubset(
+        filename_to_biigle_id
+    ):
+        logging.info(
+            f"Volume {volume_id}: using pre-supplied filename→ID map "
+            f"({len(filename_to_biigle_id)} entries); skipping get_volume_images."
+        )
+    else:
+        if filename_to_biigle_id is not None:
+            missing = needed_names - set(filename_to_biigle_id)
+            logging.info(
+                f"Volume {volume_id}: pre-supplied map missing "
+                f"{len(missing)} filename(s); falling back to full "
+                "get_volume_images."
+            )
+        volume_images = handler.get_volume_images(volume_id)
+        filename_to_biigle_id = {
+            img["filename"]: int(img["id"]) for img in volume_images
+        }
 
     # Map COCO category IDs to species names
     coco_cat_id_to_name = {
