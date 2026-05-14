@@ -1,32 +1,34 @@
-# 🐟 Spyfish Aotearoa — System Architecture
+# 🐟 Spyfish — System Architecture
 
-> **North Star Reference** · Last updated: 6 May 2026
+> **North Star Reference** · Last updated: 15 May 2026
 >
-> This document is the single source of truth for the Spyfish Aotearoa system.
+> This document is the single source of truth for Spyfish.
 > Every stakeholder — rangers, scientists, engineers, and contributors — should
 > refer to this to understand what we're building and where we're headed.
 
 ---
 
-## What is Spyfish Aotearoa?
+## What is Spyfish?
 
-Spyfish Aotearoa is a **semi-automated pipeline** that combines 
-**machine learning**, **citizen science**, and **expert annotation** 
-to turn raw underwater video footage from New Zealand's marine reserves 
-into fish observation data for biodiversity monitoring and reporting.
+**Spyfish** is a methodology for turning underwater footage into structured
+biological observations. It is not tied to any specific tool, platform, or
+location — any group collecting underwater video can follow the same steps.
 
+**Spyfish Aotearoa** is the first implementation of Spyfish, built for
+New Zealand's marine protected areas using AWS, YOLO, Zooniverse, BIIGLE,
+and a Streamlit dashboard.
 
 ---
 
 ## The Big Picture
 
 ```
-  Rangers deploy       Videos uploaded        Pipeline processes      Stakeholders view
-  cameras in the  ──►  to cloud storage  ──►  videos automatically  ──► results on the
-  marine reserves      (AWS S3)               (ML + human review)      Streamlit dashboard
+  1. Fieldwork         2. Storage         3. Annotation         4. Dashboard         5. Sharing
+  Collect footage  ──► Upload to     ──► ML / CitSci /     ──► View results   ──► Publish insights
+  and metadata         storage           Expert review          privately           and data
 ```
 
-### System Context
+### Spyfish Aotearoa — System Context
 
 ```mermaid
 flowchart TB
@@ -69,12 +71,11 @@ flowchart TB
 
 | Stakeholder | What they do | Primary tools | Secondary tools |
 |---|---|---|---|
-| **DOC Rangers** | Deploy cameras, enter field metadata, view results. | PowerApps, Video Uploader App | Streamlit Dashboard (Maps & Reports) |
-| **DOC Scientists** | Review data, monitor species trends, generate reports. | **Streamlit Dashboard** | SharePoint, PowerApps |
-| **Spyfish Research Team** | Run the pipeline, manage annotations, retrain models. | **Streamlit Dashboard** + CLI | — |
-| **External Contributors** | Support the project without DOC system access. | **Streamlit Dashboard** | — |
+| **DOC Rangers** | Deploy cameras, enter field metadata, view survey status. | PowerApps, Video Uploader App | Streamlit Dashboard (survey status, view-only) |
+| **DOC Scientists** | Analyse data, monitor species trends, generate reports. | **Streamlit Dashboard** (Maps & Reports) | SharePoint |
+| **Core Team** | Keep the pipeline running, manage errors, retrain models. | **Streamlit Dashboard** + CLI, GitHub, Notion | — |
+| **External Researchers / Ecologists** | Contribute expertise (species ID, fish sizing, bounding boxes). | **Streamlit Dashboard**, Notion, BIIGLE | — |
 | **Citizen Scientists** | Classify 10-second video clips into species categories. | **Zooniverse** | — |
-| **Marine Ecologists** | Draw bounding boxes and identify species at expert level. | **BIIGLE** | — |
 
 ---
 
@@ -97,7 +98,7 @@ flowchart TB
 
 ---
 
-## Data Pipeline — End to End
+## Data Pipeline — End to End (Spyfish Aotearoa)
 
 This is the journey of a single underwater video from the ocean to a conservation report.
 
@@ -116,32 +117,21 @@ flowchart LR
 ### Phase 2 — Automated Pipeline
 
 ```mermaid
-flowchart TD
-    A["☁️ S3: Videos + Metadata available"]
+flowchart LR
+    S3["☁️ AWS S3<br/>Videos + Metadata ready"] --> ML["🤖 ML INFERENCE<br/>Estimate MaxN per species<br/>per 10s clip"]
 
-    A --> B["🔄 Step 1: INGEST<br/>Download CSVs from S3<br/>Validate structure & formats<br/>Register deployments in DB"]
+    ML -->|"Confident MaxN"| DB["📦 annotations.db"]
+    ML -->|"Low confidence"| CS["🔬 CITIZEN SCIENTISTS<br/>Classify clips on Zooniverse"]
 
-    B --> C["📡 Step 1b: CHECK ARRIVALS<br/>Poll S3 for new video files"]
+    CS -->|"High agreement"| DB
+    CS -->|"Low agreement"| EX["🏷️ EXPERTS<br/>Review in BIIGLE"]
 
-    C --> D["🤖 Step 2-3: ML INFERENCE<br/>YOLO at 3 FPS → detections<br/>Aggregate into 10s intervals<br/>Compute MaxN per species<br/>→ stored in annotations.db"]
-
-    D --> E{"Annotation<br/>path?"}
-
-    E -->|"Citizen science<br/>path"| F["🔬 Step 4: ZOONIVERSE CLIPS<br/>Select representative 10s clips<br/>Extract & upload to Zooniverse"]
-    F --> G["🤝 Step 5: VOLUNTEER AGREEMENT<br/>Download classifications when<br/>retirement threshold met<br/>Compute species agreement<br/>→ stored in annotations.db"]
-
-    E -->|"Expert-direct<br/>path"| H["🏷️ Step 6: BIIGLE UPLOAD<br/>Extract frames at MaxN peaks<br/>Upload JPEGs to S3<br/>Create BIIGLE image volume"]
-
-    G --> H
-
-    H --> I["👨‍🔬 Expert annotates in BIIGLE<br/>Bounding boxes + species ID<br/>Marks volume 'Done'"]
-
-    I --> J["🔄 Step 7: BIIGLE SYNC<br/>Detect 'Done' volumes<br/>Download annotations<br/>→ stored in annotations.db"]
+    EX --> DB
 ```
 
 
 
-### Phase 3 — Reporting
+### Phase 3 — Dashboard
 
 ```mermaid
 flowchart LR
@@ -150,6 +140,13 @@ flowchart LR
     DASH --> MGMT["⚙️ Management<br/>Error review<br/>Deployment overview<br/>Management actions"]
     DASH --> DEV["🔧 Development Tools<br/>AI model metrics<br/>Annotation conflicts<br/>Dev actions"]
 ```
+
+### Phase 4 — Sharing
+
+Publish insights and data back to the wider community:
+- Export standardised data to **OBIS** or other biodiversity platforms
+- Generate semi-automated reports for conservation stakeholders
+- Share results with citizen science volunteers who contributed
 
 ---
 
@@ -160,10 +157,14 @@ The Streamlit app (`app/`) is the **single reporting and operations interface** 
 | Page | Audience | Purpose |
 |---|---|---|
 | 🐟 **Home** | Everyone | Navigation and quick links |
-| 🗺️ **Maps & Reports** | DOC Scientists + Rangers + Everyone | Species distribution maps, MaxN trends by reserve, survey completion, report cards |
-| ⚙️ **Management** | Team + Contributors | Error review, deployment/survey/annotations overview, shortcuts to management actions (status updates, data export, etc.) |
-| 📺 **View Deployment Videos** | Team | Browse and play deployment videos |
-| 🔧 **Development Tools** | Team | AI model overview (metrics, confusion matrix, promotion), annotation conflict review, shortcuts to development actions (retrain, cross-check, BIIGLE export) |
+| 🗺️ **Maps & Reports** | DOC Scientists + Rangers + Everyone | Map with deployments/MaxN per reserve, time-series of species counts (year × MaxN, filter by species) |
+| ⚙️ **Management** | Core Team + Scientists | Error review, deployment/survey/annotations overview, shortcuts to management actions (status updates, data export, etc.) |
+| 📺 **View Deployment Videos** | Core Team | Browse and play deployment videos |
+| 🔧 **Development Tools** | Core Team | AI model overview (metrics, confusion matrix, promotion), annotation conflict review, shortcuts to development actions (retrain, cross-check, BIIGLE export) |
+
+> **Access control**: Different pages will have different access levels.
+> Rangers can view survey status but cannot trigger pipeline actions.
+> Scientists can access Maps & Reports. Core Team has full access.
 
 ---
 
