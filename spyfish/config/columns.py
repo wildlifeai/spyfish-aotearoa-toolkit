@@ -110,3 +110,7 @@ class ColumnsConfig(BaseConfig):
     @property
     def csv_time_seconds_column(self) -> str:
         return self._col("time_seconds_column")
+
+    @property
+    def csv_subject_id_column(self) -> str:
+        return self._col("subject_id_column")

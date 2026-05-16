@@ -41,11 +41,11 @@ from spyfish.config.base import VideoPresence
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.extract_frames import (
-    _extract_one_frame_from_cap,
-    _read_video_rotation,
     build_coco_from_raw_csv,
+    extract_one_frame_from_cap,
+    open_video_capture,
+    read_video_rotation,
 )
-from spyfish.storage.s3_handler import S3Handler
 from spyfish.utils import generate_frame_filename
 
 SURVEY_VOLUME_NAME_TEMPLATE = "{survey_id} — Training frames"
@@ -144,7 +144,6 @@ def extract_frames_for_drop(
         output directory.
     """
     db = DatabaseManager()
-    s3 = S3Handler()
 
     deployment = db.get_deployment(drop_id)
     if deployment is None:
@@ -177,34 +176,21 @@ def extract_frames_for_drop(
     n = int(n_frames) if n_frames is not None else config.training_extraction_n_frames
     timestamps = _quadratic_timestamps(float(sampling_start), float(sampling_end), n=n)
 
-    s3_key = config.get_video_s3_key(drop_id)
-    t_start = time.monotonic()
-    url = s3.generate_presigned_url(s3_key, expiration=3600)
-    if url is None:
-        raise FileNotFoundError(
-            f"{drop_id}: could not generate presigned URL for s3://.../{s3_key} "
-            "(404 or insufficient permissions)."
-        )
-    logging.info(
-        f"{drop_id}: presigned URL ready in {time.monotonic() - t_start:.2f}s "
-        f"({n} frames in [{sampling_start}, {sampling_end}]s)"
-    )
-
+    # Prefer the local media if it's already on disk (e.g. NeSI run after a
+    # download, or a dev machine with cached video); fall back to a presigned
+    # S3 URL otherwise. open_video_capture handles the local-vs-presigned
+    # choice — passing the candidate path is enough.
+    local_path = str(config.get_video_path(drop_id))
     t_open = time.monotonic()
-    cap = cv2.VideoCapture(url)
-    if not cap.isOpened():
-        raise RuntimeError(
-            f"{drop_id}: cv2 failed to open the presigned URL "
-            f"(s3://.../{s3_key}). Possible network/auth issue, or the MP4 "
-            "container is unsupported by the local ffmpeg backend."
-        )
+    cap = open_video_capture(drop_id, prefer_local_path=local_path)
     logging.info(
-        f"{drop_id}: cv2 opened the URL in {time.monotonic() - t_open:.2f}s "
-        "(this is the moov-atom fetch — should be a few seconds, not minutes)"
+        f"{drop_id}: cv2 opened video source in "
+        f"{time.monotonic() - t_open:.2f}s ({n} frames in "
+        f"[{sampling_start}, {sampling_end}]s)"
     )
 
     try:
-        rotation = _read_video_rotation(cap)
+        rotation = read_video_rotation(cap)
         fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
         if fps <= 0:
             raise ValueError(
@@ -222,7 +208,7 @@ def extract_frames_for_drop(
         for i, t in enumerate(timestamps, start=1):
             out_path = out_dir / generate_frame_filename(drop_id, t)
             t_seek = time.monotonic()
-            ok = _extract_one_frame_from_cap(cap, t, out_path, rotation=rotation)
+            ok = extract_one_frame_from_cap(cap, t, out_path, rotation=rotation)
             dt = time.monotonic() - t_seek
             logging.info(f"  [{i:2d}/{n}] t={t:8.3f}s  dt={dt:.2f}s  → {out_path.name}")
             if not ok:
@@ -351,89 +337,33 @@ def run_inference_to_csv(
     confidence: Optional[float] = None,
     imgsz: Optional[int] = None,
 ) -> Path:
-    """Run the configured detector model on extracted frames and write a raw CSV
-    in the same format produced by `spyfish.ml.run_inference` — meaning the
-    existing `build_coco_from_raw_csv` consumes it without modification.
+    """Run the configured detector model on the extraction's frames and write
+    a raw CSV in the same format as `spyfish.ml.run_inference` — so
+    `build_coco_from_raw_csv` consumes it without modification.
 
-    Output schema: ``frame, time_seconds, class, confidence, x, y, w, h``
-
-    Inference is batched: the entire frame list is passed to `model.predict()`
-    in one call, which is significantly faster than per-frame predict()
-    invocations (especially on GPU, where it amortises kernel launch and
-    host↔device transfer overhead).
-
-    If `model` is None, lazy-loads via `load_inference_model(annotation_type)`.
-    Survey runs should pre-load and pass `model` to avoid reloading per drop.
+    Thin wrapper around `predict_on_frame_paths` that unpacks the
+    `ExtractionResult` dataclass and resolves the training-extraction
+    annotation type. If `model` is None, lazy-loads via
+    `load_inference_model(annotation_type)`. Survey runs should pre-load and
+    pass `model` to avoid reloading per drop.
     """
+    from spyfish.ml.run_inference import predict_on_frame_paths
+
     kind = annotation_type or config.training_extraction_annotation_type
     if model is None:
         model = load_inference_model(annotation_type=kind)
 
-    conf = (
-        float(confidence)
-        if confidence is not None
-        else float(config.confidence_threshold)
-    )
-    img_size = int(imgsz) if imgsz is not None else int(config.imgsz)
-
     out_csv = extraction.output_dir / f"{extraction.drop_id}_{kind}_raw.csv"
-    logging.info(
-        f"{extraction.drop_id}: running '{kind}' inference on "
-        f"{len(extraction.frame_paths)} frame(s) (batched)"
+    logging.info(f"{extraction.drop_id}: running '{kind}' inference")
+    return predict_on_frame_paths(
+        frame_paths=extraction.frame_paths,
+        timestamps=extraction.timestamps,
+        output_csv=out_csv,
+        model=model,
+        confidence=confidence,
+        imgsz=imgsz,
+        fps=extraction.fps,
     )
-
-    # Batched predict — single call across the whole frame list amortises
-    # GPU/CPU dispatch overhead vs. one predict() call per frame.
-    sources = [str(p) for p in extraction.frame_paths]
-    all_results = model.predict(
-        source=sources,
-        conf=conf,
-        imgsz=img_size,
-        verbose=False,
-        project=None,
-        save=False,
-    )
-
-    with open(out_csv, "w", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(
-            ["frame", "time_seconds", "class", "confidence", "x", "y", "w", "h"]
-        )
-
-        n_detections = 0
-        for result, t in zip(all_results, extraction.timestamps):
-            # Synthesized frame index — there's no contiguous decode here
-            # (we ran cv2 .set/.read per timestamp), so this is the nominal
-            # frame number for the seek time. Downstream COCO matching uses
-            # `time_seconds`, not `frame`, so this is informational. Resume
-            # paths reconstruct ExtractionResult from disk and pass fps=None
-            # because the video isn't re-opened; we emit -1 there as an
-            # explicit "unknown" rather than a misleading 0.
-            frame_idx = (
-                int(round(t * extraction.fps)) if extraction.fps is not None else -1
-            )
-            for box in result.boxes:
-                x, y, w, h = box.xywh[0].tolist()
-                cls_id = int(box.cls[0])
-                writer.writerow(
-                    [
-                        frame_idx,
-                        float(t),
-                        model.names[cls_id],
-                        float(box.conf[0]),
-                        x,
-                        y,
-                        w,
-                        h,
-                    ]
-                )
-                n_detections += 1
-
-    logging.info(
-        f"{extraction.drop_id}: {n_detections} detection(s) across "
-        f"{len(extraction.frame_paths)} frame(s) → {out_csv.name}"
-    )
-    return out_csv
 
 
 # ── COCO + Biigle upload ─────────────────────────────────────────────────────
@@ -471,9 +401,8 @@ def upload_drop_to_survey_volume(
     ]
 
     coco = build_coco_from_raw_csv(str(raw_csv_path), frame_records)
-    coco_path = extraction.output_dir / (
-        f"{extraction.drop_id}_coco_annotations_for_biigle.json"
-    )
+    coco_path = config.get_coco_annotations_path(extraction.drop_id)
+    coco_path.parent.mkdir(parents=True, exist_ok=True)
     with open(coco_path, "w") as fh:
         json.dump(coco, fh, indent=2)
     logging.info(

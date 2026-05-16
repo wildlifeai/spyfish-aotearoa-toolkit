@@ -52,12 +52,6 @@ class PathsConfig(BaseConfig):
             self.legacy_paths, "zooniverse", "paths.legacy"
         )
 
-    @property
-    def legacy_experts_dir(self) -> Path:
-        return self.project_root / get_required(
-            self.legacy_paths, "experts", "paths.legacy"
-        )
-
     # ── Metadata / S3 keys ─────────────────────────────────────────────────
 
     @property
@@ -169,6 +163,21 @@ class PathsConfig(BaseConfig):
     @property
     def s3_training_output_prefix(self) -> str:
         return f"{self.base_dir}/{self._sub('training')}/"
+
+    @property
+    def species_labels_csv_path(self) -> Path:
+        """Biigle label-tree export (``Common - Scientific`` names + label IDs).
+
+        Shared by BIIGLE upload (species → label_id routing) and Zooniverse
+        parsing (choice key → scientific name normalisation).
+        """
+        return (
+            self.project_root
+            / self.base_dir
+            / "biigle"
+            / "labels"
+            / "species_labels.csv"
+        )
 
     # ── DB paths ────────────────────────────────────────────────────────────
 
@@ -367,6 +376,12 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}_zooniverse_maxn.csv"
         )
 
+    def get_zooniverse_raw_csv_path(self, drop_id: str) -> Path:
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_zooniverse_raw.csv"
+        )
+
     def get_selections_csv_path(self, drop_id: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
@@ -392,6 +407,42 @@ class PathsConfig(BaseConfig):
         return (
             self.get_drop_annotations_dir(drop_id)
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_maxn_suffix}"
+        )
+
+    def get_coco_annotations_path(self, drop_id: str) -> Path:
+        """COCO JSON of YOLO detections for a drop's selected frames.
+
+        Single source of truth for this filename — written by the frame
+        extractors, rebuilt by the Zooniverse-path inference rerun, and
+        read by ``upload_frames_to_biigle`` before upload.
+        """
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_coco_annotations_for_biigle.json"
+        )
+
+    _ZOONIVERSE_FRAMES_RAW_SUFFIXES = {
+        "species": "_zooniverse_frames_species_raw.csv",
+        "binary": "_zooniverse_frames_binary_raw.csv",
+        "merged": "_zooniverse_frames_raw.csv",
+    }
+
+    def get_zooniverse_frames_raw_csv_path(self, drop_id: str, kind: str) -> Path:
+        """Raw inference CSV for the Zooniverse-frame rerun ensemble.
+
+        ``kind`` is ``"species"``, ``"binary"``, or ``"merged"`` — written
+        by the two-pass species+binary inference + IoU merge that runs
+        on Zooniverse-selected frames before BIIGLE upload.
+        """
+        suffix = self._ZOONIVERSE_FRAMES_RAW_SUFFIXES.get(kind)
+        if suffix is None:
+            raise ValueError(
+                f"kind must be one of {sorted(self._ZOONIVERSE_FRAMES_RAW_SUFFIXES)}, "
+                f"got {kind!r}"
+            )
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{suffix}"
         )
 
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:

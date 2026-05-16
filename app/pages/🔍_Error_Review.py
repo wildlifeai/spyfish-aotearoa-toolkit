@@ -1,6 +1,7 @@
 from typing import Optional
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from utils import render_sidebar_refresh, sync_db_if_needed
 
@@ -40,17 +41,78 @@ def display_error_summary(errors_df: pd.DataFrame):
 
 
 def display_error_type_breakdown(errors_df: pd.DataFrame):
+    """Two side-by-side panels: errors by ErrorType, top failing CSV columns."""
     if errors_df.empty:
         return
-    st.subheader("📊 Errors by Type")
-    error_type_counts = errors_df["ErrorType"].value_counts().reset_index()
-    error_type_counts.columns = ["Error Type", "Count"]
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.bar_chart(error_type_counts.set_index("Error Type"))
-    with col2:
-        st.dataframe(error_type_counts, width="stretch", hide_index=True)
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.subheader("📊 Errors by Type")
+        st.caption(
+            "Which failure mode dominates? "
+            "`Missing Required Value` is usually rangers not filling required fields."
+        )
+        type_counts = (
+            errors_df["ErrorType"].fillna("(unspecified)").value_counts().reset_index()
+        )
+        type_counts.columns = ["ErrorType", "count"]
+        fig_et = px.bar(
+            type_counts.sort_values("count", ascending=True),
+            x="count",
+            y="ErrorType",
+            orientation="h",
+            color="count",
+            color_continuous_scale="Reds",
+            text="count",
+            labels={"count": "Errors", "ErrorType": "Error type"},
+            height=320,
+        )
+        fig_et.update_traces(textposition="outside")
+        fig_et.update_layout(
+            yaxis_title=None,
+            margin={"l": 0, "r": 0, "t": 10, "b": 0},
+            coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig_et, use_container_width=True)
+
+    with col_b:
+        st.subheader("🧭 Top failing columns")
+        st.caption(
+            "Which CSV columns fail validation most often? "
+            "Reveals upstream PowerApps / SharePoint quality issues."
+        )
+        if "ColumnName" not in errors_df.columns:
+            st.info("No column-level error data available.")
+            return
+        col_counts = (
+            errors_df[errors_df["ColumnName"].notna()]["ColumnName"]
+            .value_counts()
+            .head(15)
+            .reset_index()
+        )
+        col_counts.columns = ["ColumnName", "count"]
+        if col_counts.empty:
+            st.info("No errors with column-level detail recorded.")
+            return
+        fig_cc = px.bar(
+            col_counts.sort_values("count", ascending=True),
+            x="count",
+            y="ColumnName",
+            orientation="h",
+            color="count",
+            color_continuous_scale="Oranges",
+            text="count",
+            labels={"count": "Errors", "ColumnName": "Column"},
+            height=320,
+        )
+        fig_cc.update_traces(textposition="outside")
+        fig_cc.update_layout(
+            yaxis_title=None,
+            margin={"l": 0, "r": 0, "t": 10, "b": 0},
+            coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig_cc, use_container_width=True)
 
 
 def display_file_breakdown(errors_df: pd.DataFrame):
@@ -106,10 +168,16 @@ def main():
     # Move filters up so they affect all subsequent charts
     st.header("📈 Overview")
 
-    show_sampling_errors = st.checkbox("Show Sampling Errors", value=False)
+    include_sampling_errors = st.checkbox(
+        "Include sampling errors",
+        value=False,
+        help="Include errors on the SamplingStart / SamplingEnd columns. "
+        "Off by default — these are common ranger-entry omissions and "
+        "tend to flood the view.",
+    )
 
     errors_df = raw_errors_df.copy()
-    if not show_sampling_errors and "ColumnName" in errors_df.columns:
+    if not include_sampling_errors and "ColumnName" in errors_df.columns:
         errors_df = errors_df[
             ~errors_df["ColumnName"].isin(["SamplingStart", "SamplingEnd"])
         ]

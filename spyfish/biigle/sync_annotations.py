@@ -7,11 +7,11 @@ import pandas as pd
 from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.biigle.biigle_parser import BiigleParser
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo
-from spyfish.config.base import BiigleStatus
+from spyfish.config.base import ExpertStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
-from spyfish.utils import seconds_to_time
+from spyfish.utils import seconds_to_time, time_to_seconds
 
 
 def _extract_timestamp_from_filename(row: pd.Series, fname_col: str) -> Optional[str]:
@@ -66,10 +66,16 @@ def _map_biigle_to_spyfish_schema(
     sortable_time = timestamp or frame_key
     key = (sortable_time, species)
 
+    time_str = timestamp or frame_key
+    try:
+        toms = time_to_seconds(time_str) if time_str else None
+    except Exception:
+        toms = None
     mapped_item = {
         "drop_id": drop_id,
         "scientific_name": species,
-        "time_of_max": timestamp or frame_key,
+        "time_of_max": time_str,
+        "time_of_max_seconds": toms,
         "max_interval": 0,
         "annotated_by": "expert",
         "interval_annotation": "",
@@ -133,7 +139,7 @@ def sync_biigle_annotations():
     """
     Sync annotations from Biigle volumes marked as Done.
 
-    For each deployment with biigle_status=uploaded and a biigle_volume_id:
+    For each deployment with expert_status=uploaded and a biigle_volume_id:
     - Check if the volume is marked Done (file-level labels)
     - Download the annotation report
     - Save raw CSV for YOLO retraining
@@ -147,7 +153,7 @@ def sync_biigle_annotations():
     ann_db = AnnotationDatabaseManager()
     handler = BiigleHandler()
 
-    deployments = db.get_biigle_volumes_awaiting_sync(BiigleStatus.UPLOADED)
+    deployments = db.get_biigle_volumes_awaiting_sync(ExpertStatus.UPLOADED)
 
     if not deployments:
         logging.info("No active deployments with Biigle volumes found to check.")
@@ -185,7 +191,7 @@ def sync_biigle_annotations():
 
             if fish_annotations_df.empty:
                 logging.debug(f"  No annotations found for {drop_id}.")
-                db.advance_status(drop_id, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
+                db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
                 continue
 
             # Save raw Biigle report (used by YOLO label generation)
@@ -204,7 +210,7 @@ def sync_biigle_annotations():
                     f"  No fish annotations after aggregation for {drop_id} "
                     "(only non-fish labels). Advancing to complete."
                 )
-                db.advance_status(drop_id, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
+                db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
                 continue
 
             # Replace only Biigle-sourced expert annotations (external_id IS NOT NULL).
@@ -223,7 +229,7 @@ def sync_biigle_annotations():
                 f"  Ingested {len(annotations_to_add)} annotations for {drop_id}"
             )
 
-            db.advance_status(drop_id, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
+            db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
 
         except Exception as e:
             logging.error(

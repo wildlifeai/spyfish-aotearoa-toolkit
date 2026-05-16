@@ -3,8 +3,8 @@ import streamlit as st
 from utils import render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.config.base import (
-    BiigleStatus,
     CitSciStatus,
+    ExpertStatus,
     MlStatus,
     ReportingStatus,
     VideoPresence,
@@ -35,12 +35,12 @@ def load_deployment_status():
         df["survey_id"] = extract_survey_id(df["drop_id"])
 
         df["complete"] = (
-            (df["biigle_status"] == BiigleStatus.COMPLETE)
+            (df["expert_status"] == ExpertStatus.COMPLETE)
             | (df["reporting_status"] == ReportingStatus.COMPLETE)
             | (
                 (df["ml_status"] == MlStatus.SKIPPED)
                 & (df["citsci_status"] == CitSciStatus.SKIPPED)
-                & (df["biigle_status"] == BiigleStatus.SKIPPED)
+                & (df["expert_status"] == ExpertStatus.SKIPPED)
             )
         )
 
@@ -104,7 +104,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
         "is_bad_deployment",
         "ml_status",
         "citsci_status",
-        "biigle_status",
+        "expert_status",
         "video_status",
         "complete",
     ]
@@ -129,7 +129,7 @@ def display_deployment_table(df: pd.DataFrame, title: str, description: str):
             "video_status": st.column_config.TextColumn("Video", width="small"),
             "ml_status": st.column_config.TextColumn("ML", width="small"),
             "citsci_status": st.column_config.TextColumn("CitSci", width="small"),
-            "biigle_status": st.column_config.TextColumn("Biigle", width="small"),
+            "expert_status": st.column_config.TextColumn("Biigle", width="small"),
             "ml_annotations": st.column_config.NumberColumn("ML", width="small"),
             "citsci_annotations": st.column_config.NumberColumn(
                 "CitSci", width="small"
@@ -202,14 +202,17 @@ def render_survey_tab(deployment_df: pd.DataFrame):
 
 
 def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
-    st.subheader("🔄 Pipeline Section Breakdown")
-    st.caption("Status counts across all pipeline sections")
+    st.subheader("🔄 Pipeline section progress")
+    st.caption(
+        "100% stacked bars — each pipeline section's distribution of deployments by "
+        "status category. Hover for the exact status value within each band."
+    )
 
     sections = [
         ("ingest_status", "Ingest"),
         ("ml_status", "ML"),
         ("citsci_status", "CitSci"),
-        ("biigle_status", "Biigle"),
+        ("expert_status", "Expert"),
         ("reporting_status", "Reporting"),
     ]
 
@@ -225,13 +228,20 @@ def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
                     "Section": label,
                     "Status": status,
                     "Count": int(count),
-                    "%": f"{pct}%",
+                    "Pct": pct,
                 }
             )
 
-    if rows:
+    if not rows:
+        st.info("No deployed records to display yet.")
+    else:
+        table_df = (
+            pd.DataFrame(rows)
+            .rename(columns={"Pct": "%"})[["Section", "Status", "Count", "%"]]
+            .sort_values(["Section", "Count"], ascending=[True, False])
+        )
         st.dataframe(
-            pd.DataFrame(rows),
+            table_df,
             hide_index=True,
             width="stretch",
             column_config={
@@ -241,28 +251,42 @@ def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
                     max_value=total,
                     format="%d",
                 ),
+                "%": st.column_config.NumberColumn("%", format="%.1f%%"),
             },
         )
-    else:
-        st.info("No deployed records to display yet.")
 
-    # Filters
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    # Filters — pipeline-stage statuses in the top row, context filters below
+    st.markdown("**Filter deployments**")
+    s1, s2, s3 = st.columns(3)
+    with s1:
         ml_filter = st.multiselect(
-            "Filter by ML Status",
+            "ML status",
             options=sorted(deployment_df["ml_status"].unique().tolist()),
             default=None,
         )
-    with col2:
+    with s2:
+        citsci_filter = st.multiselect(
+            "CitSci status",
+            options=sorted(deployment_df["citsci_status"].unique().tolist()),
+            default=None,
+        )
+    with s3:
+        expert_filter = st.multiselect(
+            "Expert status",
+            options=sorted(deployment_df["expert_status"].unique().tolist()),
+            default=None,
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
         survey_filter = st.multiselect(
-            "Filter by Survey",
+            "Survey",
             options=sorted(deployment_df["survey_id"].unique().tolist()),
             default=None,
         )
-    with col3:
+    with c2:
         complete_filter = st.selectbox(
-            "Filter by Complete",
+            "Completion",
             options=["All", "Complete", "Action Required"],
             index=0,
         )
@@ -270,6 +294,10 @@ def render_pipeline_stage_tab(deployment_df: pd.DataFrame):
     filtered_df = deployment_df.copy()
     if ml_filter:
         filtered_df = filtered_df[filtered_df["ml_status"].isin(ml_filter)]
+    if citsci_filter:
+        filtered_df = filtered_df[filtered_df["citsci_status"].isin(citsci_filter)]
+    if expert_filter:
+        filtered_df = filtered_df[filtered_df["expert_status"].isin(expert_filter)]
     if survey_filter:
         filtered_df = filtered_df[filtered_df["survey_id"].isin(survey_filter)]
     if complete_filter == "Complete":
@@ -297,28 +325,16 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame, ann_db):
     )
 
     if selected_drop_id != "None":
-        detailed_anns = ann_db.get_annotations_for_drop(selected_drop_id)
+        maxn_df = ann_db.get_maxn_summary(drop_id=selected_drop_id)
 
-        if detailed_anns:
-            ann_df = pd.DataFrame(detailed_anns)
-            st.write(f"Showing {len(ann_df)} annotations for **{selected_drop_id}**")
-
-            s_cols = st.columns(3)
-            with s_cols[0]:
-                st.metric("Expert", len(ann_df[ann_df["annotated_by"] == "expert"]))
-            with s_cols[1]:
-                st.metric("ML", len(ann_df[ann_df["annotated_by"] == "ml"]))
-            with s_cols[2]:
-                st.metric("CitSci", len(ann_df[ann_df["annotated_by"] == "citsci"]))
-
+        if not maxn_df.empty:
             st.dataframe(
-                ann_df[
+                maxn_df[
                     [
                         "scientific_name",
-                        "time_of_max",
-                        "max_interval",
                         "annotated_by",
-                        "interval_annotation",
+                        "maxn",
+                        "time_of_max",
                         "confidence_agreement",
                         "external_id",
                     ]
@@ -326,28 +342,34 @@ def render_detailed_annotation_tab(deployment_df: pd.DataFrame, ann_db):
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "scientific_name": st.column_config.TextColumn("Scientific Name"),
-                    "time_of_max": st.column_config.TextColumn("Time of MaxN"),
-                    "max_interval": st.column_config.NumberColumn(
-                        "MaxN Count", width="small"
-                    ),
+                    "scientific_name": st.column_config.TextColumn("Species"),
                     "annotated_by": st.column_config.TextColumn(
-                        "Annotated By", width="small"
+                        "Source", width="small"
                     ),
-                    "interval_annotation": st.column_config.TextColumn(
-                        "Interval (s)", width="small"
+                    "maxn": st.column_config.NumberColumn("Peak MaxN", width="small"),
+                    "time_of_max": st.column_config.TextColumn(
+                        "Time of MaxN", width="small"
                     ),
                     "confidence_agreement": st.column_config.NumberColumn(
                         "Confidence", format="%.2f", width="small"
                     ),
                     "external_id": st.column_config.TextColumn(
-                        "External ID", width="small"
+                        "Provenance",
+                        help=(
+                            "Tracks which source produced each annotation. "
+                            "ML rows: model name (e.g. 'species_20260429_081503'). "
+                            "Expert rows: BIIGLE annotation_id — the unique ID of "
+                            "the bbox in BIIGLE; visible in the BIIGLE UI on each "
+                            "annotation's detail panel. "
+                            "CitSci rows: empty (Zooniverse classifications aren't "
+                            "individually addressable post-aggregation)."
+                        ),
                     ),
                 },
             )
         else:
             st.info(
-                f"No detailed annotations found for {selected_drop_id} in the annotations database."
+                f"No annotations found for {selected_drop_id} in the annotations database."
             )
 
 

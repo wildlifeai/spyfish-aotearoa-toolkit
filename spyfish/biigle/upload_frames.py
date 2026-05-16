@@ -4,13 +4,11 @@ Biigle volume upload for Spyfish Aotearoa.
 Two-step workflow:
   1. upload_frames_to_s3()   — push extracted JPEGs to the S3 bucket Biigle has access to
   2. create_biigle_volume()  — create an image volume in Biigle pointing at that S3 folder
-
-Ported and structured from:
-  Spyfish-Aotearoa-toolkit_old/notebooks/biigle_uploader.ipynb
 """
 
 import json
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -20,6 +18,7 @@ from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
+from spyfish.utils import load_species_labels
 
 # ── Step 1: S3 upload ────────────────────────────────────────────────────────
 
@@ -305,8 +304,14 @@ def upload_coco_annotations_to_biigle(
         cat["id"]: cat["name"] for cat in coco_data.get("categories", [])
     }
 
-    # Load species → Biigle label ID mapping from config.yaml
+    # Routing sources, in precedence order:
+    #   1. config.label_mapping — explicit per-species override
+    #   2. species_labels.csv — full BIIGLE label tree (~175 species)
+    #   3. 'bait' class → default_bait_label_id
+    #   4. Fallback → label_id (default_fish_label_id), with a warning
     label_mapping = config.label_mapping or {}
+    species_tree = load_species_labels().name_to_label_id
+    unmatched: Counter = Counter()
 
     # Build the Biigle bulk payload
     biigle_annotations = []
@@ -330,19 +335,21 @@ def upload_coco_annotations_to_biigle(
         x2, y2 = float(x + w), float(y + h)
         points = [x1, y1, x2, y1, x2, y2, x1, y2]
 
-        # Look up species name and specific Biigle label ID
         cat_id = ann.get("category_id")
         species_name = coco_cat_id_to_name.get(cat_id, "unknown")
 
-        # Routing precedence:
-        #   1. Explicit per-species mapping in label_mapping (config.yaml)
-        #   2. 'bait' class → default_bait_label_id (tree 3375 → "Bait")
-        #   3. Anything else → label_id (fallback, default = default_fish_label_id)
         if species_name in label_mapping:
             assigned_label_id = label_mapping[species_name]
+        elif species_name in species_tree:
+            assigned_label_id = species_tree[species_name]
         elif species_name == "bait":
             assigned_label_id = config.default_bait_label_id
+        elif species_name == "fish":
+            # `fish` is the model's legitimate "fish present, species unknown"
+            # class — Fish: review required is its by-design destination.
+            assigned_label_id = label_id
         else:
+            unmatched[species_name] += 1
             assigned_label_id = label_id
 
         biigle_annotations.append(
@@ -353,6 +360,16 @@ def upload_coco_annotations_to_biigle(
                 "label_id": assigned_label_id,
                 "confidence": float(ann.get("score", 1.0)),
             }
+        )
+
+    if unmatched:
+        details = ", ".join(f"{sp}×{n}" for sp, n in unmatched.most_common())
+        logging.warning(
+            f"Biigle label routing: {sum(unmatched.values())} annotation(s) across "
+            f"{len(unmatched)} species fell back to default_fish_label_id "
+            f"({config.default_fish_label_id}). Unmatched: {details}. "
+            "Add to config.yaml `biigle.label_mapping` or refresh "
+            "process_files/biigle/labels/species_labels.csv from the BIIGLE label tree."
         )
 
     if not biigle_annotations:
@@ -388,8 +405,7 @@ def upload_frames_to_biigle(
 
     # Verify COCO JSON exists before committing any uploads — a missing file means
     # frame extraction failed and the upload should not proceed at all.
-    annotations_dir = config.get_drop_annotations_dir(drop_id)
-    coco_json_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
+    coco_json_path = config.get_coco_annotations_path(drop_id)
     if not coco_json_path.exists():
         raise FileNotFoundError(
             f"COCO annotations JSON not found: {coco_json_path}. "

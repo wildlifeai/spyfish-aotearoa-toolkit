@@ -27,6 +27,7 @@ csv_mapping:
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
   time_seconds_column: "TimeAbsoluteSeconds"
+  subject_id_column: "SubjectID"  # Zooniverse subject_id — written into citsci MaxN CSVs and the annotations DB external_id for provenance
 
 # Centralized path and storage configuration
 paths:
@@ -36,8 +37,7 @@ paths:
   test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
   # Legacy directories (at project root, synced to S3)
   legacy:
-    zooniverse: "legacy/zooniverse"
-    experts: "legacy/experts"
+    zooniverse: "process_files/zooniverse/legacy_classifications"
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
@@ -92,7 +92,6 @@ extraction:
   video_start_threshold_seconds: 120 # Seconds from video start used for start-of-video health check clips
   force_binary_strategy: false       # If true, use binary strategy regardless of species count
   sample_all_clips: false            # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
-  frame_multiplier: 2                # Multiplies export counts and divides temporal_spacing for denser frame coverage
   binary_strategy:
     maxn_export: 30          # Clips at highest fish-count moments
     confusing_export: 60     # Clips with high count but low confidence (uncertain detections)
@@ -105,6 +104,10 @@ extraction:
     per_video_empty_export: 3        # Empty clips per video
     per_video_start_export: 2        # Start clips per video
     temporal_spacing_seconds: 10     # Minimum seconds between selected clips
+  ml_peak_augmentation:              # Adds frame-level ML peaks to citsci-driven BIIGLE selection (sub-second precision; catches moments volunteers missed)
+    top_k_per_species: 2             # Extra frames added per species from the ML raw CSV (top-count peaks)
+    min_confidence: 0.25             # Count detections at or above this conf — lower than maxn_conf=0.5 on purpose, surfaces transient multi-fish moments
+    citsci_dedupe_tolerance_seconds: 1.0 # Drop ML-peak rows within this many seconds of any citsci-selected frame (avoids near-duplicates)
 
 zooniverse:
   project_id: 30327          # Upload target — single project only
@@ -113,7 +116,8 @@ zooniverse:
     - 30327                  # spyfish-aotearoa-ey (EY clone workflow)
   size_limit_mb: 12.0  # Zooniverse upload limit — CRF is calibrated to stay under this
   min_clips_per_video: 30  # Minimum clips per video — if ML strategy selects fewer, top up with evenly-spaced health checks
-  min_votes: 3           # Min classifiers agreeing on a species to count as a valid detection
+  min_agreement_pct: 50.0 # Aggregator filter: drop (subject, species) rows where vote_count / total_classifiers < this. Handles the full retirement-1 (expert) → retirement-30 (broad public) range without per-workflow tuning.
+  consensus_something_here_pct: 50.0 # Consensus-fish rule: when no single species clears min_agreement_pct but at least this % of voters saw SOMETHING (votes - nothing_here_votes), emit one row with species="fish".
   max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
 
 deployment_validation:
@@ -130,9 +134,8 @@ ffmpeg:
 
 
 biigle:
-  project_id:  4626        #  4081 playground 3711 Spyfish Aotearoa project 4626 spyfish model(override with BIIGLE_PROJECT_ID env var)
-  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference (override with BIIGLE_DISK_ID env var)
-  # Report type IDs
+  project_id: 3711      #  4081 playground 3711 Spyfish Aotearoa project 4626 spyfish model
+  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
   volume_report_type_video: 10                   # TODO Volume overview report

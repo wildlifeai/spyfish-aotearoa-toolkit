@@ -14,8 +14,8 @@ import pytest
 
 from spyfish.config.base import (
     SECTIONS,
-    BiigleStatus,
     CitSciStatus,
+    ExpertStatus,
     IngestStatus,
     InvalidTransitionError,
     MlStatus,
@@ -45,7 +45,7 @@ def _all_status_values(cls):
 def test_status_values_globally_unique():
     """Every status string is unique across all section classes — no collisions."""
     all_values = []
-    for cls in [MlStatus, CitSciStatus, BiigleStatus, ReportingStatus, IngestStatus]:
+    for cls in [MlStatus, CitSciStatus, ExpertStatus, ReportingStatus, IngestStatus]:
         all_values.extend(_all_status_values(cls))
     assert len(all_values) == len(set(all_values)), (
         f"Duplicate status values found: "
@@ -61,10 +61,10 @@ def test_status_values_have_section_prefix():
         assert val.startswith(
             "citsci_"
         ), f"CitSciStatus value {val!r} missing citsci_ prefix"
-    for val in _all_status_values(BiigleStatus):
+    for val in _all_status_values(ExpertStatus):
         assert val.startswith(
             "expert_"
-        ), f"BiigleStatus value {val!r} missing expert_ prefix"
+        ), f"ExpertStatus value {val!r} missing expert_ prefix"
     for val in _all_status_values(ReportingStatus):
         assert val.startswith(
             "reporting_"
@@ -73,7 +73,7 @@ def test_status_values_have_section_prefix():
 
 def test_sections_registry_covers_all_section_classes():
     """The SECTIONS registry should be keyed by each class's COLUMN attribute."""
-    for cls in [MlStatus, CitSciStatus, BiigleStatus, ReportingStatus]:
+    for cls in [MlStatus, CitSciStatus, ExpertStatus, ReportingStatus]:
         assert cls.COLUMN in SECTIONS
         assert SECTIONS[cls.COLUMN] is cls
 
@@ -110,11 +110,10 @@ def test_ml_invalid_transition_raises(temp_db):
 # ── CitSci transitions ───────────────────────────────────────────────────────
 
 
-def test_citsci_bypass_path(temp_db):
-    """The current bypass path: pending → clips_uploaded → frames_uploaded → complete."""
+def test_citsci_happy_path(temp_db):
+    """Happy path: pending → clips_uploaded → complete (frame subjects removed)."""
     temp_db.add_or_update_deployment(drop_id=DROP)
     temp_db.advance_status(DROP, CitSciStatus.COLUMN, CitSciStatus.CLIPS_UPLOADED)
-    temp_db.advance_status(DROP, CitSciStatus.COLUMN, CitSciStatus.FRAMES_UPLOADED)
     temp_db.advance_status(DROP, CitSciStatus.COLUMN, CitSciStatus.COMPLETE)
     assert temp_db.get_deployment(DROP)["citsci_status"] == CitSciStatus.COMPLETE
 
@@ -132,25 +131,30 @@ def test_citsci_invalid_transition_raises(temp_db):
 
 def test_biigle_full_happy_path(temp_db):
     temp_db.add_or_update_deployment(drop_id=DROP)
-    temp_db.advance_status(DROP, BiigleStatus.COLUMN, BiigleStatus.UPLOADED)
-    temp_db.advance_status(DROP, BiigleStatus.COLUMN, BiigleStatus.COMPLETE)
-    assert temp_db.get_deployment(DROP)["biigle_status"] == BiigleStatus.COMPLETE
+    temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.UPLOADED)
+    temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
+    assert temp_db.get_deployment(DROP)["expert_status"] == ExpertStatus.COMPLETE
 
 
 def test_biigle_error_and_retry(temp_db):
     temp_db.add_or_update_deployment(drop_id=DROP)
-    temp_db.advance_status(DROP, BiigleStatus.COLUMN, BiigleStatus.UPLOADED)
-    temp_db.advance_status(DROP, BiigleStatus.COLUMN, BiigleStatus.ERROR)
-    temp_db.advance_status(DROP, BiigleStatus.COLUMN, BiigleStatus.PENDING)
-    assert temp_db.get_deployment(DROP)["biigle_status"] == BiigleStatus.PENDING
+    temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.UPLOADED)
+    temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.ERROR)
+    temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.PENDING)
+    assert temp_db.get_deployment(DROP)["expert_status"] == ExpertStatus.PENDING
 
 
-def test_biigle_invalid_transition_raises(temp_db):
+def test_expert_invalid_transition_raises(temp_db):
+    """COMPLETE → PENDING isn't a valid expert_status move.
+
+    Note: PENDING → COMPLETE *is* allowed (it's how non-BIIGLE direct paths,
+    e.g. legacy CSV ingest, advance without going through UPLOADED). What
+    isn't allowed is rewinding from COMPLETE back to PENDING.
+    """
     temp_db.add_or_update_deployment(drop_id=DROP)
+    temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
     with pytest.raises(InvalidTransitionError):
-        temp_db.advance_status(
-            DROP, BiigleStatus.COLUMN, BiigleStatus.COMPLETE
-        )  # pending → complete not allowed
+        temp_db.advance_status(DROP, ExpertStatus.COLUMN, ExpertStatus.PENDING)
 
 
 # ── Reporting transitions ────────────────────────────────────────────────────
@@ -222,7 +226,7 @@ def test_error_clearing_preserves_other_sections(temp_db):
     temp_db.add_validation_error(
         survey_id="KSF_20240124_BUV",
         drop_id=DROP,
-        error_type=BiigleStatus.ERROR,
+        error_type=ExpertStatus.ERROR,
         column_name="",
         error_message="Upload failed",
     )
@@ -232,7 +236,7 @@ def test_error_clearing_preserves_other_sections(temp_db):
     errors = temp_db.get_all_validation_errors()
     types = [e["ErrorType"] for e in errors if e["DropID"] == DROP]
     assert MlStatus.ERROR not in types
-    assert BiigleStatus.ERROR in types
+    assert ExpertStatus.ERROR in types
 
 
 # ── Cross-section eligibility ────────────────────────────────────────────────
@@ -275,7 +279,7 @@ def test_default_statuses_on_insert(temp_db):
     dep = temp_db.get_deployment(DROP)
     assert dep["ml_status"] == MlStatus.PENDING
     assert dep["citsci_status"] == CitSciStatus.PENDING
-    assert dep["biigle_status"] == BiigleStatus.PENDING
+    assert dep["expert_status"] == ExpertStatus.PENDING
     assert dep["reporting_status"] == ReportingStatus.PENDING
 
 
@@ -309,7 +313,7 @@ def test_get_deployments_by_section_status_rejects_unknown_column(temp_db):
 
 
 def test_advance_status_rejects_unknown_section(temp_db):
-    """advance_status has its own SECTIONS check separate from _validate_column."""
+    """advance_status has its own SECTIONS check separate from validate_column."""
     temp_db.add_or_update_deployment(drop_id=DROP)
     with pytest.raises(ValueError, match="Unknown section"):
         temp_db.advance_status(DROP, "nonexistent_section", "some_value")

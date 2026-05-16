@@ -62,7 +62,9 @@ class DropStage:
     input_statuses: list[str] | Callable[[argparse.Namespace, bool], list[str]]
     run_in_all: bool = True
     prerequisites: (
-        dict[str, str] | Callable[[argparse.Namespace, bool], dict[str, str]] | None
+        dict[str, str | list[str]]
+        | Callable[[argparse.Namespace, bool], dict[str, str | list[str]]]
+        | None
     ) = None
 
 
