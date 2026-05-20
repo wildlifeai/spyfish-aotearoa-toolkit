@@ -1,0 +1,23 @@
+# User ignore
+.env
+data/
+notebooks/wip/
+build/
+
+# old repo, to merge relevant files with the new one
+spyfish_analysis/
+*/export/*
+
+
+*__pycache__*
+*.egg-info
+
+.python-version
+.DS_Store
+.vscode/
+*/.streamlit/*
+.venv
+.idea
+
+# adding uv.lock file because it is not yet adopted by repo owners/contributors
+uv.lock

@@ -1,0 +1,342 @@
+"""
+Data validation orchestrator module.
+
+This module contains the DataValidator class that orchestrates comprehensive
+data validation using the simplified validation functions and DatasetValidator.
+"""
+
+import copy
+import logging
+from typing import Any, Dict, Optional, Set
+
+import pandas as pd
+
+from spyfish.config.wrapper import config
+from spyfish.storage.s3_handler import S3FileNotFoundError, S3Handler
+from spyfish.utils import convert_int_num_columns_to_int, normalize_file_name
+from spyfish.validation.validation_strategies import (
+    CleanRowTracker,
+    DatasetValidator,
+    ErrorChecking,
+    ErrorSource,
+    FilePresenceValidator,
+    ValidationConfig,
+    create_error,
+)
+
+
+class DataValidator:
+    """
+    Main data validation orchestrator.
+
+    Coordinates comprehensive data validation by managing validation rules,
+    datasets, and running validations. Uses DatasetValidator for each dataset.
+    """
+
+    def __init__(self):
+        """Initialize the DataValidator with default settings and validation rules."""
+        self.errors = []
+        self.errors_df = None
+        self.patterns = config.validation_patterns
+        self.s3_handler = S3Handler()
+        self.validation_rules = self._get_validation_rules()
+        self.clean_row_tracker = None
+        self.file_presence_validator = FilePresenceValidator(self.s3_handler)
+        # Cache for file differences (to avoid duplicate S3 calls)
+        self._file_differences_cache = None
+
+    def run_validation(
+        self,
+        file_presence: bool = False,
+        remove_duplicates: bool = True,
+        extract_clean_dataframes: bool = False,
+        known_files: Optional[Set[str]] = None,
+    ):
+        """Main function to run data validation."""
+        logging.info("Error validation started")
+        validation_config = ValidationConfig(
+            file_presence=file_presence,
+            remove_duplicates=remove_duplicates,
+            extract_clean_dataframes=extract_clean_dataframes,
+            known_files=known_files,
+        )
+
+        result_df = self.validate_with_config(validation_config)
+        logging.info(f"Error validation completed, {result_df.shape[0]} errors found")
+
+        if validation_config.extract_clean_dataframes:
+            summary = self.get_clean_summary()
+            logging.info(f"Data info: {summary}")
+
+        if validation_config.file_presence:
+            self.export_file_differences()
+
+        logging.info("Error validation process completed.")
+
+    def _get_validation_rules(self) -> Dict[str, Any]:
+        """Load validation rules with their associated reference datasets from S3."""
+        validation_rules = copy.deepcopy(config.validation_rules)
+        for dataset_name, rule_set in validation_rules.items():
+            try:
+                df = self.s3_handler.read_df_from_s3_csv(rule_set["file_name"])
+            except S3FileNotFoundError as e:
+                error = create_error(
+                    message=f"Dataset '{dataset_name}' could not be downloaded from '{rule_set['file_name']}', error: {e}",
+                    error_source=ErrorSource.DATASET_LOAD_ERROR.value,
+                    file_name=dataset_name,
+                )
+                self.errors.append(error)
+                df = pd.DataFrame()
+            validation_rules[dataset_name]["dataset"] = df
+        return validation_rules
+
+    def _process_datasets(self) -> None:
+        """Process each dataset with all validations."""
+        for dataset_name, rules in self.validation_rules.items():
+            file_name = normalize_file_name(rules.get("file_name", ""))
+            df = rules.get("dataset", pd.DataFrame())
+
+            if df.empty:
+                error = create_error(
+                    message="Dataset could not be loaded.",
+                    error_source=ErrorSource.DATASET_LOAD_ERROR.value,
+                    file_name=file_name,
+                )
+                self.errors.append(error)
+                continue
+
+            # Convert numerical values to integers where possible
+            df = convert_int_num_columns_to_int(df)
+
+            # Initialize clean indices for this dataset if tracker is enabled
+            if self.clean_row_tracker:
+                self.clean_row_tracker.initialize_dataset(dataset_name, df)
+
+            # Run validation using DatasetValidator
+            validator = DatasetValidator(
+                rules=rules,
+                patterns=self.patterns,
+                all_validation_rules=self.validation_rules,
+                tracker=self.clean_row_tracker,
+            )
+            dataset_errors = validator.validate(df, dataset_name)
+            self.errors.extend(dataset_errors)
+
+    def validate_with_config(self, config: ValidationConfig) -> pd.DataFrame:
+        """Orchestrate comprehensive data validation using ValidationConfig."""
+        # Initialize clean row tracker if requested
+        if config.extract_clean_dataframes:
+            self.clean_row_tracker = CleanRowTracker()
+        else:
+            self.clean_row_tracker = None
+
+        # Execute validation on all datasets
+        self._process_datasets()
+
+        if config.file_presence:
+            file_presence_errors = self.file_presence_validator.validate(
+                config.file_presence_rules,  # type: ignore
+                known_files=config.known_files,
+            )
+            self.errors.extend(file_presence_errors)
+
+        # Export and return results
+        self._export_errors_from_list_to_df(config.remove_duplicates)
+        return self.errors_df
+
+    def _export_errors_from_list_to_df(self, remove_duplicates):
+        """
+        Convert the errors list to a pandas DataFrame and optionally remove duplicates.
+
+        Transforms the list of ErrorChecking objects into a DataFrame for easier
+        analysis and export. Clears the errors list after conversion.
+
+        Args:
+            remove_duplicates (bool): Whether to remove duplicate error entries
+                from the resulting DataFrame
+
+        Side Effects:
+            - Sets self.errors_df to a DataFrame containing all error data
+            - Calls _deduplicate_errors() if remove_duplicates is True
+            - Clears self.errors list after conversion
+
+        Note:
+            Uses the __dict__ attribute of ErrorChecking objects to create
+            DataFrame columns matching the dataclass fields.
+        """
+        self.errors_df = pd.DataFrame([e.__dict__ for e in self.errors])
+
+        if remove_duplicates:
+            self._deduplicate_errors()
+        self.errors = []
+
+    def _deduplicate_errors(self):
+        """
+        Remove duplicate error entries from the errors DataFrame.
+
+        Uses all fields from the ErrorChecking dataclass to identify and remove
+        duplicate error entries. This helps reduce noise in validation reports
+        when the same error occurs multiple times.
+
+        Side Effects:
+            - Modifies self.errors_df by removing duplicate rows
+            - Resets DataFrame index after deduplication
+            - Does nothing if errors_df is empty
+
+        Note:
+            Uses all ErrorChecking dataclass fields as the subset for
+            duplicate detection, ensuring only truly identical errors are removed.
+        """
+        if self.errors_df.empty:
+            return
+
+        key_cols = list(ErrorChecking.__dataclass_fields__.keys())
+        self.errors_df = self.errors_df.drop_duplicates(
+            subset=key_cols, ignore_index=True
+        )
+
+    def get_file_differences(
+        self,
+        file_presence_rules: Dict[str, Any] = None,  # type: ignore
+    ) -> tuple:
+        """Get file differences, using cache if available.
+
+        Args:
+            file_presence_rules: Rules defining which files to check.
+
+        Returns:
+            tuple: (all_files_set, missing_files_set, extra_files_set)
+        """
+        if self._file_differences_cache is None:
+            r = (
+                file_presence_rules
+                if file_presence_rules is not None
+                else config.file_presence_rules  # type: ignore
+            )
+            self._file_differences_cache = (
+                self.file_presence_validator.get_file_differences(r)
+            )
+        return self._file_differences_cache
+
+    def export_file_differences(
+        self,
+    ) -> tuple:
+        """Export file differences to separate text files.
+
+        Uses cached file differences if available to avoid duplicate S3 calls.
+
+        Returns:
+            tuple: (all_files_set, missing_files_set, extra_files_set)
+        """
+        try:
+            (
+                all_files_set,
+                missing_files_set,
+                extra_files_set,
+            ) = self.get_file_differences(
+                config.file_presence_rules  # type: ignore
+            )
+            missing_files_data = "\n".join(sorted(missing_files_set))
+            extra_files_data = "\n".join(sorted(extra_files_set))
+
+            self.s3_handler.upload_data_to_s3(
+                missing_files_data, config.s3_missing_files
+            )
+            self.s3_handler.upload_data_to_s3(extra_files_data, config.s3_extra_files)
+
+            logging.info(
+                f"File differences exported: {len(missing_files_set)} missing, {len(extra_files_set)} extra"
+            )
+        except Exception as e:
+            logging.error(f"Failed to export file differences: {e}")
+            raise
+
+        return all_files_set, missing_files_set, extra_files_set
+
+    def get_clean_dataframe(self, dataset_name: str) -> pd.DataFrame:
+        """
+        Get clean dataframe for a specific dataset.
+
+        Args:
+            dataset_name: Name of the dataset to get clean rows for
+
+        Returns:
+            DataFrame containing only rows with no validation errors,
+            empty DataFrame if no tracker or dataset not found
+        """
+        if not self.clean_row_tracker:
+            return pd.DataFrame()
+
+        clean_indices = self.clean_row_tracker.get_clean_indices(dataset_name)
+        if not clean_indices:
+            return pd.DataFrame()
+
+        # Get the original dataset from validation rules
+        dataset_rules = self.validation_rules.get(dataset_name)
+        if not dataset_rules or "dataset" not in dataset_rules:
+            return pd.DataFrame()
+
+        original_df = dataset_rules["dataset"]
+        if original_df.empty:
+            return pd.DataFrame()
+
+        # Filter to clean rows only
+        return original_df.loc[list(clean_indices)].copy()
+
+    def get_all_clean_dataframes(self) -> Dict[str, pd.DataFrame]:
+        """
+        Get all clean dataframes.
+
+        Returns:
+            Dictionary mapping dataset names to clean DataFrames,
+            empty dict if no tracker is initialized
+        """
+        if not self.clean_row_tracker:
+            return {}
+
+        clean_dataframes = {}
+        for dataset_name in self.clean_row_tracker.clean_row_indices.keys():
+            clean_df = self.get_clean_dataframe(dataset_name)
+            if not clean_df.empty:
+                clean_dataframes[dataset_name] = clean_df
+
+        return clean_dataframes
+
+    def get_clean_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of clean vs error rows.
+
+        Returns:
+            Dictionary with summary statistics for all datasets
+        """
+        if not self.clean_row_tracker:
+            return {
+                "message": "Clean dataframe extraction was not enabled during validation",
+                "datasets": {},
+            }
+
+        summary: Dict[str, Any] = {"datasets": {}}
+
+        for dataset_name in self.clean_row_tracker.clean_row_indices.keys():
+            dataset_rules = self.validation_rules.get(dataset_name)
+            if dataset_rules and "dataset" in dataset_rules:
+                original_df = dataset_rules["dataset"]
+                clean_indices = self.clean_row_tracker.get_clean_indices(dataset_name)
+
+                total_rows = len(original_df)
+                clean_rows = len(clean_indices)
+                error_rows = total_rows - clean_rows
+
+                summary["datasets"][dataset_name] = {
+                    "total_rows": total_rows,
+                    "clean_rows": clean_rows,
+                    "error_rows": error_rows,
+                    "clean_percentage": (
+                        (clean_rows / total_rows * 100) if total_rows > 0 else 0
+                    ),
+                    "error_percentage": (
+                        (error_rows / total_rows * 100) if total_rows > 0 else 0
+                    ),
+                }
+
+        return summary
