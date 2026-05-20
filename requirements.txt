@@ -1,5 +1,5 @@
 
-. # installs spyfish
+-e . # installs spyfish
 av>=13.0.0
 boto3==1.37.17
 botocore>=1.37.17
