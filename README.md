@@ -1,6 +1,7 @@
 # Spyfish Aotearoa Pipeline
 
-Work in Progress.
+Work in Progress, we are making the pipeline more robust, so things are changing often.
+Check back in July 2026 for more info on our pipeline and how to contribute.
 
 Automated pipeline for processing marine Baited Underwater Video (BUV) data: metadata ingestion, ML inference, Zooniverse citizen science, BIIGLE expert annotation and dashboard visualisation.
 
