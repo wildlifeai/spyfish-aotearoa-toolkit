@@ -26,6 +26,7 @@ TODO — frame selection pipeline position is unresolved (in progress):
 import bisect
 import logging
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -215,6 +216,200 @@ def _select_frames_with_strategy(
     return result.sort_values(config.csv_clip_max_time_column).reset_index(drop=True)
 
 
+def _run_selection(
+    frame_df: pd.DataFrame,
+    drop_id: str,
+    output_selections_path: str,
+    source_label: str,
+) -> pd.DataFrame:
+    """Apply strategy, write selections CSV, return result.
+
+    Shared by select_frames (ML) and select_frames_from_zooniverse (citsci).
+    Callers are responsible for building and validating frame_df; this
+    function owns the strategy selection, _select_frames_with_strategy call,
+    and file write.
+    """
+    deployment = DatabaseManager().get_deployment(drop_id)
+    if not deployment or deployment.get("sampling_start") is None:
+        raise ValueError(f"Missing sampling_start for {drop_id}, cannot select frames.")
+    sampling_start = float(deployment["sampling_start"])
+
+    unique_species = frame_df[config.csv_scientific_name_column].unique()
+    is_binary = len(unique_species) <= 1 or config.force_binary_strategy
+
+    strategy = config.binary_strategy if is_binary else config.multiclass_strategy
+
+    selections_df = _select_frames_with_strategy(
+        frame_df=frame_df,
+        drop_id=drop_id,
+        sampling_start=sampling_start,
+        strategy_params=strategy,
+        is_multiclass=not is_binary,
+        video_start_threshold=config.video_start_threshold,
+        frame_cap=config.clip_cap,
+    )
+
+    Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
+    selections_df.to_csv(output_selections_path, index=False)
+    logging.info(
+        f"{len(selections_df)} frame selections for {drop_id} "
+        f"({'binary' if is_binary else 'multiclass'} strategy, "
+        f"{len(frame_df)} candidates from {source_label})."
+    )
+    return selections_df
+
+
+def _ml_peak_selections(
+    raw_csv_path: str,
+    drop_id: str,
+    sampling_start: float,
+) -> pd.DataFrame:
+    """Top-K per-species frame-level peaks from a raw ML CSV.
+
+    Citsci-driven frame selection is locked to integer-second precision
+    (Zooniverse only captures volunteer clicks at whole-second resolution),
+    so it can miss multi-fish moments that exist for less than a second.
+    This helper builds extra selection rows directly from the YOLO raw CSV
+    — preserving the inference frame's sub-second timestamp.
+
+    Counts detections at conf >= ``config.ml_peak_min_confidence`` (lower
+    than the MaxN counting threshold of 0.5 on purpose), groups by frame
+    and species, keeps top-K per species by count with mean confidence as
+    a tiebreaker. Returns rows in the same schema as ``_run_selection``'s
+    output so the caller can concat them with citsci-derived rows.
+    """
+    columns = [
+        config.drop_id_column,
+        config.csv_sampling_start_column,
+        config.csv_clip_max_time_column,
+        config.csv_scientific_name_column,
+        "SelectionReason",
+        config.csv_max_interval_column,
+        config.csv_confidence_agreement_column,
+    ]
+    if not Path(raw_csv_path).exists():
+        return pd.DataFrame(columns=columns)
+
+    raw = pd.read_csv(raw_csv_path)
+    min_conf = config.ml_peak_min_confidence
+    raw = raw[raw["confidence"] >= min_conf]
+    if raw.empty:
+        return pd.DataFrame(columns=columns)
+
+    per_frame_species = (
+        raw.groupby(["time_seconds", "class"])
+        .agg(count=("confidence", "count"), mean_conf=("confidence", "mean"))
+        .reset_index()
+    )
+    top_k = (
+        per_frame_species.sort_values(["count", "mean_conf"], ascending=[False, False])
+        .groupby("class")
+        .head(config.ml_peak_top_k_per_species)
+    )
+
+    rows = []
+    for _, r in top_k.iterrows():
+        rows.append(
+            {
+                config.drop_id_column: drop_id,
+                config.csv_sampling_start_column: sampling_start,
+                config.csv_clip_max_time_column: float(r["time_seconds"]),
+                config.csv_scientific_name_column: str(r["class"]),
+                "SelectionReason": (
+                    f"ML peak (conf>={min_conf}, count={int(r['count'])})"
+                ),
+                config.csv_max_interval_column: int(r["count"]),
+                config.csv_confidence_agreement_column: round(float(r["mean_conf"]), 4),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def select_frames_from_zooniverse(
+    maxn_csv_path: str,
+    output_selections_path: str,
+    drop_id: str,
+    ml_raw_csv_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Select frames for BIIGLE upload from a Zooniverse volunteer MaxN CSV.
+
+    One row per (clip, species) already — no grouping needed. MaxInterval is
+    the volunteer mode count; ConfidenceAgreement is agreement_pct / 100.
+    The confusion score (high count / low agreement) surfaces suspicious clips
+    without needing the separate suspicious_minority_find flag.
+
+    When ``ml_raw_csv_path`` is provided and points to an existing raw YOLO
+    CSV, the selection is augmented with top-K per-species ML peak frames
+    (see ``_ml_peak_selections``). Volunteer-clicked timestamps are integer
+    seconds, but a transient multi-fish moment can live in a sub-second
+    window — ML peaks surface those frames the volunteers couldn't pin.
+    ML peaks within ``config.ml_peak_citsci_dedupe_tolerance_seconds`` of
+    any citsci-selected frame are dropped to avoid near-duplicate uploads.
+    """
+    if not Path(maxn_csv_path).exists():
+        raise FileNotFoundError(f"Zooniverse MaxN CSV not found: {maxn_csv_path}")
+
+    frame_df = pd.read_csv(maxn_csv_path)
+    if frame_df.empty:
+        raise ValueError(
+            f"Empty Zooniverse MaxN CSV for {drop_id} — no volunteer consensus to select from."
+        )
+
+    # _run_selection expects config.csv_time_seconds_column ("TimeAbsoluteSeconds");
+    # the MaxN CSV uses config.csv_maxn_time_seconds_column ("TimeOfMaxAbsoluteSeconds").
+    frame_df = frame_df.rename(
+        columns={config.csv_maxn_time_seconds_column: config.csv_time_seconds_column}
+    )
+
+    citsci_selections = _run_selection(
+        frame_df, drop_id, output_selections_path, "Zooniverse MaxN CSV"
+    )
+
+    if not ml_raw_csv_path or not Path(ml_raw_csv_path).exists():
+        return citsci_selections
+
+    sampling_start = float(DatabaseManager().get_deployment(drop_id)["sampling_start"])
+    ml_rows = _ml_peak_selections(ml_raw_csv_path, drop_id, sampling_start)
+    if ml_rows.empty:
+        return citsci_selections
+
+    tolerance = config.ml_peak_citsci_dedupe_tolerance_seconds
+    citsci_times = citsci_selections[config.csv_clip_max_time_column].to_numpy()
+    if citsci_times.size:
+        keep_mask = ml_rows[config.csv_clip_max_time_column].apply(
+            lambda t: bool(abs(citsci_times - t).min() > tolerance)
+        )
+        ml_extra = ml_rows[keep_mask]
+    else:
+        ml_extra = ml_rows
+
+    if ml_extra.empty:
+        logging.info(
+            f"{drop_id}: ML peak augmentation found {len(ml_rows)} candidate(s), "
+            f"all within {tolerance}s of a citsci selection — no extra frames added."
+        )
+        return citsci_selections
+
+    combined = pd.concat([citsci_selections, ml_extra], ignore_index=True)
+    cap = config.clip_cap
+    if cap and len(combined) > cap:
+        # Cap by trimming the tail (ML-peak rows are appended last, so citsci
+        # selections are preserved first). Keeps volunteer intent the priority.
+        combined = combined.iloc[:cap]
+    combined = combined.sort_values(config.csv_clip_max_time_column).reset_index(
+        drop=True
+    )
+    Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(output_selections_path, index=False)
+    logging.info(
+        f"{drop_id}: augmented selection — {len(citsci_selections)} citsci "
+        f"+ {len(ml_extra)} ML peak frame(s) (capped at {cap}) → "
+        f"{len(combined)} total."
+    )
+    return combined
+
+
 def select_frames(
     raw_csv_path: str,
     output_selections_path: str,
@@ -235,7 +430,6 @@ def select_frames(
     Returns:
         DataFrame of selected frame moments.
     """
-    multiplier = config.frame_multiplier
     if not Path(raw_csv_path).exists():
         raise FileNotFoundError(f"Raw CSV not found: {raw_csv_path}")
 
@@ -270,60 +464,4 @@ def select_frames(
         config.csv_confidence_agreement_column
     ].round(4)
 
-    deployment = DatabaseManager().get_deployment(drop_id)
-    if not deployment or deployment.get("sampling_start") is None:
-        raise ValueError(f"Missing sampling_start for {drop_id}, cannot select frames.")
-    sampling_start = float(deployment["sampling_start"])
-
-    if multiplier <= 0:
-        logging.error(
-            f"multiplier is {multiplier} — must be positive. Defaulting to 1."
-        )
-    safe_multiplier = multiplier if multiplier > 0 else 1
-
-    unique_species = frame_df[config.csv_scientific_name_column].unique()
-    is_binary = len(unique_species) <= 1 or config.force_binary_strategy
-
-    if is_binary:
-        base = config.binary_strategy
-        scaled_strategy = {
-            "maxn_export": round(base["maxn_export"] * safe_multiplier),
-            "confusing_export": round(base["confusing_export"] * safe_multiplier),
-            "start_export": round(base["start_export"] * safe_multiplier),
-            "temporal_spacing_seconds": base["temporal_spacing_seconds"]
-            / safe_multiplier,
-        }
-    else:
-        base = config.multiclass_strategy
-        scaled_strategy = {
-            "per_species_maxn_export": round(
-                base["per_species_maxn_export"] * safe_multiplier
-            ),
-            "per_species_confusing_export": round(
-                base["per_species_confusing_export"] * safe_multiplier
-            ),
-            "per_video_start_export": round(
-                base["per_video_start_export"] * safe_multiplier
-            ),
-            "temporal_spacing_seconds": base["temporal_spacing_seconds"]
-            / safe_multiplier,
-        }
-
-    selections_df = _select_frames_with_strategy(
-        frame_df=frame_df,
-        drop_id=drop_id,
-        sampling_start=sampling_start,
-        strategy_params=scaled_strategy,
-        is_multiclass=not is_binary,
-        video_start_threshold=config.video_start_threshold,
-        frame_cap=round(config.clip_cap * safe_multiplier),
-    )
-
-    Path(output_selections_path).parent.mkdir(parents=True, exist_ok=True)
-    selections_df.to_csv(output_selections_path, index=False)
-    logging.info(
-        f"{len(selections_df)} frame selections for {drop_id} "
-        f"(multiplier={multiplier}, {'binary' if is_binary else 'multiclass'} strategy, "
-        f"{len(frame_df)} candidate frames from raw CSV)."
-    )
-    return selections_df
+    return _run_selection(frame_df, drop_id, output_selections_path, "ML raw CSV")

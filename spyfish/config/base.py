@@ -14,7 +14,7 @@ def get_required(config_dict, key: str, section: str = ""):
     like `""` or `0` instead if you genuinely want an absent-but-set value.
 
     Raises `KeyError` with a config.yaml-style path for easy debugging, e.g.
-    `config.yaml [zooniverse.min_votes]`.
+    `config.yaml [zooniverse.min_agreement_pct]`.
     """
     location = f"config.yaml [{section}.{key}]" if section else f"config.yaml [{key}]"
 
@@ -128,59 +128,30 @@ class CitSciStatus:
 
     PENDING = "citsci_pending"
     CLIPS_UPLOADED = "citsci_clips_uploaded"
-    CLIPS_DONE = "citsci_clips_done"
-    FRAMES_UPLOADED = "citsci_frames_uploaded"
-    FRAMES_DONE = "citsci_frames_done"
     COMPLETE = "citsci_complete"
     SKIPPED = "citsci_skipped"
     ERROR = "citsci_error"
 
-    # TODO — CLIPS_DONE / FRAMES_DONE retirement gates not yet wired.
-    #
-    # Current state:
-    #   - zooniverse-clips     : pending         → clips_uploaded
-    #   - zooniverse-images    : clips_uploaded  → frames_uploaded     (bypass gate)
-    #   - zooniverse-sync      : frames_uploaded → complete             (bypass gate)
-    # The "bypass" transitions are kept in VALID_TRANSITIONS so the pipeline runs
-    # today. sync_zooniverse_drop() only reads the bundled {drop_id}_zooniverse_maxn.csv
-    # written by spyfish.zooniverse.live_extract and ingests it
-    # as citsci annotations — it does not distinguish clip vs frame subject retirement.
-    #
-    # When the Caesar retirement check is wired up, advance through the gates:
-    #   clips_uploaded  → clips_done    once clip subjects are retired + parsed
-    #   clips_done      → frames_uploaded (or → complete for skip-frames path)
-    #   frames_uploaded → frames_done   once frame subjects are retired + parsed
-    #   frames_done     → complete
-    # Needed to make this work:
-    #   1. Split subject_completion_from_csv/api() by subject_type in
-    #      spyfish/zooniverse/parse_classifications.py (the "clip"/"frame" field is
-    #      already parsed per row — see parse_classifications ~line 314).
-    #   2. Either emit two MaxN CSVs (clip phase, frame phase) or parameterise
-    #      ingest_zooniverse_annotations() by subject_type.
-    #   3. Replace the single sync stage with two stages: one advancing clips_uploaded→
-    #      clips_done, one frames_uploaded → frames_done.
-    # At that point, DELETE the bypass edges marked below so the pipeline is forced
-    # through the gates.
+    # Happy path: pending → clips_uploaded → complete (zooniverse-sync checks retirement).
+    # Frame subjects intentionally not modelled — see git history if reintroducing.
     VALID_TRANSITIONS: dict = {
         PENDING: {CLIPS_UPLOADED, SKIPPED},
-        CLIPS_UPLOADED: {
-            CLIPS_DONE,  # retirement-gate path (future)
-            FRAMES_UPLOADED,  # bypass: remove once retirement gate wired
-            ERROR,
-        },
-        CLIPS_DONE: {FRAMES_UPLOADED, COMPLETE, ERROR},
-        FRAMES_UPLOADED: {
-            FRAMES_DONE,  # retirement-gate path (future)
-            COMPLETE,  # bypass: remove once retirement gate wired
-            ERROR,
-        },
-        FRAMES_DONE: {COMPLETE, ERROR},
-        ERROR: {CLIPS_UPLOADED, FRAMES_UPLOADED},  # retries
+        CLIPS_UPLOADED: {COMPLETE, ERROR},
+        ERROR: {CLIPS_UPLOADED},
     }
 
 
-class BiigleStatus:
-    COLUMN = "biigle_status"
+class ExpertStatus:
+    """Expert-review state for a deployment.
+
+    Source-agnostic: a drop is `expert_complete` once it has expert annotations
+    from any path (BIIGLE round-trip, legacy CSV ingest, future direct review).
+    Provenance lives on each annotation row's `external_id` field, not in this
+    status. `PENDING → COMPLETE` is allowed for non-BIIGLE direct paths;
+    `PENDING → UPLOADED → COMPLETE` is the BIIGLE pipeline path.
+    """
+
+    COLUMN = "expert_status"
 
     PENDING = "expert_pending"
     UPLOADED = "expert_uploaded"
@@ -189,7 +160,7 @@ class BiigleStatus:
     ERROR = "expert_error"
 
     VALID_TRANSITIONS: dict = {
-        PENDING: {UPLOADED, SKIPPED},
+        PENDING: {UPLOADED, SKIPPED, COMPLETE},
         UPLOADED: {COMPLETE, ERROR},
         ERROR: {PENDING},
     }
@@ -223,6 +194,6 @@ class ReportingStatus:
 #                                          and ERROR for clearing validation_errors
 #   - StageRunner._run_drop_stage()      — sets section to ERROR on exception
 
-SECTION_STATUSES: tuple = (MlStatus, CitSciStatus, BiigleStatus, ReportingStatus)
+SECTION_STATUSES: tuple = (MlStatus, CitSciStatus, ExpertStatus, ReportingStatus)
 
 SECTIONS: dict[str, type] = {s.COLUMN: s for s in SECTION_STATUSES}

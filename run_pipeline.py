@@ -1,27 +1,31 @@
 """
 Spyfish Aotearoa — Single-command pipeline runner.
 
-Happy path (no flags runs this sequence end-to-end):
+Data pipeline (no flags runs this sequence end-to-end):
 
-    ingest → ml → zooniverse-clips → zooniverse-images → zooniverse-sync
-           → biigle-upload → biigle-sync → retrain
+    ml → zooniverse-clips → zooniverse-sync → biigle-upload → biigle-sync → retrain
 
-Usage:
-    python run_pipeline.py                    # Run the happy-path sequence (default)
-    python run_pipeline.py --ingest           # Metadata ingestion
-    python run_pipeline.py --ml               # ML inference + post-processing
-    python run_pipeline.py --zooniverse-clips # Zooniverse clip extraction + upload
-    python run_pipeline.py --zooniverse-images# Zooniverse frame extraction + upload
-    python run_pipeline.py --zooniverse-sync  # Zooniverse volunteer sync-back
-    python run_pipeline.py --biigle-upload    # Biigle frame extraction + upload
-    python run_pipeline.py --biigle-sync      # Biigle annotation sync
-    python run_pipeline.py --retrain          # Model retraining
-    python run_pipeline.py --check-arrivals   # Poll S3 for newly arrived videos (off happy path)
-    python run_pipeline.py --set-targets      # Bulk-set pipeline stages from CSV  (off happy path)
-    python run_pipeline.py --legacy           # Historical backfill                (off happy path)
+    --ml                 ML inference + post-processing
+    --zooniverse-clips   Zooniverse clip extraction + upload
+    --zooniverse-sync    Zooniverse volunteer sync-back (per-subject-set API fetch)
+    --biigle-upload      Biigle frame extraction + upload
+    --biigle-sync        Biigle annotation sync
+    --retrain            Model retraining
+
+Admin / maintenance (always explicit — never run by default):
+
+    --ingest             Refresh metadata from SharePoint CSVs on S3
+    --check-arrivals     Cheap S3 poll for newly arrived videos
+    --set-targets        Bulk-set pipeline stages from CSV
+    --legacy-experts     Historical backfill: legacy expert annotations CSV
+    --legacy-zooniverse  Historical backfill: legacy Zooniverse classifications
+    --db-refresh         Reconcile DB status with on-disk + API state
+
+Typical cron pattern:
+    python run_pipeline.py --ingest   # load new metadata first
+    python run_pipeline.py            # then process the funnel
 
 Flags can be combined: python run_pipeline.py --ingest --biigle-sync
-If no flags are given, the full happy-path sequence runs.
 
 Adding a new stage: write the function, add one entry to STAGES. Argparse,
 eligibility, status transitions, and logging are wired up automatically.
@@ -36,41 +40,27 @@ from pathlib import Path
 
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
 from spyfish.biigle.upload_frames import upload_frames_to_biigle
-from spyfish.config.base import BiigleStatus, CitSciStatus, MlStatus
+from spyfish.config.base import CitSciStatus, ExpertStatus, MlStatus
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.extract_clips import extract_clips_from_selections
 from spyfish.extraction.extract_frames import extract_frames_from_selections
-from spyfish.extraction.select_frames import select_frames
+from spyfish.extraction.select_frames import (
+    select_frames,
+    select_frames_from_zooniverse,
+)
 from spyfish.log_config import log_header
+from spyfish.ml.run_inference import rerun_inference_on_extracted_frames
+from spyfish.orchestrator.db_refresh import run_db_refresh
 from spyfish.orchestrator.ingest import check_pending_arrivals, run_ingestion
 from spyfish.orchestrator.legacy_extract import ingest_legacy_expert_annotations
 from spyfish.orchestrator.ml_runner import MLRunner
 from spyfish.orchestrator.retrain_runner import run_retraining
 from spyfish.orchestrator.stage import DropStage, GlobalStage, StageRunner
 from spyfish.storage.db_sync import sync_pipeline_results
+from spyfish.zooniverse.legacy_extract import run_legacy_zooniverse_backfill
 from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
-from spyfish.zooniverse.upload import (
-    upload_clips_to_zooniverse,
-    upload_frames_to_zooniverse,
-)
-
-# ---------------------------------------------------------------------------
-# Path helper
-# ---------------------------------------------------------------------------
-
-
-def _get_common_paths(drop_id: str) -> dict:
-    """Returns standardized paths for a drop."""
-    model_name = Path(config.pipeline_model_path).stem
-    return {
-        "model_name": model_name,
-        "maxn_csv": str(config.get_maxn_csv_path(drop_id, model_name)),
-        "selections_csv": str(config.get_selections_csv_path(drop_id)),
-        "raw_csv": str(config.get_raw_csv_path(drop_id, model_name)),
-        "video_path": str(config.get_video_path(drop_id)),
-    }
-
+from spyfish.zooniverse.upload import upload_clips_to_zooniverse
 
 # ---------------------------------------------------------------------------
 # Global stage functions — run once, manage their own iteration internally
@@ -79,14 +69,6 @@ def _get_common_paths(drop_id: str) -> dict:
 
 def _run_ingest() -> None:
     run_ingestion()
-
-
-def _run_legacy() -> None:
-    """Historical backfill: expert annotation CSV + legacy Zooniverse CSV ingestion."""
-    from spyfish.zooniverse.legacy_extract import run_legacy_zooniverse_backfill
-
-    ingest_legacy_expert_annotations()
-    run_legacy_zooniverse_backfill()
 
 
 def _run_arrival_check() -> None:
@@ -121,10 +103,11 @@ def _run_ml() -> None:
     runner.finalize_batch_results(results, all_drop_ids=all_drop_ids)
 
 
-def _run_zooniverse_sync_drop(drop_id: str) -> str | None:
-    from spyfish.zooniverse.parse_classifications import sync_zooniverse_drop
+def _run_zooniverse_sync(force: bool = False) -> None:
+    """Wire to ``spyfish.zooniverse.sync.sync_zooniverse_drops``."""
+    from spyfish.zooniverse.sync import sync_zooniverse_drops
 
-    return sync_zooniverse_drop(drop_id)
+    sync_zooniverse_drops(force=force)
 
 
 def _run_biigle_sync() -> None:
@@ -146,12 +129,13 @@ def _run_retrain(
 
 def _run_zooniverse_clips_drop(drop_id: str) -> str | None:
     """Zooniverse clip selection + extraction + upload."""
-    paths = _get_common_paths(drop_id)
+    model_name = Path(config.pipeline_model_path).stem
+    maxn_csv = str(config.get_maxn_csv_path(drop_id, model_name))
+    selections_csv = str(config.get_selections_csv_path(drop_id))
+    video_path = str(config.get_video_path(drop_id))
 
     try:
-        selections_df = process_zooniverse_clips(
-            paths["maxn_csv"], paths["selections_csv"], drop_id
-        )
+        selections_df = process_zooniverse_clips(maxn_csv, selections_csv, drop_id)
     except FileNotFoundError as e:
         logging.error(f"MaxN CSV missing for {drop_id}, cannot select clips: {e}")
         return None
@@ -163,55 +147,123 @@ def _run_zooniverse_clips_drop(drop_id: str) -> str | None:
         return None
 
     clips_df = extract_clips_from_selections(
-        selections_csv_path=paths["selections_csv"],
-        video_path=paths["video_path"],
+        selections_csv_path=selections_csv,
+        video_path=video_path,
     )
     logging.info(f"Uploading {len(clips_df)} clips for {drop_id} to Zooniverse.")
     upload_clips_to_zooniverse(clips_df)
     return CitSciStatus.CLIPS_UPLOADED
 
 
-def _run_zooniverse_images_drop(drop_id: str) -> str | None:
-    """Zooniverse frame extraction + upload."""
-    paths = _get_common_paths(drop_id)
-
-    if not Path(paths["selections_csv"]).exists():
-        logging.error(
-            f"Missing selections CSV for {drop_id} — zooniverse-clips should have written it."
-        )
-        return None
-
-    frames_df = extract_frames_from_selections(
-        selections_csv_path=paths["selections_csv"],
-        video_path=paths["video_path"],
-        raw_csv_path=paths["raw_csv"],
-    )
-    logging.info(f"Uploading {len(frames_df)} frames for {drop_id} to Zooniverse.")
-    upload_frames_to_zooniverse(frames_df)
-    return CitSciStatus.FRAMES_UPLOADED
-
-
 def _run_biigle_upload_drop(drop_id: str) -> str | None:
-    """Biigle frame extraction + volume upload."""
-    paths = _get_common_paths(drop_id)
+    """Biigle frame extraction + volume upload.
+
+    Routing is "use the best available data" — independent of which CLI
+    flags were passed. The CLI mode controls *eligibility* (see
+    ``_biigle_prerequisites``); this function controls *data source*
+    given the drop's current state:
+      - ``citsci_status == citsci_complete`` → Zooniverse volunteer MaxN CSV
+        (frames at volunteer-identified peaks).
+      - otherwise → ML raw CSV (frames at model-detected peaks).
+
+    So a drop that reached citsci_complete via the full pipeline AND a
+    drop that the user is force-pushing through with ``--biigle-upload``
+    alone both take the Zooniverse path when the volunteer data exists.
+
+    On the Zooniverse path, frames are extracted at volunteer-identified
+    timestamps where the ML raw CSV has no detections, so we re-run YOLO
+    (species + binary ensemble, IoU-merged) on each extracted JPEG and
+    rebuild the COCO JSON before upload — see
+    ``rerun_inference_on_extracted_frames``. Without that step the
+    BIIGLE upload would carry blank frames and experts would annotate
+    from scratch instead of correcting model boxes.
+    """
+    model_name = Path(config.pipeline_model_path).stem
+    raw_csv = str(config.get_raw_csv_path(drop_id, model_name))
+    video_path = str(config.get_video_path(drop_id))
     biigle_selections_path = config.get_biigle_selections_csv_path(drop_id)
 
-    try:
-        select_frames(paths["raw_csv"], str(biigle_selections_path), drop_id)
-    except (FileNotFoundError, ValueError) as e:
-        logging.error(f"Biigle frame selection failed for {drop_id}: {e}")
-        return None
+    # Resolve the ML raw CSV for citsci-path peak augmentation. Prefer the
+    # canonical species-model path; fall back to any non-zooniverse-rerun
+    # raw CSV in the drop's annotations dir. Lets the augmentation pick up
+    # data from a model whose stem doesn't match config.pipeline_model_path
+    # (e.g. a binary or sweep model whose MaxN landed on disk via a one-off).
+    ml_raw_csv: str | None = None
+    if Path(raw_csv).exists():
+        ml_raw_csv = raw_csv
+    else:
+        non_rerun_raws = sorted(
+            p
+            for p in config.get_drop_annotations_dir(drop_id).glob(
+                f"{drop_id}_*_raw.csv"
+            )
+            if "zooniverse_frames" not in p.name
+        )
+        if non_rerun_raws:
+            ml_raw_csv = str(non_rerun_raws[0])
+            logging.info(
+                f"{drop_id}: using non-canonical ML raw CSV "
+                f"{Path(ml_raw_csv).name} for ML peak augmentation."
+            )
 
+    db = DatabaseManager()
+    deployment = db.get_deployment(drop_id)
+    use_zooniverse = (
+        deployment is not None
+        and deployment.get("citsci_status") == CitSciStatus.COMPLETE
+    )
+
+    # ValueError → "input is empty by design" (volunteers said NOTHINGHERE,
+    #              or ML found nothing). Nothing for the expert to review →
+    #              advance to expert_skipped so the drop exits the queue.
+    # FileNotFoundError → artifact missing despite the upstream status saying
+    #              it should exist. That's a state inconsistency, not a
+    #              "nothing to review" case → re-raise and let StageRunner
+    #              mark expert_error so it's visible.
+    try:
+        if use_zooniverse:
+            logging.info(
+                f"{drop_id}: citsci_complete — selecting frames from Zooniverse volunteer consensus."
+            )
+            select_frames_from_zooniverse(
+                str(config.get_zooniverse_maxn_csv_path(drop_id)),
+                str(biigle_selections_path),
+                drop_id,
+                ml_raw_csv_path=ml_raw_csv,
+            )
+        else:
+            select_frames(raw_csv, str(biigle_selections_path), drop_id)
+    except ValueError as e:
+        logging.info(
+            f"{drop_id}: no detections to review ({e}) — marking expert_skipped."
+        )
+        return ExpertStatus.SKIPPED
+
+    # Zooniverse-selected timestamps don't align with ML raw CSV detections,
+    # so on that path we skip the COCO write here and let the rerun-inference
+    # step write the COCO from a fresh ensemble pass.
     frames_df = extract_frames_from_selections(
         selections_csv_path=str(biigle_selections_path),
-        video_path=paths["video_path"],
-        raw_csv_path=paths["raw_csv"],
+        video_path=video_path,
+        raw_csv_path="" if use_zooniverse else raw_csv,
+        write_coco=not use_zooniverse,
     )
+
+    if use_zooniverse:
+        rerun_inference_on_extracted_frames(drop_id, frames_df)
+
     volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
     if volume_info is None:
-        return None
+        # upload_frames_to_biigle returns None when the COCO has zero
+        # annotations — no boxes for experts to correct. Skip cleanly
+        # rather than leave the drop stuck at expert_pending.
+        logging.info(
+            f"{drop_id}: BIIGLE upload skipped (no annotations in COCO) — "
+            "marking expert_skipped."
+        )
+        return ExpertStatus.SKIPPED
     logging.info(f"Biigle volume created for {drop_id}: id={volume_info.get('id')}")
-    return BiigleStatus.UPLOADED
+    return ExpertStatus.UPLOADED
 
 
 # ---------------------------------------------------------------------------
@@ -219,21 +271,34 @@ def _run_biigle_upload_drop(drop_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _biigle_prerequisites(args: argparse.Namespace, run_all: bool) -> dict[str, str]:
-    """Returns the prerequisite section condition for biigle-upload.
+def _biigle_prerequisites(
+    args: argparse.Namespace, run_all: bool
+) -> dict[str, str | list[str]]:
+    """Returns the prerequisite *eligibility* condition for biigle-upload.
 
-    Zooniverse path (default):   wait for citsci_status=complete
-    Biigle-direct (skip zooniverse): wait for ml_status=complete
+    Controls **when a drop becomes eligible**, not which data source the
+    upload uses. Per-drop data-source selection lives in
+    ``_run_biigle_upload_drop`` and always prefers Zooniverse data when
+    it's present.
+
+    Full-pipeline mode (``--zooniverse-*`` also passed, or run_all):
+        ``citsci_status IN (complete, skipped)`` — wait for Zooniverse to
+        finish (or be explicitly skipped) before pushing to BIIGLE.
+
+    Biigle-direct mode (``--biigle-upload`` alone):
+        ``ml_status = complete`` — don't wait for Zooniverse, advance any
+        drop whose ML is done. If that drop also happens to be
+        citsci_complete, ``_run_biigle_upload_drop`` will still take the
+        Zooniverse path — eligibility is loosened, the data source isn't.
     """
     skip_zooniverse = not (
         run_all
         or getattr(args, "zooniverse_clips", False)
-        or getattr(args, "zooniverse_images", False)
         or getattr(args, "zooniverse_sync", False)
     )
     if skip_zooniverse:
         return {"ml_status": MlStatus.COMPLETE}
-    return {"citsci_status": CitSciStatus.COMPLETE}
+    return {"citsci_status": [CitSciStatus.COMPLETE, CitSciStatus.SKIPPED]}
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +306,8 @@ def _biigle_prerequisites(args: argparse.Namespace, run_all: bool) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 STAGES: list = [
-    GlobalStage("ingest", "Metadata ingestion", _run_ingest),
+    # ── Admin / maintenance — off the happy path, call explicitly ────────────
+    GlobalStage("ingest", "Metadata ingestion", _run_ingest, run_in_all=False),
     GlobalStage(
         "check-arrivals",
         "Check S3 for video arrivals",
@@ -255,11 +321,24 @@ STAGES: list = [
         run_in_all=False,
     ),
     GlobalStage(
-        "legacy",
-        "Historical backfill: expert annotations + legacy Zooniverse CSVs",
-        _run_legacy,
+        "legacy-experts",
+        "Historical backfill: legacy expert annotations CSV from S3",
+        ingest_legacy_expert_annotations,
         run_in_all=False,
     ),
+    GlobalStage(
+        "legacy-zooniverse",
+        "Historical backfill: legacy Zooniverse classification CSVs",
+        run_legacy_zooniverse_backfill,
+        run_in_all=False,
+    ),
+    GlobalStage(
+        "db-refresh",
+        "Reconcile DB status with on-disk artifacts and live Zooniverse/Biigle API state",
+        run_db_refresh,
+        run_in_all=False,
+    ),
+    # ── Data pipeline — runs by default ─────────────────────────────────────
     GlobalStage("ml", "ML inference + post-processing", _run_ml),
     DropStage(
         "zooniverse-clips",
@@ -269,26 +348,17 @@ STAGES: list = [
         input_statuses=[CitSciStatus.PENDING],
         prerequisites={"ml_status": MlStatus.COMPLETE},
     ),
-    DropStage(
-        "zooniverse-images",
-        "Zooniverse image extraction",
-        _run_zooniverse_images_drop,
-        section="citsci_status",
-        input_statuses=[CitSciStatus.CLIPS_UPLOADED],
-    ),
-    DropStage(
+    GlobalStage(
         "zooniverse-sync",
-        "Zooniverse volunteer sync-back",
-        _run_zooniverse_sync_drop,
-        section="citsci_status",
-        input_statuses=[CitSciStatus.FRAMES_UPLOADED],
+        "Zooniverse volunteer sync-back (per-subject-set)",
+        _run_zooniverse_sync,
     ),
     DropStage(
         "biigle-upload",
         "Biigle frame extraction + upload",
         _run_biigle_upload_drop,
-        section="biigle_status",
-        input_statuses=[BiigleStatus.PENDING],
+        section="expert_status",
+        input_statuses=[ExpertStatus.PENDING],
         prerequisites=_biigle_prerequisites,
     ),
     GlobalStage("biigle-sync", "Biigle annotation sync", _run_biigle_sync),
@@ -332,6 +402,11 @@ def main() -> None:
         help="On --retrain, include the species training step.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="On --zooniverse-sync: re-fetch from API even if raw CSV already exists on disk",
+    )
+    parser.add_argument(
         "--ping",
         action="store_true",
         help="Connectivity check: print config summary and exit without running the pipeline",
@@ -350,6 +425,10 @@ def main() -> None:
         return
 
     def _patch_stage(s):
+        if s.flag == "zooniverse-sync":
+            return replace(
+                s, fn=functools.partial(_run_zooniverse_sync, force=args.force)
+            )
         if s.flag == "set-targets":
             return replace(
                 s, fn=functools.partial(_run_set_targets, push_s3=not args.no_upload)

@@ -1,8 +1,8 @@
 import logging
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from spyfish.config.base import (
     SECTIONS,
@@ -30,7 +30,7 @@ class DatabaseManager:
     def _read_deployments_columns(self) -> frozenset[str]:
         """Reads the actual column names from the deployments table schema.
 
-        Used by _validate_column() so the injection whitelist is derived from
+        Used by validate_column() so the injection whitelist is derived from
         the CREATE TABLE statement rather than a hand-maintained copy of it.
         """
         with self.get_connection() as conn:
@@ -39,10 +39,33 @@ class DatabaseManager:
             return frozenset(row["name"] for row in cursor.fetchall())
 
     def get_connection(self):
-        """Returns a configured SQLite connection wrapped in contextlib.closing."""
+        """Returns a configured SQLite connection wrapped in contextlib.closing.
+
+        ⚠️  DOES NOT auto-commit. Use this for SELECT queries. For DML
+        (INSERT/UPDATE/DELETE), prefer get_writable_connection() which
+        commits on exit and rolls back on exception.
+        """
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row  # Access columns by name
         return closing(conn)
+
+    @contextmanager
+    def get_writable_connection(self):
+        """Yields a SQLite connection that auto-commits on clean exit.
+
+        Use this for any DML (INSERT/UPDATE/DELETE). On exception, the
+        transaction is rolled back and the exception re-raised.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def init_db(self):
         """Creates the core 'deployments' table if it does not exist."""
@@ -60,7 +83,7 @@ class DatabaseManager:
                     ingest_status TEXT NOT NULL DEFAULT 'ok',
                     ml_status TEXT NOT NULL DEFAULT 'ml_pending',
                     citsci_status TEXT NOT NULL DEFAULT 'citsci_pending',
-                    biigle_status TEXT NOT NULL DEFAULT 'expert_pending',
+                    expert_status TEXT NOT NULL DEFAULT 'expert_pending',
                     reporting_status TEXT NOT NULL DEFAULT 'reporting_pending',
                     is_bad_deployment BOOLEAN NOT NULL DEFAULT 0,
                     sampling_start INTEGER,
@@ -85,6 +108,17 @@ class DatabaseManager:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     raise
+
+            # Idempotent rename of biigle_status → expert_status. The column
+            # represents data-presence semantics (does this drop have expert
+            # annotations from any source), not BIIGLE-pipeline-specific state.
+            # See ExpertStatus docstring in config/base.py for rationale.
+            cursor.execute("PRAGMA table_info(deployments)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "biigle_status" in cols and "expert_status" not in cols:
+                cursor.execute(
+                    "ALTER TABLE deployments RENAME COLUMN biigle_status TO expert_status"
+                )
 
             cursor.execute(
                 """
@@ -265,7 +299,7 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def _validate_column(self, column: str) -> None:
+    def validate_column(self, column: str) -> None:
         """Rejects any column name not in the deployments table schema.
 
         Caller-supplied column names (section, prerequisite keys) MUST be
@@ -287,7 +321,7 @@ class DatabaseManager:
         is the low-level setter — bypasses transition validation. Pipeline
         code should use `advance_status()` instead.
         """
-        self._validate_column(section)
+        self.validate_column(section)
         status_cls = SECTIONS.get(section)
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -315,6 +349,80 @@ class DatabaseManager:
                     (drop_id, status_cls.ERROR),
                 )
             conn.commit()
+
+    def bulk_update_section_status(
+        self,
+        drop_ids: List[str],
+        section: str,
+        new_status: str,
+        skip_if_in: Optional[List[str]] = None,
+    ) -> int:
+        """Bulk-set a section's status across many drops in one transaction.
+
+        Designed for ingest paths that need to advance hundreds of drops at
+        once (legacy CSV ingest, bootstrap orchestrator) — calling
+        `advance_status` in a Python loop is ~3 roundtrips per drop and
+        gets slow fast.
+
+        Bypasses transition validation by design; the caller is expected
+        to have verified the move is correct in aggregate (e.g. "any
+        drop with expert annotations → expert_complete"). For per-drop
+        validated transitions, use `advance_status` in a loop.
+
+        Args:
+            drop_ids: drops to update. Empty list = no-op.
+            section: column name (e.g. ExpertStatus.COLUMN).
+            new_status: target value (e.g. ExpertStatus.COMPLETE).
+            skip_if_in: optional list of current-status values to leave
+                untouched (e.g. don't overwrite COMPLETE or SKIPPED).
+
+        Returns:
+            Number of rows actually changed.
+        """
+        if not drop_ids:
+            return 0
+        self.validate_column(section)
+        status_cls = SECTIONS.get(section)
+
+        drop_placeholders = ",".join("?" * len(drop_ids))
+        where_skip = ""
+        params: List[Any] = [new_status] + list(drop_ids) + [new_status]
+        if skip_if_in:
+            skip_placeholders = ",".join("?" * len(skip_if_in))
+            where_skip = f" AND {section} NOT IN ({skip_placeholders})"
+            params.extend(skip_if_in)
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                UPDATE deployments
+                SET {section} = ?
+                WHERE drop_id IN ({drop_placeholders})
+                  AND {section} != ?
+                  {where_skip}
+                """,
+                params,
+            )
+            n_changed = cursor.rowcount
+
+            # If the target isn't ERROR, clear any error rows for these drops
+            # in this section — mirrors `update_section_status`'s behaviour.
+            if (
+                status_cls is not None
+                and new_status != status_cls.ERROR
+                and n_changed > 0
+            ):
+                cursor.execute(
+                    f"""
+                    DELETE FROM validation_errors
+                    WHERE DropID IN ({drop_placeholders})
+                      AND ErrorType = ?
+                    """,
+                    list(drop_ids) + [status_cls.ERROR],
+                )
+            conn.commit()
+        return n_changed
 
     def advance_status(self, drop_id: str, section: str, to_status: str) -> None:
         """Validated state-machine transition for any section.
@@ -447,7 +555,7 @@ class DatabaseManager:
         self, section: str, status: str
     ) -> List[Dict[str, Any]]:
         """Returns all deployments where a specific section matches the given status."""
-        self._validate_column(section)
+        self.validate_column(section)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -460,7 +568,7 @@ class DatabaseManager:
         self, section: str, statuses: List[str]
     ) -> List[Dict[str, Any]]:
         """Returns all deployments where a specific section is in the given statuses."""
-        self._validate_column(section)
+        self.validate_column(section)
         if not statuses:
             return []
         placeholders = ", ".join(["?"] * len(statuses))
@@ -476,17 +584,21 @@ class DatabaseManager:
         self,
         section: str,
         statuses: List[str],
-        prerequisites: Optional[Dict[str, str]] = None,
+        prerequisites: Optional[Dict[str, Union[str, List[str]]]] = None,
     ) -> List[Dict[str, Any]]:
         """Returns deployments eligible for processing by a pipeline stage.
 
         Filters to ingest_status='ok' (excludes bad/errored/removed deployments),
         checks that `section` is in `statuses`, and optionally checks additional
-        column=value prerequisites (e.g. ml_status='complete' for zooniverse-clips).
+        prerequisites.
+
+        ``prerequisites`` values may be a single string (column = value) or a
+        list (column IN (...)). The list form supports cases like "BIIGLE can
+        proceed when citsci is complete OR skipped".
 
         Always orders by priority DESC so high-priority drops are processed first.
         """
-        self._validate_column(section)
+        self.validate_column(section)
         if not statuses:
             return []
         placeholders = ", ".join(["?"] * len(statuses))
@@ -494,9 +606,17 @@ class DatabaseManager:
         where = [f"{section} IN ({placeholders})", "ingest_status = 'ok'"]
         if prerequisites:
             for col, val in prerequisites.items():
-                self._validate_column(col)
-                where.append(f"{col} = ?")
-                params.append(val)
+                self.validate_column(col)
+                if isinstance(val, (list, tuple, set)):
+                    vals = list(val)
+                    if not vals:
+                        continue
+                    in_placeholders = ", ".join(["?"] * len(vals))
+                    where.append(f"{col} IN ({in_placeholders})")
+                    params.extend(vals)
+                else:
+                    where.append(f"{col} = ?")
+                    params.append(val)
         query = f"SELECT * FROM deployments WHERE {' AND '.join(where)} ORDER BY priority DESC"
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -504,9 +624,9 @@ class DatabaseManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_biigle_volumes_awaiting_sync(
-        self, biigle_status: str
+        self, expert_status: str
     ) -> List[Dict[str, Any]]:
-        """Returns deployments that have a Biigle volume assigned AND are in the given biigle_status.
+        """Returns deployments that have a Biigle volume assigned AND are in the given expert_status.
 
         Used by the Biigle annotation-sync stage to find volumes that have been
         uploaded but not yet marked complete. Deliberately does NOT filter by
@@ -514,8 +634,8 @@ class DatabaseManager:
         volume was created, and we still want to sync back any annotations the
         experts produced before it was flagged.
         """
-        self._validate_column(
-            "biigle_status"
+        self.validate_column(
+            "expert_status"
         )  # defense in depth even with hardcoded value
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -524,9 +644,9 @@ class DatabaseManager:
                 SELECT drop_id, biigle_volume_id
                 FROM deployments
                 WHERE biigle_volume_id IS NOT NULL
-                  AND biigle_status = ?
+                  AND expert_status = ?
                 """,
-                (biigle_status,),
+                (expert_status,),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -710,8 +830,40 @@ class DatabaseManager:
                 )
             conn.commit()
 
+        # Advance section status for any drop that now has annotations.
+        # Data presence overrides intent: a drop with annotations is complete
+        # for that section regardless of prior pipeline state (including
+        # SKIPPED — if someone produced annotations anyway, they're done).
+        # Skip only drops already at COMPLETE for that section (idempotent).
+        # The three (source → column → complete-value) tuples are part of
+        # the fixed schema contract; hardcoded here to keep DatabaseManager
+        # decoupled from the per-section status classes.
+        section_map = [
+            ("ml", "ml_status", "ml_complete"),
+            ("citsci", "citsci_status", "citsci_complete"),
+            ("expert", "expert_status", "expert_complete"),
+        ]
+        total_advanced = 0
+        for source, section_col, complete_val in section_map:
+            drops_with_data = [d for d, c in counts_by_drop.items() if c[source] > 0]
+            if not drops_with_data:
+                continue
+            n = self.bulk_update_section_status(
+                drops_with_data,
+                section_col,
+                complete_val,
+                skip_if_in=[complete_val],
+            )
+            if n:
+                logging.info(
+                    f"sync_annotation_counts: advanced {section_col} → "
+                    f"{complete_val} for {n} drop(s)."
+                )
+            total_advanced += n
+
         logging.info(
-            f"Updated annotation counts for {len(counts_by_drop)} deployments."
+            f"Updated annotation counts for {len(counts_by_drop)} deployments "
+            f"(advanced status on {total_advanced} drop-section(s))."
         )
 
     def export_to_csv(self, output_dir: Optional[str] = None) -> List[str]:

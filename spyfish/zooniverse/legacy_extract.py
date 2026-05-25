@@ -12,13 +12,13 @@ from typing import Optional
 import pandas as pd
 
 from spyfish.config.wrapper import config
-from spyfish.utils import seconds_to_time
 from spyfish.zooniverse.parse_classifications import (
     aggregate_by_subject_species,
     get_all_db_drop_ids,
     ingest_zooniverse_annotations,
     parse_classifications,
     sample_nothing_here_clips,
+    write_zooniverse_maxn_csv,
 )
 from spyfish.zooniverse.subject_keys import SubjectKeys
 
@@ -29,10 +29,12 @@ _LEGACY_KEY_MAP: dict[str, str] = {
     # video filename
     "video_filename": SubjectKeys.VIDEO_FILENAME,
     "#video_filename": SubjectKeys.VIDEO_FILENAME,
-    # upl seconds
+    # upl seconds — the clip's start offset within the source video
     "upl_seconds": SubjectKeys.UPL_SECONDS,
     "#upl_seconds": SubjectKeys.UPL_SECONDS,
     "#UplAbsSeconds": SubjectKeys.UPL_SECONDS,
+    "UplSeconds": SubjectKeys.UPL_SECONDS,
+    "#UplSeconds": SubjectKeys.UPL_SECONDS,
     # subject type
     "SubjectType": SubjectKeys.SUBJECT_TYPE,
     "subject_type": SubjectKeys.SUBJECT_TYPE,
@@ -69,7 +71,8 @@ _LEGACY_DMY_PATTERN = re.compile(r"^([A-Z]{2,4})_(\d{3})_(\d{2})_(\d{2})_(\d{4})
 # {RESERVE}_{SITE}_{YYYY}_{MM}_{DD}  e.g. KPT_012_2021_06_03
 _LEGACY_YMD_PATTERN = re.compile(r"^([A-Z]{2,4})_(\d{3})_(\d{4})_(\d{2})_(\d{2})$")
 _REPLICATE_SUFFIX_RE = re.compile(r"^(.+_)(\d+)$")
-_NEW_FORMAT_PATTERN = re.compile(r"^[A-Z]+_\d{8}_BUV_.*")
+# Strips "_NEW" upload-suffix from reserve code: SLI_NEW_003_28_02_2022 → SLI_003_28_02_2022
+_NEW_SUFFIX_RE = re.compile(r"^([A-Z]{2,4})_NEW_")
 
 
 def build_legacy_prefix_index(db_drop_ids: list[str]) -> dict[str, list[str]]:
@@ -96,15 +99,55 @@ def build_legacy_prefix_index(db_drop_ids: list[str]) -> dict[str, list[str]]:
     return index
 
 
+def build_year_fuzzy_index(
+    db_drop_ids: list[str],
+) -> dict[tuple[str, str, str], list[str]]:
+    """
+    Group canonical drop_ids by (reserve, site, year) for year-fuzzy lookup.
+
+    Used as a fallback when the exact date in a legacy stem doesn't match
+    any DB entry — e.g. SLI_NEW_017 recorded as 03/03/2022 but the DB has
+    the survey dated 28/02/2022. Key: ("SLI", "017", "2022").
+    Each bucket is sorted so ``bucket[-1]`` yields the highest replicate.
+    """
+    index: dict[tuple[str, str, str], list[str]] = {}
+    for drop_id in db_drop_ids:
+        parts = drop_id.split("_")
+        # Format: RESERVE_YYYYMMDD_BUV_RESERVE_SITE_REPLICATE
+        if len(parts) < 6:
+            continue
+        date_part = parts[1]
+        if len(date_part) != 8 or not date_part.isdigit():
+            continue
+        reserve, year, site = parts[0], date_part[:4], parts[4]
+        key = (reserve, site, year)
+        index.setdefault(key, []).append(drop_id)
+    for bucket in index.values():
+        bucket.sort()
+    return index
+
+
 def resolve_legacy_drop_id(
-    stem: str, legacy_index: dict[str, list[str]]
+    stem: str,
+    legacy_index: dict[str, list[str]],
+    year_fuzzy_index: dict[tuple[str, str, str], list[str]] | None = None,
 ) -> Optional[str]:
     """
     Resolve a legacy filename stem to the highest-replicate canonical drop_id.
 
-    Returns ``None`` if the stem does not match either legacy pattern
-    (DMY or YMD) or if no matching canonical drop_id exists in the DB.
+    Resolution order:
+    1. Strip ``_NEW`` upload-suffix from the reserve code if present
+       (e.g. ``SLI_NEW_003_28_02_2022`` → ``SLI_003_28_02_2022``).
+    2. Exact date match via ``legacy_index`` (DMY or YMD pattern).
+    3. Year-fuzzy match via ``year_fuzzy_index``: (reserve, site, year) —
+       handles surveys where the filename date differs from the DB date by
+       days or weeks (seen in practice for SLI and KPT surveys).
+
+    Returns ``None`` if no match is found at any pass.
     """
+    # Pass 1 — strip _NEW upload-suffix so SLI_NEW_* resolves like SLI_*
+    stem = _NEW_SUFFIX_RE.sub(r"\1_", stem)
+
     m = _LEGACY_DMY_PATTERN.match(stem)
     if m:
         reserve, site, dd, mm, yyyy = m.groups()
@@ -117,11 +160,24 @@ def resolve_legacy_drop_id(
         else:
             return None
 
+    # Pass 2 — exact date
     prefix = f"{reserve}_{date_str}_BUV_{reserve}_{site}_"
     matches = legacy_index.get(prefix)
-    if not matches:
+    if matches:
+        return matches[-1]
+
+    # Pass 3 — year-fuzzy (same reserve + site + year, any month/day)
+    if year_fuzzy_index is None:
         return None
-    return matches[-1]
+    fuzzy = year_fuzzy_index.get((reserve, site, yyyy))
+    if not fuzzy:
+        return None
+    if len(fuzzy) > 1:
+        logging.warning(
+            f"Year-fuzzy: {len(fuzzy)} matches for ({reserve}, {site}, {yyyy}) — "
+            f"returning highest replicate {fuzzy[-1]}"
+        )
+    return fuzzy[-1]
 
 
 def load_classifications_from_csv(csv_paths: list[str]) -> list[dict]:
@@ -166,6 +222,10 @@ def load_classifications_from_csv(csv_paths: list[str]) -> list[dict]:
                     "created_at": row.get("created_at"),
                     "user_name": row.get("user_name"),
                     "user_id": row.get("user_id"),
+                    # Hashed-IP token; lets the aggregator distinguish anonymous
+                    # volunteers in the dedupe step. Column is present in the
+                    # standard Zooniverse classifications CSV export.
+                    "user_ip": row.get("user_ip"),
                     "annotations": annotations,
                     "subject_id": subject_id,
                     "subject_set_id": None,  # not in CSV export
@@ -179,6 +239,27 @@ def load_classifications_from_csv(csv_paths: list[str]) -> list[dict]:
     return records
 
 
+def load_retired_subject_ids_from_csv(subjects_csv_paths: list[str]) -> set[str]:
+    """
+    Return the set of subject_ids that are retired in the subjects CSV export.
+
+    Used to filter legacy classifications to retired-only before aggregation,
+    mirroring the retirement gate in fetch_classifications() for the live path.
+    A subject with a non-empty retired_at is considered retired.
+    """
+    frames = []
+    for path in subjects_csv_paths:
+        df = pd.read_csv(path, dtype=str, usecols=["subject_id", "retired_at"])
+        frames.append(df)
+
+    if not frames:
+        return set()
+
+    combined = pd.concat(frames, ignore_index=True)
+    retired = combined[combined["retired_at"].notna() & (combined["retired_at"] != "")]
+    return set(retired["subject_id"].astype(str).unique())
+
+
 def subject_completion_from_csv(subjects_csv_paths: list[str]) -> pd.DataFrame:
     """
     Per drop_id retirement completion from Zooniverse subjects CSV exports.
@@ -190,7 +271,9 @@ def subject_completion_from_csv(subjects_csv_paths: list[str]) -> pd.DataFrame:
     Returns:
         DataFrame with columns: drop_id, total, retired, pct_retired, fully_complete.
     """
-    legacy_index = build_legacy_prefix_index(get_all_db_drop_ids())
+    db_drop_ids = get_all_db_drop_ids()
+    legacy_index = build_legacy_prefix_index(db_drop_ids)
+    year_fuzzy_index = build_year_fuzzy_index(db_drop_ids)
 
     def _resolve_from_meta(meta_str: str) -> Optional[str]:
         try:
@@ -206,11 +289,13 @@ def subject_completion_from_csv(subjects_csv_paths: list[str]) -> pd.DataFrame:
         if not vf:
             return None
         stem = Path(vf).stem
-        # New format: stem is the drop_id directly. No DB validation here —
-        # we're just grouping for completion counts, not verifying existence.
-        if _NEW_FORMAT_PATTERN.match(stem):
-            return stem
-        return resolve_legacy_drop_id(stem, legacy_index)
+        # Try the strict canonical pattern first; fall through to the legacy
+        # DMY/YMD resolver for stems that don't match. Either branch returns
+        # None for unresolvable junk — caller treats that as "no drop_id".
+        try:
+            return config.validate_drop_id(stem)
+        except ValueError:
+            return resolve_legacy_drop_id(stem, legacy_index, year_fuzzy_index)
 
     frames = []
     for path in subjects_csv_paths:
@@ -246,12 +331,21 @@ def parse_legacy_classifications(
     ``drop_id`` is None by resolving the filename stem through the legacy
     prefix index. Unresolvable legacy stems stay as ``drop_id=None``.
     """
+    # Step 1 — strict parse. Warnings about missing keys and unresolved filenames
+    # are expected here: legacy subjects use old key names and non-canonical stems.
+    # Step 2 below patches both.
+    logging.info(
+        f"Legacy parse step 1/2: strict parse of {len(raw_classifications)} classifications "
+        "(warnings about missing keys and unresolved stems are expected and will be patched below)."
+    )
     df = parse_classifications(raw_classifications)
 
     if df.empty:
         return df
 
+    # Step 2 — legacy post-process: resolve DMY/YMD/year-fuzzy stems and _NEW variants.
     legacy_index = build_legacy_prefix_index(db_drop_ids)
+    year_fuzzy_index = build_year_fuzzy_index(db_drop_ids)
 
     unmatched_mask = (
         df["drop_id"].isna()
@@ -259,27 +353,33 @@ def parse_legacy_classifications(
         & (df["video_filename"].astype(str) != "")
     )
     n_unmatched = int(unmatched_mask.sum())
+    n_none_filename = int((df["drop_id"].isna() & df["video_filename"].isna()).sum())
+
     if n_unmatched == 0:
+        logging.info(
+            f"Legacy parse step 2/2: all drop_ids resolved by strict parse "
+            f"({n_none_filename} row(s) have no filename at all and stay unresolved)."
+        )
         return df
 
     n_resolved = 0
     for idx in df.index[unmatched_mask]:
         vf = df.at[idx, "video_filename"]
-        legacy_drop_id = resolve_legacy_drop_id(Path(str(vf)).stem, legacy_index)
+        legacy_drop_id = resolve_legacy_drop_id(
+            Path(str(vf)).stem, legacy_index, year_fuzzy_index
+        )
         if legacy_drop_id is None:
             continue
         df.at[idx, "drop_id"] = legacy_drop_id
         n_resolved += 1
 
+    n_still_unresolved = n_unmatched - n_resolved
     logging.info(
-        f"Legacy post-process: resolved {n_resolved}/{n_unmatched} legacy row(s)"
+        f"Legacy parse step 2/2: resolved {n_resolved}/{n_unmatched} legacy stem(s). "
+        f"{n_still_unresolved} genuinely unresolvable (pre-standard filenames, "
+        f"surveys not yet in DB — see claude_docs/todo.md resolver audit)."
     )
     return df
-
-
-# Mirrors of helpers in spyfish/zooniverse/live_extract.py — duplicated so
-# legacy is self-contained. Update both copies together if the MaxN format
-# changes.
 
 
 def _filter_to_complete_drops(
@@ -305,41 +405,6 @@ def _filter_to_complete_drops(
         f"Completion gate: {n_after}/{n_before} drop_ids fully complete and ready for export."
     )
     return df[mask].copy()
-
-
-def _export_maxn_csvs(aggregated_df: pd.DataFrame) -> None:
-    """Write one MaxN CSV per drop_id to ``config.get_zooniverse_maxn_csv_path(drop_id)``."""
-    matched = aggregated_df[aggregated_df["drop_id"].notna()].copy()
-    if matched.empty:
-        logging.warning("No matched subjects to export as MaxN CSVs.")
-        return
-
-    for drop_id, grp in matched.groupby("drop_id"):
-        rows = []
-        for _, row in grp.iterrows():
-            rows.append(
-                {
-                    config.drop_id_column: drop_id,
-                    config.csv_scientific_name_column: row["species"],
-                    config.csv_maxn_time_column: seconds_to_time(row["mode_seconds"]),
-                    config.csv_max_interval_column: row.get("mode_count", 0),
-                    config.csv_annotated_by_column: "citsci",
-                    config.csv_interval_annotation_column: config.clip_length,
-                    config.csv_confidence_agreement_column: round(
-                        row["agreement_pct"] / 100, 4
-                    ),
-                    config.csv_maxn_time_seconds_column: row["mode_seconds"],
-                }
-            )
-
-        out_path = config.get_zooniverse_maxn_csv_path(drop_id)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        (
-            pd.DataFrame(rows)
-            .sort_values(config.csv_maxn_time_column)
-            .to_csv(out_path, index=False)
-        )
-        logging.info(f"MaxN CSV → {out_path} ({len(rows)} rows)")
 
 
 # ── Orchestrator — the --legacy entry point for Zooniverse backfill ──────────
@@ -371,6 +436,25 @@ def run_legacy_zooniverse_backfill() -> None:
         logging.info(f"Legacy backfill: no *classification*.csv in {legacy_dir}.")
         return
 
+    # Load subjects CSV first so we can filter classifications to retired-only
+    # before aggregation — mirrors the retirement gate in fetch_classifications().
+    retired_subject_ids: set[str] = set()
+    if subjects_csvs:
+        logging.info(
+            f"Legacy backfill: loading {len(subjects_csvs)} subjects CSV(s) for retirement filter"
+        )
+        retired_subject_ids = load_retired_subject_ids_from_csv(
+            [str(p) for p in subjects_csvs]
+        )
+        logging.info(
+            f"Legacy backfill: {len(retired_subject_ids)} retired subject_ids loaded"
+        )
+    else:
+        logging.warning(
+            f"No *subject*.csv in {legacy_dir} — retirement filter skipped. "
+            "Download subjects export from Zooniverse project lab and place in this directory."
+        )
+
     logging.info(
         f"Legacy backfill: loading {len(classification_csvs)} classification CSV(s)"
     )
@@ -378,6 +462,15 @@ def run_legacy_zooniverse_backfill() -> None:
     if not raw:
         logging.info("Legacy backfill: no classifications loaded. Done.")
         return
+
+    if retired_subject_ids:
+        n_before = len(raw)
+        raw = [r for r in raw if str(r["subject_id"]) in retired_subject_ids]
+        n_skipped = n_before - len(raw)
+        logging.info(
+            f"Legacy retirement filter: {len(raw)} classifications kept, "
+            f"{n_skipped} skipped (non-retired subjects)."
+        )
 
     db_drop_ids = get_all_db_drop_ids()
     parsed_df = parse_legacy_classifications(raw, db_drop_ids)
@@ -389,13 +482,11 @@ def run_legacy_zooniverse_backfill() -> None:
     logging.info(f"Legacy audit log → {audit_path} ({len(aggregated_df)} rows)")
 
     if aggregated_df.empty:
-        logging.info("Legacy backfill: no rows passed min_votes filter. Done.")
+        logging.info("Legacy backfill: no rows passed agreement_pct filter. Done.")
         return
 
     if subjects_csvs:
-        logging.info(
-            f"Legacy completion gate: loading {len(subjects_csvs)} subjects CSV(s)"
-        )
+        logging.info(f"Legacy completion gate: {len(subjects_csvs)} subjects CSV(s)")
         completion_df = subject_completion_from_csv([str(p) for p in subjects_csvs])
         aggregated_df = _filter_to_complete_drops(aggregated_df, completion_df)
     else:
@@ -414,7 +505,7 @@ def run_legacy_zooniverse_backfill() -> None:
 
     # Suspicious minority finds stay in the audit CSV but do not get exported.
     export_df = aggregated_df[~aggregated_df["suspicious_minority_find"]].copy()
-    _export_maxn_csvs(export_df)
+    write_zooniverse_maxn_csv(export_df)
 
     drop_ids_to_ingest = sorted(export_df["drop_id"].dropna().unique())
     logging.info(f"Legacy backfill: ingesting {len(drop_ids_to_ingest)} drop(s)")

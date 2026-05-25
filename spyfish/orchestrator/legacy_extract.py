@@ -11,9 +11,23 @@ from spyfish.storage.s3_handler import S3Handler
 
 
 def ingest_legacy_expert_annotations():
-    """
-    Downloads legacy expert annotations from S3 and populates the annotation database.
-    Also syncs the aggregated expert_annotations count back to the main pipeline DB.
+    """Download legacy expert annotations from S3 and ingest them.
+
+    Four-step flow:
+      1. Download legacy CSV from S3.
+      2. Parse and normalise rows.
+      3. Replace existing legacy rows in spyfish_annotations.db (DELETE+INSERT,
+         keyed on annotated_by='expert' AND external_id='legacy' so this never
+         touches BIIGLE-synced expert rows).
+      4. `sync_annotation_counts()` — writes the aggregated per-drop counts
+         back to the deployments table AND advances expert_status to
+         expert_complete for any drop that gained annotations (data presence
+         is the source of truth).
+
+    **Recovery semantics.** Every step is idempotent: re-running the whole
+    function recovers from any partial failure. Step 3 is replace-on-conflict,
+    step 4 is a full recount with idempotent status advancement. If you see
+    a partial state, just re-run `--legacy-experts`.
     """
     logging.info("Starting legacy expert annotation ingestion...")
 
@@ -66,8 +80,8 @@ def ingest_legacy_expert_annotations():
 
         # 3. Insert into Annotation DB
         ann_db = AnnotationDatabaseManager()
-        # Clear only legacy expert annotations to avoid wiping Biigle-synced expert data
-        with ann_db.get_connection() as conn:
+        # Clear only legacy expert annotations to avoid wiping Biigle-synced expert data.
+        with ann_db.get_writable_connection() as conn:
             conn.execute(
                 "DELETE FROM annotations WHERE annotated_by = 'expert' AND external_id = 'legacy'"
             )
@@ -77,9 +91,11 @@ def ingest_legacy_expert_annotations():
             f"Successfully ingested {len(annotations)} expert annotations into spyfish_annotations.db"
         )
 
-        # 4. Sync counts back to main pipeline DB
+        # 4. Sync counts back to main pipeline DB. This also advances
+        # expert_status → expert_complete for any drop with annotations.
+        drop_ids = list({a["drop_id"] for a in annotations})
         main_db = DatabaseManager()
-        main_db.sync_annotation_counts()
+        main_db.sync_annotation_counts(drop_ids)
 
     except Exception as e:
         logging.error(f"Failed legacy ingestion: {e}")

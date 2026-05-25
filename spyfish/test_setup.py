@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 _SECTION_COLUMNS = {
     "ml_status",
     "citsci_status",
-    "biigle_status",
+    "expert_status",
     "reporting_status",
     "ingest_status",
 }

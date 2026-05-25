@@ -89,8 +89,7 @@ paths:
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
   legacy:
-    zooniverse: "legacy/zooniverse"
-    experts: "legacy/experts"
+    zooniverse: "process_files/zooniverse/legacy_classifications"
   metadata:
     root: "metadata"
     sharepoint_dir: "sharepoint_lists"
@@ -133,7 +132,6 @@ extraction:
   video_start_threshold_seconds: 120
   force_binary_strategy: false
   sample_all_clips: false
-  frame_multiplier: 2
   binary_strategy:
     maxn_export: 10
     confusing_export: 20
@@ -151,7 +149,7 @@ zooniverse:
   project_id: 99999
   size_limit_mb: 12.0
   min_clips_per_video: 6
-  min_votes: 3
+  min_agreement_pct: 25.0
   max_frames_per_run: 3
 
 orchestrator:

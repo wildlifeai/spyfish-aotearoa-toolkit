@@ -179,8 +179,6 @@ if presigned_url:
     st.code(presigned_url, language="text")
 
     # --- Clip extractor ---
-    # TODO: hide this section behind a dev flag (e.g. SPYFISH_DEV env var) so
-    # non-dev installs can avoid PyAV entirely.
     st.divider()
     st.subheader("✂️ Extract Clip")
     col1, col2 = st.columns(2)

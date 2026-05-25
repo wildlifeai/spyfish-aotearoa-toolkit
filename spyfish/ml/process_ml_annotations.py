@@ -136,6 +136,7 @@ def _ingest_ml_annotations(
                 "drop_id": drop_id,
                 "scientific_name": row[config.csv_scientific_name_column],
                 "time_of_max": row[config.csv_maxn_time_column],
+                "time_of_max_seconds": row.get(config.csv_maxn_time_seconds_column),
                 "max_interval": row[config.csv_max_interval_column],
                 "annotated_by": "ml",
                 "interval_annotation": "",
@@ -143,12 +144,14 @@ def _ingest_ml_annotations(
                 "external_id": model_name,
             }
         )
-    # TODO check if this is wanted behaviour.
-    # Always clear previous ML annotations before writing new ones.
-    # If annotations_to_add is empty (zero detections above threshold), we still
-    # need to wipe stale rows from any prior run — skipping the clear would leave
-    # the old count in the DB while the MaxN CSV on disk shows zero detections.
-    ann_db.clear_annotations(drop_id, "ml")
+    # Clear only this model's prior rows before re-writing. Scoping by
+    # external_id (the model name) means re-running one model leaves any
+    # other model's outputs intact in the DB — supports running both
+    # binary and species pipelines on the same drop and comparing them
+    # side-by-side via the dashboard's Provenance column.
+    # The clear must still run when annotations_to_add is empty so a zero-
+    # detection re-run wipes stale rows from a prior run of THIS model.
+    ann_db.clear_annotations(drop_id, "ml", external_id=model_name)
     if annotations_to_add:
         ann_db.add_annotations(annotations_to_add)
         logging.debug(
@@ -182,7 +185,6 @@ def _run_qa_visualizations(
     if raw_df.empty or maxn_df.empty:
         logging.debug(f"Skipping QA frame drawing for {drop_id}: no raw detections.")
         return
-    
 
     top_maxn = maxn_df.nlargest(4, config.csv_max_interval_column)
     low_conf = maxn_df.nsmallest(4, config.csv_confidence_agreement_column)
@@ -196,7 +198,7 @@ def _run_qa_visualizations(
             continue
         frame_indices.append(int(closest["frame"].iloc[0]))
 
-    # 4 evenly-spaced random frames across the detected range for general coverage  
+    # 4 evenly-spaced random frames across the detected range for general coverage
     t_min, t_max = raw_df["time_seconds"].min(), raw_df["time_seconds"].max()
     if t_max > t_min:
         boundaries = np.linspace(t_min, t_max, 5)  # 4 equal bands
@@ -207,9 +209,9 @@ def _run_qa_visualizations(
             ]
             if not band.empty:
                 frame_indices.append(int(band.sample(1)["frame"].iloc[0]))
-    # First and last detected frames — quick visual check on detection coverage  
-    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))                                                           
-    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))  
+    # First and last detected frames — quick visual check on detection coverage
+    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))
+    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))
 
     # First and last detected frames — quick visual check on detection coverage
     frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))

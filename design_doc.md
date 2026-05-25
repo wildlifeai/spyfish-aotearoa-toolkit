@@ -268,6 +268,49 @@ graph TB
 
 These are complementary tools, not alternatives to each other.
 
+**Streamlit pages (`app/pages/`):**
+
+| Page | Purpose |
+| ---- | ------- |
+| `⚙️_Deployment_Management.py` | Per-deployment pipeline status, filtering, and per-drop MaxN annotation view (uses `get_maxn_summary()`) |
+| `📈_Health_Dashboard.py` | Programme-level health: deployments per year, bad deployment rates (sorted by %, with 10% threshold reference line), validation errors by type and by failing column, pipeline funnel, annotation depth per survey (stacked horizontal funnel: none → ML → CitSci → Expert), video presence, protection status breakdown |
+| `🧪_Experiments.py` | Read-only ecological sandbox — 15 experiments grouped by category (reserve effect / programme overview / species deep-dive / source quality / distribution). Global filters at the top (source, year range, reserves) apply to every experiment. Pills navigation. See "Experiments architecture" below for the full list. |
+| `🔍_Error_Review.py` | Validation errors per survey |
+| `📥_Export_Biigle_Annotations.py` | On-demand annotation download from Biigle API |
+| `📊_Model_Metrics.py` | ML training results (mAP, per-class metrics, confusion matrix) |
+| `📺_View_Deployment_Videos.py` | Video player for individual deployments |
+
+Species names in `🧪_Experiments.py` are displayed as `"Common name (Scientific name)"` using a lookup loaded from `process_files/training/class_map.json` (`config.class_map_path`) via `load_common_names()`. Species without a common name in the class map fall back to scientific name only.
+
+**Experiments architecture (`🧪_Experiments.py`):**
+
+The page loads MaxN data + sites + class_map once, enriches it (parses `drop_id` → `reserve_code` / `site_id` / `survey_year`, joins `sites.protection_status`, attaches `display_name`), then renders three global filter widgets at the top: source picker (with per-source deployment-count labels: `expert (1049 deps)`), year-range slider, and reserve multiselect.
+
+Two filtered dataframes are passed to every experiment via a `ctx` dict:
+
+- `df` — year/reserve filters + single-source filter applied. Used by most experiments.
+- `df_multi` — year/reserve filters only; all sources retained. Used by **Calibration** and **Disagreement**, which by nature need both sources for every comparison point.
+
+`ctx` also carries the project-wide `protection_status → colour` map (blues for protected, warm for unprotected) and the loaded `sites` / `common_names` for experiments that need to re-query (e.g. **Species search**).
+
+| Category | Experiment | Question answered |
+| -------- | ---------- | ----------------- |
+| Reserve effect | Reserve effect (slope) | Does protection help each species? Up-sloping line = stronger inside reserve. |
+| Reserve effect | Heatmap | Which sites have which species, grouped by protection status (vertical divider). |
+| Reserve effect | Year trend | Year-on-year MaxN per site for a chosen species. |
+| Programme overview | Detection rate | What % of deployments saw each species (common / intermediate / rare). |
+| Programme overview | Composition | Top-N species relative abundance per reserve (stacked bar). |
+| Programme overview | Diversity | Shannon / Simpson / Evenness per reserve. |
+| Programme overview | Leaderboard | Top sites by Sum / Mean / Species richness. |
+| Programme overview | Accumulation | Cumulative species discovered vs deployments surveyed (resampled, 95% CI). |
+| Species deep-dive | Species search | Per-species lookup → every (drop, time) observation sorted by source priority. Uses `search_species_annotations(scientific_name)` — cached per-species query. |
+| Species deep-dive | Bait arrival | Distribution of `time_of_max_seconds` per species (violin). |
+| Species deep-dive | Freq × abundance | Hanski plot: each species classified as core / patchy / transient / incidental by median lines. |
+| Species deep-dive | Co-occurrence | Species × species heatmap; cell = min-normalised intersection. |
+| Source quality | Calibration | ML vs Expert scatter with R², slope, mean bias, MAE. |
+| Source quality | Disagreement | |MaxN_A − MaxN_B| heatmap per (drop, species). |
+| Distribution | Box plot | Full distribution of reserve effect (complements the slope chart). |
+
 ---
 
 ## 4. Technical Architecture
@@ -286,7 +329,7 @@ These are complementary tools, not alternatives to each other.
 | Citizen science          | Zooniverse (panoptes_client)                   | Volunteers classify clips/frames into top species + "other"; intentionally simplified   |
 | Volunteer data reduction | Caesar (Zooniverse)                            | Subject-level reduction rules; determines when a subject has sufficient classifications |
 | Expert annotation        | BIIGLE (REST API)                              | Full expert species list; bounding boxes; future: substrate analysis + size review      |
-| Ops dashboard            | Streamlit                                      | Python-native; suitable for team + external contributors without DOC system access      |
+| Ops dashboard            | Streamlit + Plotly                             | Python-native; suitable for team + external contributors without DOC system access      |
 | Reporting dashboard      | PowerBI                                        | DOC-facing; connects to SharePoint for deployment metadata; MaxN maps & graphs          |
 | Metadata input           | PowerApps (BUV Survey app, BUV Deployment app) | Mobile-first field data entry for rangers                                               |
 | Video upload             | Video Uploader App (desktop, Gitlab/BytesNZ)   | Concatenates GoPro segments and uploads to S3                                           |
@@ -395,17 +438,15 @@ flowchart TD
 
     H -->|"Zooniverse path"| I["Step 4: Zooniverse Clips<br/>Select representative 10s clips<br/>MaxN peaks, confusing, empty, start<br/>Extract MP4 clips via FFmpeg<br/>Upload to Zooniverse subject sets<br/>citsci_status: citsci_pending → citsci_clips_uploaded"]
 
-    I --> J["Step 5: Zooniverse Frames<br/>Extract JPEG frames at MaxN timestamps<br/>Generate COCO JSON with boxes<br/>Upload to Zooniverse<br/>citsci_status: citsci_clips_uploaded → citsci_frames_uploaded"]
-
-    J --> K["Step 5b: Volunteer Sync<br/>Caesar checks classification counts<br/>When threshold met: download and parse<br/>annotated_by = citsci<br/>citsci_status: citsci_frames_uploaded → citsci_complete"]
+    I --> K["Step 5: Volunteer Sync<br/>Per-subject-set retirement check via Panoptes API<br/>Fetch classifications for retired clips sets<br/>Aggregate by (subject, species), write MaxN CSV<br/>annotated_by = citsci<br/>citsci_status: citsci_clips_uploaded → citsci_complete"]
 
     H -->|"Biigle-direct path<br/>(skip Zooniverse)"| L
 
-    K --> L["Step 6: BIIGLE Upload<br/>Select frames (denser, frame_multiplier=2)<br/>Extract JPEGs + COCO JSON<br/>Upload frames to S3<br/>Create BIIGLE image volume<br/>biigle_status: expert_pending → expert_uploaded"]
+    K --> L["Step 6: BIIGLE Upload<br/>Frame selection: from volunteer MaxN if citsci_complete,<br/>else from raw ML CSV<br/>Extract JPEGs + COCO JSON<br/>Upload frames to S3<br/>Create BIIGLE image volume<br/>expert_status: expert_pending → expert_uploaded"]
 
     L --> M["Expert annotates in BIIGLE<br/>Draws bounding boxes<br/>Marks volume Done"]
 
-    M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>biigle_status: expert_uploaded → expert_complete"]
+    M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>expert_status: expert_uploaded → expert_complete"]
 
     N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, identify floor species (rare → 'fish' fallback)<br/>Survey-aware 70/15/15 split (with force-val overrides)<br/>Train YOLOv12 (optimizer/lr/dropout from config)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
 
@@ -433,6 +474,12 @@ graph TB
 All three are stored in the same `annotations` table. The `annotated_by` field contains `'citsci'` or `'expert'` for those sources, and the **model name** (e.g. `cfd_binary_water_20260301`) for ML annotations — so model versioning is preserved per-record in the `external_id` column.
 
 **Expert review model:** Experts aim to review approximately **~10 frames per deployment** (or at survey level). If the ML + citsci signal looks wrong, a closer per-frame review can be triggered. This keeps expert effort tractable at ~1,000 deployments/year while still producing ground-truth labels for model retraining.
+
+**Volunteer data shape — what's in Zooniverse exports.** Three facts to know when working with the legacy classification CSVs or the live Panoptes API:
+
+- `user_ip` is **hashed** in exports — a 20-char hex digest, deterministic per IP within a project. Useful as a `_volunteer_key` fallback when `user_id` and `user_name` are both null (anonymous classifications), but not reversible. **Country / geographic distribution cannot be derived from these CSVs**; if needed, ask Zooniverse for an aggregated server-side report.
+- `metadata.session` is a **browser-session UUID**, not an active-annotation session. The same UUID persists across multi-hour idle windows. For "longest session" or activity-burst analyses, reconstruct from `created_at` gaps (e.g. cut on gaps ≥30 min) rather than trusting the session field.
+- **Workflows split by task type.** Each project runs `... (movies)` workflows for 10-second video clips and historically also ran a `Fish detection (photos)` workflow for still frames (frame uploads have since been removed from the pipeline but the legacy classifications remain in exports). Per-classification timing is structurally different between the two — any speed-based quality filter must key on `workflow_id` rather than treat the project as homogeneous, since 6-8 s is normal on photos but suspicious on a 10-s clip.
 
 **BIIGLE future scope:** Beyond species identification, BIIGLE is planned for **substrate analysis** and **size review** using the same upload/sync pipeline steps — only the downstream parsing logic changes when downloading annotations.
 
@@ -529,7 +576,7 @@ erDiagram
         text ingest_status
         text ml_status
         text citsci_status
-        text biigle_status
+        text expert_status
         text reporting_status
         text video_presence
         text video_path
@@ -591,8 +638,8 @@ erDiagram
 | `drop_id`            | TEXT PK   | Unique deployment identifier (`{Reserve}_{YYYYMMDD}_BUV_{Reserve}_{Site}_{Rep}`)                                                |
 | `ingest_status`      | TEXT      | Data quality: `ok`, `excluded`, `metadata_error`, `validation_error`, `removed`. Only `ok` advances through stages.             |
 | `ml_status`          | TEXT      | ML section: `ml_pending`, `ml_ready`, `ml_running`, `ml_complete`, `ml_error`                                                   |
-| `citsci_status`      | TEXT      | Citizen science section: `citsci_pending`, `citsci_clips_uploaded`, `citsci_frames_uploaded`, `citsci_complete`, `citsci_error` |
-| `biigle_status`      | TEXT      | BIIGLE section: `expert_pending`, `expert_uploaded`, `expert_complete`, `expert_error`                                          |
+| `citsci_status`      | TEXT      | Citizen science section: `citsci_pending`, `citsci_clips_uploaded`, `citsci_complete`, `citsci_error`, `citsci_skipped` |
+| `expert_status`      | TEXT      | BIIGLE section: `expert_pending`, `expert_uploaded`, `expert_complete`, `expert_error`                                          |
 | `reporting_status`   | TEXT      | Reporting section: `reporting_pending`, `reporting_complete`, `reporting_error`                                                 |
 | `video_presence`     | TEXT      | `present`, `archived` (DEEP_ARCHIVE — needs restore), `absent`, `no_video_bad_dep`                                              |
 | `video_path`         | TEXT      | S3 key of the deployment video                                                                                                  |
@@ -600,7 +647,7 @@ erDiagram
 | `sampling_end`       | INTEGER   | End of valid sampling window (seconds)                                                                                          |
 | `is_bad_deployment`  | BOOLEAN   | Flagged as problematic in source CSV; still tracked through pipeline                                                            |
 | `priority`           | INTEGER   | Processing priority. Higher = picked up first. Default 0.                                                                       |
-| `ml_annotations`     | INTEGER   | Count of ML annotations — **owned by `sync_annotation_counts()`, never set by ingest**                                          |
+| `ml_annotations`     | INTEGER   | Count of ML annotations — **owned by `sync_annotation_counts()`, never set by ingest.** See "Annotation count → status invariant" below. |
 | `citsci_annotations` | INTEGER   | Count of volunteer annotations — same ownership rule                                                                            |
 | `expert_annotations` | INTEGER   | Count of expert annotations                                                                                                     |
 | `biigle_volume_id`   | TEXT      | BIIGLE volume ID, set when the volume is created                                                                                |
@@ -612,20 +659,38 @@ erDiagram
 #### `annotations` table columns (`spyfish_annotations.db`)
 
 
-| Column                 | Type       | Description                                                           |
-| ---------------------- | ---------- | --------------------------------------------------------------------- |
-| `id`                   | INTEGER PK | Auto-increment                                                        |
-| `drop_id`              | TEXT FK    | Links back to `deployments`                                           |
-| `scientific_name`      | TEXT       | Species name                                                          |
-| `time_of_max`          | TEXT       | `HH:MM:SS` timestamp of the MaxN moment                               |
-| `max_interval`         | INTEGER    | Fish count at the MaxN moment                                         |
+| Column                 | Type       | Description                                                            |
+| ---------------------- | ---------- | ---------------------------------------------------------------------- |
+| `id`                   | INTEGER PK | Auto-increment                                                         |
+| `drop_id`              | TEXT FK    | Links back to `deployments`                                            |
+| `scientific_name`      | TEXT       | Scientific name (normalised — see note below)                          |
+| `time_of_max`          | TEXT       | `HH:MM:SS` timestamp of the MaxN moment                                |
+| `time_of_max_seconds`  | REAL       | Same timestamp as decimal seconds; used for filtering and time-series  |
+| `max_interval`         | INTEGER    | Fish count at the MaxN moment                                          |
 | `annotated_by`         | TEXT       | Source: model name (ML), `'citsci'` (Zooniverse), `'expert'` (BIIGLE) |
-| `confidence_agreement` | REAL       | YOLO confidence (ML) or volunteer agreement % as decimal (citsci)     |
-| `external_id`          | TEXT       | Model name for ML records; BIIGLE annotation ID for expert records    |
-| `created_at`           | TIMESTAMP  | Record creation time                                                  |
+| `confidence_agreement` | REAL       | YOLO confidence (ML) or volunteer agreement % as decimal (citsci)      |
+| `external_id`          | TEXT       | Model name for ML records; BIIGLE annotation ID for expert records     |
+| `created_at`           | TIMESTAMP  | Record creation time                                                   |
 
 
-> `**external_id` dual role:** For ML annotations, `external_id` stores the model name (e.g. `cfd_binary_water_20260301`). For expert annotations, it stores the BIIGLE annotation ID. This allows model versioning to be traced per-record without a separate column.
+> **`external_id` dual role:** For ML annotations, `external_id` stores the model name (e.g. `cfd_binary_water_20260301`). For expert annotations, it stores the BIIGLE annotation ID. This allows model versioning to be traced per-record without a separate column.
+
+> **`scientific_name` normalisation (citsci path):** Zooniverse volunteers select choice keys (`BLUECOD`, `SNAPPER`, etc.). These are resolved to scientific names by `_zoo_choice_to_scientific()` in `parse_classifications.py` before the MaxN CSV is written. The mapping is derived at runtime from `process_files/biigle/labels/species_labels.csv` (the Biigle label tree export, format `"Common name - Scientific name"`). Choice keys with no match (e.g. `OTHER`, or legacy common-name variants we haven't catalogued) map to the generic `"fish"` fallback — same semantics as the binary-fish floor the ML model uses for rare species. Dropping them would lose meaningful signal ("the volunteer saw a fish but couldn't ID it"). Blank/null choices return `None` and are skipped. Any citsci annotations ingested before this normalisation step was added retain the raw choice key and must be re-ingested from the MaxN CSVs to correct them.
+
+> **`get_maxn_summary()` query:** Returns the canonical peak MaxN per `(drop_id, scientific_name, annotated_by)` using a correlated subquery that selects the row with the highest `max_interval`. This ensures `time_of_max_seconds` and `confidence_agreement` come from the actual peak row rather than an arbitrary row (which is what a plain `GROUP BY` returns in SQLite).
+
+### Annotation count → status invariant
+
+`DatabaseManager.sync_annotation_counts(drop_ids)` is the **single chokepoint** that maintains the invariant:
+
+```
+annotations exist for source X on drop D
+   ⇒ deployments.<X>_status = '<X>_complete' for drop D
+```
+
+After computing per-drop counts from `spyfish_annotations.db` and writing them to the deployments table, it advances the matching section status for any drop that gained annotations. Implementation uses `bulk_update_section_status()` (one `UPDATE` per source, single transaction) and **bypasses the state machine** — data presence overrides intent, so a drop with `expert_skipped` AND `expert_annotations > 0` becomes `expert_complete`. Drops already at COMPLETE are left alone (idempotent). The all-NOTHINGHERE case (zero observations after full citsci review) needs explicit advancement because the count-based rule can't see it; `ingest_zooniverse_annotations` handles this via a direct `bulk_update_section_status` call in the empty-CSV branch.
+
+Every ingest path (`legacy_extract`, `ingest_zooniverse_annotations`, `_ingest_ml_annotations`, future BIIGLE sync, future bootstrap orchestrator) calls `sync_annotation_counts(drops)` at the end and gets status advancement for free. **Future ingest paths should follow the same pattern** — write annotations to the annotations DB, then call `sync_annotation_counts` with the affected drops. No manual status maintenance in the ingest path.
 
 ### Two-database design
 
@@ -644,13 +709,13 @@ validation_errors (QA)
 Each deployment has **five independent section columns** that progress separately. This replaces the old single linear `status` field.
 
 ```
-ingest_status     ml_status           citsci_status         biigle_status     reporting_status
+ingest_status     ml_status           citsci_status         expert_status     reporting_status
 ─────────────     ─────────           ─────────────         ─────────────     ────────────────
 ok                ml_pending → ml_ready   citsci_pending            expert_pending    reporting_pending
 excluded          ml_running              citsci_clips_uploaded     expert_uploaded   reporting_complete
-validation_error  ml_complete             citsci_frames_uploaded    expert_complete   reporting_error
-                  ml_error                citsci_complete
-                                          citsci_error
+validation_error  ml_complete             citsci_complete           expert_complete   reporting_error
+                  ml_error                citsci_error
+                                          citsci_skipped
 ```
 
 **Key design decisions:**
@@ -682,12 +747,12 @@ Each deployment progresses through five independent sections. Sections are not s
 ```
 ingest   ──────────────────────────────────────────────────────── data quality gate (never advances through pipeline)
 ml       ml_pending → ml_ready → ml_running → ml_complete → ml_error
-citsci   citsci_pending → citsci_clips_uploaded → citsci_frames_uploaded → citsci_complete → citsci_error
+citsci   citsci_pending → citsci_clips_uploaded → citsci_complete → citsci_error
 biigle   expert_pending → expert_uploaded → expert_complete → expert_error
 reporting reporting_pending → reporting_complete → reporting_error
 ```
 
-A deployment is considered **complete** when `biigle_status = expert_complete` OR `reporting_status = reporting_complete`.
+A deployment is considered **complete** when `expert_status = expert_complete` OR `reporting_status = reporting_complete`.
 
 ### Section state machines
 
@@ -722,38 +787,28 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> citsci_pending : Added at ingestion
     citsci_pending --> citsci_clips_uploaded : zooniverse-clips: extract + upload clip subjects
-
-    citsci_clips_uploaded --> citsci_frames_uploaded : zooniverse-images: extract + upload frame subjects (bypass)
-    citsci_clips_uploaded --> citsci_clips_done : (future) Caesar retirement + parse
-    citsci_clips_done --> citsci_frames_uploaded : zooniverse-images after retirement gate
-    citsci_clips_done --> citsci_complete : skip-frames path
-
-    citsci_frames_uploaded --> citsci_complete : zooniverse-sync: ingest MaxN CSV (bypass)
-    citsci_frames_uploaded --> citsci_frames_done : (future) Caesar retirement + parse
-    citsci_frames_done --> citsci_complete
-
+    citsci_clips_uploaded --> citsci_complete : zooniverse-sync: clips retired, ingest MaxN CSV
     citsci_clips_uploaded --> citsci_error
-    citsci_frames_uploaded --> citsci_error
     citsci_error --> citsci_clips_uploaded : Retry
-    citsci_error --> citsci_frames_uploaded : Retry
 ```
 
 
 
-> **TODO — retirement gates:** `citsci_clips_done` and `citsci_frames_done` are defined but **not yet wired**. Today, the pipeline uses the two "bypass" edges (`citsci_clips_uploaded → citsci_frames_uploaded` and `citsci_frames_uploaded → citsci_complete`) because `sync_zooniverse_drop()` reads a single bundled `{drop_id}_zooniverse_maxn.csv` and does not distinguish clip-subject retirement from frame-subject retirement. When the Caesar retirement check is implemented, the sync should split by `subject_type` (already parsed — see `parse_classifications.py` ~line 314), advance `citsci_clips_uploaded → citsci_clips_done` and `citsci_frames_uploaded → citsci_frames_done`, and the two bypass edges in `CitSciStatus.VALID_TRANSITIONS` should be deleted. Full implementation notes in the TODO block on `CitSciStatus` in `spyfish/config/base.py`.
+> **Zooniverse subjects are clips only.** Volunteers classify clip subjects; the section transitions are `citsci_pending → citsci_clips_uploaded → citsci_complete`, with the final step driven by `--zooniverse-sync` checking per-subject-set retirement via the Panoptes API. Frame extraction in `select_frames.py` exists only for `--biigle-upload` (expert review on BIIGLE).
 
-`**biigle_status`** — BIIGLE expert annotation section:
+`**expert_status`** — expert annotation section. **Source-agnostic.** A drop is `expert_complete` once it has expert annotations from any path (BIIGLE round-trip, legacy CSV ingest, future direct review). Provenance lives on each annotation row's `external_id` field (BIIGLE annotation ID, `"legacy"`, etc.), not in this status.
 
 ```mermaid
 stateDiagram-v2
     [*] --> expert_pending : Added at ingestion
-    expert_pending --> expert_uploaded : Frames uploaded, BIIGLE volume created
-    expert_uploaded --> expert_complete : Volume marked Done, annotations synced
+    expert_pending --> expert_uploaded : Frames uploaded to BIIGLE
+    expert_pending --> expert_complete : Direct ingest (legacy CSV, data-presence rule)
+    expert_uploaded --> expert_complete : BIIGLE volume marked Done, annotations synced
     expert_uploaded --> expert_error
     expert_error --> expert_pending : Retry
 ```
 
-
+> **Direct `pending → complete` edge for non-BIIGLE paths.** `--legacy-experts` (and any future direct-ingest path) calls `sync_annotation_counts(drop_ids)` at the end, which is the **single chokepoint** that maintains the invariant `annotations exist → status complete`. The data-presence rule lives in `DatabaseManager.sync_annotation_counts()` and uses `bulk_update_section_status()` to advance any drop with non-zero annotations to the section's COMPLETE value, regardless of prior state — including `SKIPPED`, because data presence overrides intent. Idempotent: drops already at COMPLETE are left alone. See "Annotation count → status invariant" below.
 
 `**reporting_status**` — Reporting section (currently placeholder):
 
@@ -777,9 +832,9 @@ Stage eligibility is resolved at query time via `get_deployments_eligible(sectio
 | `check-arrivals`    | `ml_status`     | `[ml_pending]`            | `video_presence = absent`                                                                   |
 | `ml`                | `ml_status`     | `[ml_ready]`              | —                                                                                           |
 | `zooniverse-clips`  | `citsci_status` | `[citsci_pending]`        | `ml_status = ml_complete`                                                                   |
-| `zooniverse-images` | `citsci_status` | `[citsci_clips_uploaded]` | —                                                                                           |
-| `biigle-upload`     | `biigle_status` | `[expert_pending]`        | `ml_status = ml_complete` OR `citsci_status = citsci_complete` (callable, depends on flags) |
-| `biigle-sync`       | `biigle_status` | `[expert_uploaded]`       | `biigle_volume_id IS NOT NULL`                                                              |
+| `zooniverse-sync`   | `citsci_status` | `[citsci_clips_uploaded]` | — (checks clips subject set retirement via Panoptes API)                                    |
+| `biigle-upload`     | `expert_status` | `[expert_pending]`        | `ml_status = ml_complete` OR `citsci_status = citsci_complete` (callable, depends on flags) |
+| `biigle-sync`       | `expert_status` | `[expert_uploaded]`       | `biigle_volume_id IS NOT NULL`                                                              |
 
 
 **Biigle-direct path:** Running `--biigle-upload` without any `--zooniverse-`* flags sets the prerequisite to `ml_status = ml_complete`, bypassing the citizen science loop.
@@ -851,7 +906,7 @@ graph TD
 
 
 
-> **⚠️ TODO — frame selection stage position is unresolved.** The `zooniverse-images` stage (which selects and uploads frames to Zooniverse) currently reads frame candidates directly from the raw ML CSV. It does **not** consume volunteer clip classifications from Zooniverse. This means the `clips_uploaded → frames_uploaded` pipeline edge has no real data dependency — the stages are ordered by convention, not by need. Three open options: (1) remove the `zooniverse-images` stage and let frames come only from the BIIGLE-upload path; (2) move it to run right after `--ml` with no citsci ordering; (3) keep it after clips but actually consume volunteer clip MaxN data to narrow frame candidates (real data dependency). Decision pending, will be revisited when the `CLIPS_DONE` / `FRAMES_DONE` retirement gates (see §7) are wired. See `spyfish/extraction/select_frames.py` for the matching in-code TODO.
+> **Frame selection for BIIGLE expert review.** `--biigle-upload` selects which frames to extract per drop. When `citsci_status = citsci_complete`, it calls `select_frames_from_zooniverse()` — ranks `(subject, species)` rows from the volunteer MaxN CSV by `mean_count × agreement_pct` and picks frames at those timestamps. Otherwise it falls back to `select_frames()` reading the raw ML CSV. Expert review on BIIGLE is anchored to volunteer-validated peak moments when citsci ran, and to ML peaks when it didn't.
 
 ### Two specific technical choices
 
@@ -936,6 +991,10 @@ Both are used — for different audiences.
 
 These are complementary tools, not competing choices.
 
+### Future direction: multi-project support (Spyfish Anywhere)
+
+Generalizing the pipeline to support other camera-trap projects (different methodologies, regions, metadata sources) — same repo, layered profiles, internal schema pipeline-shaped, exports to Darwin Core Archive (and optionally Camtrap-DP). See [`claude_docs/anywhere_plan.md`](claude_docs/anywhere_plan.md).
+
 ---
 
 ## 11. Milestones
@@ -954,13 +1013,14 @@ Sequenced by dependency, not assigned dates.
 - Streamlit dashboard (deployment monitoring, error review, annotation export)
 - SharePoint → S3 metadata download integrated into pipeline
 
-### Phase 2 — Annotation Platforms 🔄 In Progress
+### Phase 2 — Annotation Platforms ✅ Complete
 
 - Zooniverse clip extraction and upload (binary + multiclass strategy)
 - Zooniverse frame extraction and upload
 - BIIGLE frame upload and volume creation
 - BIIGLE annotation sync (download + parse expert annotations)
-- Zooniverse volunteer classification sync-back (step 5b) — parsing built, pipeline wiring remaining
+- Zooniverse volunteer classification sync-back (`--zooniverse-sync`) — per-subject-set live path wired into `run_pipeline.py`
+- Zooniverse choice key → scientific name normalisation via `species_labels.csv` (applied at `write_zooniverse_maxn_csv`)
 
 ### Phase 3 — Model Improvement Loop
 
@@ -990,45 +1050,60 @@ Sequenced by dependency, not assigned dates.
 ### Phase 6 — DOC Reporting
 
 - Annotation data export format defined and connected to PowerBI
-- Time-series visualisations of species abundance by marine reserve
-- Marine reserve monitoring reports and report cards generated automatically from deployments with `biigle_status = complete` or `reporting_status = complete`
+- Marine reserve monitoring reports and report cards generated automatically from deployments with `expert_status = complete` or `reporting_status = complete`
 - BIIGLE substrate and size review parsing (same pipeline, new annotation type)
+- ✅ Programme health dashboard (`📈_Health_Dashboard.py`): KPI row, deployments per year, bad deployments per survey (sorted by % desc, 10% reference line), validation errors by type and column, pipeline funnel, per-survey annotation depth funnel, video presence over time, protection status breakdown, survey summary table
+- ✅ Ecological experiments page (`🧪_Experiments.py`): 15 experiments across reserve effect (slope chart, heatmap, year trend), programme overview (detection rate, composition, diversity, leaderboard, species accumulation), species deep-dive (search, bait arrival, frequency × abundance, co-occurrence), source quality (calibration, disagreement), and full distribution view (box plot). Global filters (source / year / reserves) apply to all experiments via a shared `ctx` dict.
+- Time-series visualisations of species abundance by marine reserve — foundation in place via Experiments page; dedicated DOC-facing page remaining
 
 ---
 
 ## 12. Known Gaps & Future Work
 
+### Citsci annotations — re-ingestion required for pre-normalisation rows
+
+Zooniverse choice keys (`BLUECOD`, `SNAPPER`, etc.) were stored raw as `scientific_name` in `spyfish_annotations.db` before the normalisation step was added to `write_zooniverse_maxn_csv`. Any citsci rows ingested before this fix have incorrect species names and cannot be compared with ML or expert annotations.
+
+**Fix:** re-run `--zooniverse-sync` (or re-ingest from the existing MaxN CSVs) for all affected drops. The MaxN CSVs on disk also need regenerating if they were written before the fix, since the normalisation only applies at write time. Once re-ingested, the bootstrap orchestrator (`spyfish/orchestrator/bootstrap.py`, planned in PR 3 of `claude_docs/zooniverse_annotations_todo.md`) will handle this in bulk.
+
 ### Zooniverse volunteer sync — step 5b pipeline wiring
 
-> **⚠️ TODO — NEEDS TESTING & CLEANUP**
-> The Zooniverse parse pipeline (`python -m spyfish.zooniverse.live_extract` + `spyfish/zooniverse/parse_classifications.py`) has been substantially reworked but has **not been tested end-to-end against real Zooniverse data** since the refactor. Before treating any output as production-ready:
->
-> - Run against real classifications from the API and verify MaxN CSVs are correct
-> - Run against legacy CSV backfill with and without subjects CSVs
-> - Verify the completion gate correctly identifies fully-retired subject sets
-> - Audit all intermediate paths: what goes in `legacy_classifications/`, `legacy_subjects/`, `last_run.json`, `zooniverse_review.csv`, `zooniverse_nothing_here_sample.csv`, and the per-drop MaxN CSVs — and confirm they are all still being written to the right place after the refactor
-> - Check that `suspicious_minority_find` logic still works correctly
-> - Verify legacy filename resolution still handles date-pattern filenames (e.g. `AHE_062_25_04_2022`)
+Classification parsing is fully wired into `run_pipeline.py --zooniverse-sync` (GlobalStage). The live path uses a per-subject-set architecture:
 
-Classification parsing is implemented in `python -m spyfish.zooniverse.live_extract` (standalone script) and `spyfish/zooniverse/parse_classifications.py` (reusable module). It is **not yet wired into `run_pipeline.py`** as a `--zooniverse-sync` stage.
+**Live path (`--zooniverse-sync`):**
+1. `subject_completion_from_api()` — one API call returns retirement status for every subject set across all source projects (O(num_sets), reads `set_member_subjects_count` and `retired_set_member_subjects_count` directly from the subject set object; subject set → drop_id resolved via display_name convention `clips_{drop_id}`)
+2. For each drop at `citsci_clips_uploaded`: find its clips subject set, skip if not fully retired
+3. If raw CSV already exists on disk: re-aggregate from disk (idempotent, no API call). Use `--force` to bypass
+4. Otherwise: `fetch_classifications_for_set(ss_id)` → `parse_classifications` → write `{drop_id}_zooniverse_raw.csv`
+5. `aggregate_by_subject_species` → write `{drop_id}_zooniverse_maxn.csv`
+6. `ingest_zooniverse_annotations` → advance to `citsci_complete`
+
+**Historical backfill (`--legacy-zooniverse`):** reads classification + subjects CSVs from `process_files/zooniverse/legacy_classifications/` (configured via `paths.legacy.zooniverse`). Legacy filename resolver handles DMY/YMD date-pattern filenames, `_NEW` upload-suffix normalisation, and year-fuzzy matching for surveys where the Zooniverse filename date differs from the DB date by days or weeks. See `claude_docs/todo.md` resolver audit for unresolvable stems (pre-standard 2011–12 format, surveys not yet ingested). Companion admin flag `--legacy-experts` ingests the legacy expert annotation CSV from S3 — both are off the happy path and called explicitly.
 
 **What is built:**
+- Per-subject-set API fetch (not bulk project sweep) — retirement status is the gate, no timestamp cursor needed
+- Raw CSV per drop (`{drop_id}_zooniverse_raw.csv`) — re-aggregate without re-fetching; mirrors ML raw CSV pattern
+- MaxN CSV per drop in the same 8-column schema as ML MaxN CSVs
+- Subject retirement completion checking: `subject_completion_from_api()` (live) / `subject_completion_from_csv()` (legacy)
+- Legacy filename resolution via `parse_legacy_classifications` in `spyfish/zooniverse/legacy_extract.py`
 
-- Fetch from Panoptes API across multiple source projects (`source_project_ids` in config)
-- Bulk backfill from downloaded Zooniverse export CSVs (via `run_pipeline.py --legacy`, handled by `spyfish/zooniverse/legacy_extract.py`)
-- Parse annotations: species, count (with bucket handling: "2030"→25, "3040"→35), timestamp
-- Aggregate by (subject, species) with `min_votes` threshold
-- Write per-drop MaxN CSVs (`{drop_id}_zooniverse_maxn.csv`) in the same 8-column schema as ML MaxN CSVs (`DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy, IntervalAnnotation, ConfidenceAgreement, TimeOfMaxAbsSeconds`)
-- Frame extraction is a **separate independent step** (not part of the parse script) — MaxN CSVs are the handoff point
-- Subject retirement completion checking per drop (`subject_completion_from_csv/api()`)
-- Legacy filename resolution: date-pattern filenames (e.g. `AHE_062_25_04_2022`) reconstructed to drop_id
+**Volunteer quality control (automatic):**
 
-**What remains:**
+Three exclusions fire in order inside `aggregate_by_subject_species`:
 
-- Wire into `run_pipeline.py` as `--zooniverse-sync`: check subject set completion, parse if done, advance `citsci_status` to `citsci_complete`
-- Deduplication of identical MaxN runs at frame extraction step (currently deferred)
+1. **Blank submissions** — `value:[]` payload, excluded from `total_classifiers` and `nothing_here_votes`
+2. **High-NH click-through** — users with NH rate ≥ `user_exclusion_nh_pct_threshold` (90%) AND ≥ `user_exclusion_min_classifications` (100) classifications
+3. **Dedup by (user_id, subject_id, species)** — collapses CSV export row inflation from subjects in multiple sets
 
-**Current workaround:** run `python -m spyfish.zooniverse.live_extract` manually, then advance drops with `set_status`.
+Aggregator emits three count statistics per (subject, species): `mode_count` (training labels / MaxN CSV), `max_count` (ecology peak), `mean_count` (BIIGLE frame ranking). Two advisory flags: `suspicious_minority_find` and `count_disagreement` (`max_count >= mode_count + 2 AND vote_count >= 3`).
+
+**Workflow 17057 — bounding box training data, not citsci:**
+
+Workflow 17057 is a 2012 expert annotation workflow where volunteers drew bounding boxes around pre-labelled species. Filenames use pre-canonical format (`PMR12_2012`, `CON28_2012`) that cannot resolve to current drop_ids. Not citsci — treat as training/expert only if ever used.
+
+**Open items:**
+- Validate `--zooniverse-sync` end-to-end against real API data on first production run
+- Wire retirement gates (`citsci_clips_done` / `citsci_frames_done`) — see `CitSciStatus` TODO in `base.py`
 
 ### PowerBI — annotation data feed is manual
 
@@ -1115,40 +1190,55 @@ These are loaded at startup via `python-dotenv`. Secrets never live in `config.y
 
 ## 14. Running the Pipeline
 
-The single entry point is `run_pipeline.py`.
+The single entry point is `run_pipeline.py`. Stages are split into two groups:
+
+- **Data pipeline** — runs when no flags are passed (the daily-cron path).
+- **Admin / maintenance** — always explicit; `run_in_all=False` so the default invocation never touches metadata or backfills.
 
 ```bash
-python run_pipeline.py          # Run all stages with run_in_all=True
-python run_pipeline.py --ingest
+# Typical cron pattern
+python run_pipeline.py --ingest    # admin: load new metadata from SharePoint
+python run_pipeline.py             # data: process everything in the funnel
+
+# Scope to a single stage
 python run_pipeline.py --ml
-python run_pipeline.py --ingest --ml    # combine steps
 python run_pipeline.py --biigle-sync --retrain
 ```
 
-### Pipeline stage flags
+### Data pipeline flags (run by default)
 
 
-| Flag                  | Stage     | Section queried | Advances                                                                                                           |
-| --------------------- | --------- | --------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `--ingest`            | Step 1    | —               | Sets `ingest_status` + `video_presence` + `ml_status=ml_ready` when video present                                  |
-| `--check-arrivals`    | Step 1b   | `ml_status`     | `ml_pending` → `ml_ready` when video found in S3 (requires `video_presence=absent`)                                |
-| `--ml`                | Steps 2+3 | `ml_status`     | `ml_ready → ml_running → ml_complete` (or `ml_error`)                                                              |
-| `--zooniverse-clips`  | Step 4    | `citsci_status` | `citsci_pending → citsci_clips_uploaded` (requires `ml_status=ml_complete`)                                        |
-| `--zooniverse-images` | Step 5    | `citsci_status` | `citsci_clips_uploaded → citsci_frames_uploaded`                                                                   |
-| `--zooniverse-sync`   | Step 5b   | `citsci_status` | `citsci_frames_uploaded → citsci_complete` — **not yet wired in, use `python -m spyfish.zooniverse.live_extract`** |
-| `--biigle-upload`     | Step 6    | `biigle_status` | `expert_pending → expert_uploaded` (requires `citsci_status=citsci_complete` OR `ml_status=ml_complete`)           |
-| `--biigle-sync`       | Step 7    | `biigle_status` | `expert_uploaded → expert_complete`                                                                                |
-| `--retrain`           | Step 8    | —               | Retrain YOLO model on expert annotations                                                                           |
+| Flag                  | Section         | Advances                                                                                                           |
+| --------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--ml`                | `ml_status`     | `ml_ready → ml_running → ml_complete` (or `ml_error`)                                                              |
+| `--zooniverse-clips`  | `citsci_status` | `citsci_pending → citsci_clips_uploaded` (requires `ml_status=ml_complete`)                                        |
+| `--zooniverse-sync`   | `citsci_status` | `citsci_clips_uploaded → citsci_complete` — checks per-subject-set retirement via Panoptes API; `--force` to bypass raw CSV cache |
+| `--biigle-upload`     | `expert_status` | `expert_pending → expert_uploaded` (requires `citsci_status IN (citsci_complete, citsci_skipped)` on the full-pipeline path, or `ml_status=ml_complete` on the biigle-direct path) |
+| `--biigle-sync`       | `expert_status` | `expert_uploaded → expert_complete`                                                                                |
+| `--retrain`           | —               | Retrain YOLO model on expert annotations                                                                           |
 
 
-### Special flags
+### Admin / maintenance flags (off the happy path)
+
+
+| Flag                  | Description                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `--ingest`            | Refresh metadata from SharePoint CSVs on S3; upsert `deployments`; sets `ingest_status`, `video_presence`, `ml_status=ml_ready` when video is present |
+| `--check-arrivals`    | Cheap S3 poll for newly arrived videos — advances `ml_pending → ml_ready` without re-reading SharePoint      |
+| `--set-targets`       | Bulk-update deployment statuses from a CSV (`paths.pipeline_targets_csv`)                                    |
+| `--legacy-experts`    | Historical backfill: download `BUV Annotations Legacy Experts.csv` from S3 → ingest as `annotated_by='expert', external_id='legacy'` |
+| `--legacy-zooniverse` | Historical backfill: read classification CSV exports from `process_files/zooniverse/legacy_classifications/` → parse, aggregate, ingest as `annotated_by='citsci'` per drop |
+| `--db-refresh`        | Reconcile DB status with on-disk artifacts and live Zooniverse/Biigle API state (see `spyfish/orchestrator/db_refresh.py`; **needs validation** — see `claude_docs/todo.md`) |
+
+
+### Common modifiers
 
 
 | Flag            | Description                                                                                  |
 | --------------- | -------------------------------------------------------------------------------------------- |
-| `--no-upload`   | Skip all S3 uploads (DB sync, models, results). Safe for local testing.                      |
+| `--no-upload`   | Skip the final S3 sync (DB, models, results). Safe for local testing.                        |
 | `--test-run`    | Use test dataset. Also controlled by `is_test_run` in `config.yaml`.                         |
-| `--set-targets` | Bulk-update deployment statuses from a CSV (see `paths.orchestration.pipeline_targets_csv`). |
+| `--force`       | On `--zooniverse-sync`: re-fetch from Panoptes even if raw CSV exists on disk                |
 | `--ping`        | Print config summary (bucket, base dir, test mode) and exit — connectivity check.            |
 
 
@@ -1156,23 +1246,22 @@ python run_pipeline.py --biigle-sync --retrain
 
 Run `--biigle-upload` without any `--zooniverse-*` flags. The callable `prerequisites` function detects that Zooniverse is not in the run and sets the prerequisite to `ml_status = complete`, letting drops bypass the citizen science loop entirely.
 
-### Zooniverse classification sync (standalone)
+### Zooniverse classification sync
 
 ```bash
-# Incremental fetch from API (uses DB `zooniverse_last_run_at` for since-date)
-python -m spyfish.zooniverse.live_extract
+# Live sync — fetches per retired subject set, writes raw + MaxN CSVs, advances status
+python run_pipeline.py --zooniverse-sync
 
-# Explicit --since (ISO date, 'auto', or 'all')
-python -m spyfish.zooniverse.live_extract --since 2024-06-01
-python -m spyfish.zooniverse.live_extract --since all
-
-# Test with the last N classifications only
-python -m spyfish.zooniverse.live_extract --limit 1000
+# Re-fetch from API even if raw CSV already exists on disk
+python run_pipeline.py --zooniverse-sync --force
 ```
 
-For historical backfill from downloaded export CSVs, use `run_pipeline.py --legacy` (reads `process_files/zooniverse/legacy_classifications/*.csv`).
+For historical backfill from downloaded export CSVs:
 
-After running, manually advance fully-parsed drops using `set_status --citsci-status complete` until `--zooniverse-sync` is wired into the pipeline.
+```bash
+# Reads *classification*.csv and *subject*.csv from process_files/zooniverse/legacy_classifications/
+python run_pipeline.py --legacy-zooniverse
+```
 
 ### Re-run post-ML processing on a specific drop
 
@@ -1464,16 +1553,18 @@ CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass 
 
 `**process_zooniverse_clips(maxn_csv, selections_csv, drop_id)**` (`select_zooniverse_clips.py`): Reads MaxN CSV (or generates evenly-spaced health checks if empty), applies clip selection strategy.
 
-`**upload_clips_to_zooniverse(clips_df)**` / `**upload_frames_to_zooniverse(frames_df)**` (`upload.py`): Authenticates with `panoptes_client`, creates or retrieves subject set keyed to the drop, uploads each clip/frame as a subject. Idempotent — skips already-existing subjects.
+`**upload_clips_to_zooniverse(clips_df)**` (`upload.py`): Authenticates with `panoptes_client`, creates or retrieves a `clips_{drop_id}` subject set keyed to the drop, uploads each clip as a subject. Idempotent — skips already-existing subjects.
 
-`**parse_classifications.py**` — standalone module for classification sync. Key functions:
+`**parse_classifications.py**` — core classification parsing and export module. Key functions:
 
-- `connect_to_zooniverse()` / `fetch_classifications(since)` — API fetch
-- `load_classifications_from_csv(paths)` — CSV backfill path
-- `parse_classifications(raw, db_drop_ids)` — resolve drop_ids, parse species + counts
-- `aggregate_by_subject_species(parsed_df)` — apply `min_votes`, compute agreement %; flags rows as `suspicious_minority_find` when a species appears in a subject but with very low agreement relative to total classifiers (i.e., only a small minority of volunteers saw it — likely noise). Flagged rows are excluded from MaxN CSV export but retained in the audit CSV.
-- `sample_nothing_here_clips(df)` — for drops where ≥10% of retired subjects are dominated by NOTHINGHERE votes, samples 10% of those subjects (min 1) for operator review
-- `subject_completion_from_api()` / `subject_completion_from_csv(paths)` — check whether every subject in a set is retired; returns `fully_complete` flag per drop_id used as the export gate
+- `connect_to_zooniverse()` — authenticate with Panoptes
+- `fetch_classifications_for_set(subject_set_id)` — fetch all retired classifications for one subject set; same dict shape as the old bulk fetch
+- `subject_completion_from_api()` — O(num_sets) retirement check; parses `clips_{drop_id}` / `frames_{drop_id}` display_name convention, reads counts from subject set metadata. Returns `subject_set_type`, `drop_id`, `fully_complete` per set
+- `parse_classifications(raw)` — strict parse; non-canonical filenames surface as `drop_id=None`
+- `aggregate_by_subject_species(parsed_df)` — excludes blank submissions and high-NH users, dedupes by (user_id, subject_id, species), applies `min_agreement_pct` threshold, computes `mode_count`, `mean_count`, `max_count`, `suspicious_minority_find`, `count_disagreement`
+- `write_zooniverse_maxn_csv(aggregated_df)` / `write_empty_zooniverse_maxn_csv(drop_id)` — write per-drop MaxN CSV; suspicious_minority rows excluded from export
+- `sample_nothing_here_clips(df)` — samples 10% of NOTHINGHERE-dominated subjects per drop for operator review
+- `ingest_zooniverse_annotations(drop_id)` — reads MaxN CSV, writes to annotations DB, syncs counts
 
 ---
 
@@ -1490,7 +1581,7 @@ CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass 
 
 **Label defaults:** All ML-detected bounding boxes are uploaded with the "Fish - review required" label (`default_fish_label_id: 531298` in config). To map specific species to specific BIIGLE labels, add entries to `label_mapping` in `config.yaml`.
 
-`**sync_biigle_annotations()`** (`sync_annotations.py`): Queries `get_deployments_eligible("biigle_status", [expert_uploaded])` with `biigle_volume_id IS NOT NULL`. Checks for volumes marked "Done", downloads annotation CSV, parses frame filenames (`{DropID}__frame_{seconds}s.jpg`) to timestamps, stores in `spyfish_annotations.db` with `annotated_by='expert'`, advances `biigle_status` to `expert_complete`.
+`**sync_biigle_annotations()`** (`sync_annotations.py`): Queries `get_deployments_eligible("expert_status", [expert_uploaded])` with `biigle_volume_id IS NOT NULL`. Checks for volumes marked "Done", downloads annotation CSV, parses frame filenames (`{DropID}__frame_{seconds}s.jpg`) to timestamps, stores in `spyfish_annotations.db` with `annotated_by='expert'`, advances `expert_status` to `expert_complete`.
 
 ---
 
@@ -1637,7 +1728,7 @@ streamlit run "app/🐟_Spyfish_Data_Tools.py"
 | 🐟 Spyfish Data Tools        | Home / navigation                                         |
 | ⚙️ Deployment Management     | Live pipeline status; trigger stage transitions           |
 | 🔍 Error Review              | Browse `validation_errors` by drop, survey, or error type |
-| 📺 View Deployment Videos    | Browse and play locally downloaded videos                 |
+| 📺 View Deployment Videos    | Stream S3 videos via presigned URL; extract custom-range MP4 clips for download (PyAV byte-range seek, no full download); shareable via `?drop_id=` |
 | 📊 Model Metrics             | Training results and mAP scores                           |
 | 📥 Export BIIGLE Annotations | Download expert annotation data as CSV                    |
 
@@ -1769,7 +1860,7 @@ process_files/zooniverse/
 python run_pipeline.py --legacy
 ```
 
-Legacy backfill logic lives in `spyfish/zooniverse/legacy_extract.py` (entry: `run_legacy_zooniverse_backfill()`). It's deliberately separate from live `live_extract.py` so filename-format drift can be patched in one place without affecting live parsing.
+Legacy backfill logic lives in `spyfish/zooniverse/legacy_extract.py` (entry: `run_legacy_zooniverse_backfill()`). It's deliberately separate from the live path so filename-format drift can be patched in one place. Key helpers: `resolve_legacy_drop_id` (DMY/YMD + `_NEW` normalisation + year-fuzzy pass), `subject_completion_from_csv` (retirement gate from subjects CSV export).
 
 The completion gate will use the subjects CSV to ensure only fully-retired subject sets are exported. If no subjects CSV is found, it logs a warning and exports all matched drop_ids (useful for quick exploratory runs).
 

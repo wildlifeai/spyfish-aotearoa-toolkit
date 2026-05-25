@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--ingest-status", choices=_SECTION_VALUES["ingest_status"])
     parser.add_argument("--ml-status", choices=_SECTION_VALUES["ml_status"])
     parser.add_argument("--citsci-status", choices=_SECTION_VALUES["citsci_status"])
-    parser.add_argument("--biigle-status", choices=_SECTION_VALUES["biigle_status"])
+    parser.add_argument("--expert-status", choices=_SECTION_VALUES["expert_status"])
     parser.add_argument(
         "--reporting-status", choices=_SECTION_VALUES["reporting_status"]
     )
@@ -98,7 +98,7 @@ def main():
             ("ingest_status", args.ingest_status),
             ("ml_status", args.ml_status),
             ("citsci_status", args.citsci_status),
-            ("biigle_status", args.biigle_status),
+            ("expert_status", args.expert_status),
             ("reporting_status", args.reporting_status),
         ]
         if val is not None

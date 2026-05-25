@@ -42,15 +42,6 @@ with cols[0]:
         icon="📺",
     )
     st.caption("View videos from the deployments.")
-with cols[1]:
-    st.page_link(
-        "pages/📥_Export_Biigle_Annotations.py",
-        label="Export BIIGLE Annotations",
-        icon="📥",
-    )
-    st.caption(
-        "Export Biigle annotations, review max count, and investigate size results."
-    )
 
 st.divider()
 st.markdown(

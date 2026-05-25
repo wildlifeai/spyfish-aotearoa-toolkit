@@ -34,16 +34,46 @@ class ExtractionConfig(BaseConfig):
         return bool(get_required(self._extraction, "sample_all_clips", "extraction"))
 
     @property
-    def frame_multiplier(self) -> float:
-        return float(get_required(self._extraction, "frame_multiplier", "extraction"))
-
-    @property
     def binary_strategy(self) -> dict:
         return get_required(self._extraction, "binary_strategy", "extraction")
 
     @property
     def multiclass_strategy(self) -> dict:
         return get_required(self._extraction, "multiclass_strategy", "extraction")
+
+    @property
+    def _ml_peak_augmentation(self) -> dict:
+        return get_required(self._extraction, "ml_peak_augmentation", "extraction")
+
+    @property
+    def ml_peak_top_k_per_species(self) -> int:
+        return int(
+            get_required(
+                self._ml_peak_augmentation,
+                "top_k_per_species",
+                "extraction.ml_peak_augmentation",
+            )
+        )
+
+    @property
+    def ml_peak_min_confidence(self) -> float:
+        return float(
+            get_required(
+                self._ml_peak_augmentation,
+                "min_confidence",
+                "extraction.ml_peak_augmentation",
+            )
+        )
+
+    @property
+    def ml_peak_citsci_dedupe_tolerance_seconds(self) -> float:
+        return float(
+            get_required(
+                self._ml_peak_augmentation,
+                "citsci_dedupe_tolerance_seconds",
+                "extraction.ml_peak_augmentation",
+            )
+        )
 
     # ── FFmpeg encoding settings ─────────────────────────────────────────
 

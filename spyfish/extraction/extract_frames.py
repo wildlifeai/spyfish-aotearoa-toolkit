@@ -36,7 +36,42 @@ _ROTATION_MAP = {
 }
 
 
-def _read_video_rotation(cap: cv2.VideoCapture) -> int:
+def open_video_capture(
+    drop_id: str, prefer_local_path: Optional[str] = None
+) -> cv2.VideoCapture:
+    """Open a cv2.VideoCapture for a drop's video, local first then S3.
+
+    If ``prefer_local_path`` is given and the file exists, opens that. Otherwise
+    generates a presigned S3 URL and opens that — cv2 streams the moov atom
+    upfront and uses HTTP byte-range requests for subsequent seeks, no full
+    download. The presigned URL is valid for 1 hour.
+
+    Raises:
+        FileNotFoundError: no local file AND presigned URL generation failed.
+        RuntimeError: cv2 failed to open the resolved source.
+    """
+    from spyfish.storage.s3_handler import S3Handler
+
+    if prefer_local_path and os.path.exists(prefer_local_path):
+        source = str(prefer_local_path)
+    else:
+        s3_key = config.get_video_s3_key(drop_id)
+        url = S3Handler().generate_presigned_url(s3_key, expiration=3600)
+        if url is None:
+            raise FileNotFoundError(
+                f"{drop_id}: video not at {prefer_local_path} and could not "
+                f"generate presigned URL for s3://.../{s3_key} (404 or missing perms)."
+            )
+        logging.info(f"{drop_id}: streaming from presigned S3 URL.")
+        source = url
+
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        raise RuntimeError(f"{drop_id}: cv2 failed to open video source: {source}")
+    return cap
+
+
+def read_video_rotation(cap: cv2.VideoCapture) -> int:
     """Read rotation degrees from video container metadata (0, 90, 180, or 270)."""
     try:
         degrees = int(cap.get(cv2.CAP_PROP_ORIENTATION_META)) % 360
@@ -45,7 +80,7 @@ def _read_video_rotation(cap: cv2.VideoCapture) -> int:
         return 0
 
 
-def _extract_one_frame_from_cap(
+def extract_one_frame_from_cap(
     cap: cv2.VideoCapture,
     seek_seconds: float,
     out_path: Path,
@@ -102,7 +137,7 @@ def extract_frame(
     attempt a second rotation.
 
     For multi-frame extraction from the same video, prefer opening one
-    cv2.VideoCapture and calling `_extract_one_frame_from_cap` in a loop —
+    cv2.VideoCapture and calling `extract_one_frame_from_cap` in a loop —
     that avoids re-fetching the MP4 moov atom on every call (significant
     over remote/HTTP video URLs).
 
@@ -117,11 +152,11 @@ def extract_frame(
         logging.error(f"Could not open video with cv2: {video_path}")
         return False
 
-    rotation = _read_video_rotation(cap)
+    rotation = read_video_rotation(cap)
     if rotation:
         logging.debug(f"Video rotation metadata: {rotation}° — will apply to frames.")
     try:
-        return _extract_one_frame_from_cap(
+        return extract_one_frame_from_cap(
             cap, seek_seconds, out_path, frame_index=frame_index, rotation=rotation
         )
     finally:
@@ -145,16 +180,31 @@ def build_coco_from_raw_csv(
     ],  # [{image_id, file_name, time_of_max, img_w, img_h}, ...]
     img_w: int = 0,
     img_h: int = 0,
+    max_time_delta_seconds: float = 1.0,
 ) -> dict:
     """
     Build a minimal COCO annotation dict from the raw YOLO ML CSV.
 
-    Annotations are filtered to the single frame nearest to each TimeOfMax.
+    Annotations are filtered to the single raw-CSV row nearest to each
+    frame's ``time_of_max``, but only if that row falls within
+    ``max_time_delta_seconds`` of it.
+
+    The tolerance guards against a footgun in the training-frames flow:
+    raw CSVs there are sparse (only frames with detections produce rows),
+    so a frame with zero detections would otherwise inherit annotations
+    from the closest *other* training frame — sometimes hundreds of
+    seconds away. The MaxN flow's raw CSV is dense (one row per
+    detection per video frame), so the nearest row is normally within
+    ~1/fps; the default 1.0s tolerance is comfortably above that.
 
     Args:
         raw_csv_path: Path to raw ML CSV (columns: frame, time_seconds, class, confidence, x, y, w, h).
         frame_records: List of dicts describing each image (one per selections row).
         img_w, img_h: Image dimensions (0 = unknown, will be filled from actual files later).
+        max_time_delta_seconds: Maximum allowed gap between a frame's
+            ``time_of_max`` and the nearest raw-CSV row's ``time_seconds``.
+            Rows farther than this are treated as "no detections for this
+            frame" rather than snapping to a distant row.
 
     Returns:
         COCO dict ready for json.dump().
@@ -167,6 +217,7 @@ def build_coco_from_raw_csv(
     images = []
     annotations = []
     ann_id = 0
+    n_frames_without_detections = 0
 
     for rec in frame_records:
         img_id = rec["image_id"]
@@ -188,13 +239,16 @@ def build_coco_from_raw_csv(
             continue
 
         # Find the raw CSV frame closest to this time_of_max
-        nearest_frame_rows = raw_df.iloc[
-            (raw_df["time_seconds"] - time_of_max).abs().argsort()[:1]
-        ]
-        if nearest_frame_rows.empty:
+        deltas = (raw_df["time_seconds"] - time_of_max).abs()
+        nearest_idx = deltas.idxmin()
+        nearest_delta = deltas.loc[nearest_idx]
+        if nearest_delta > max_time_delta_seconds:
+            # No raw-CSV row close enough — this frame has no detections.
+            # Skip rather than snap to a distant row.
+            n_frames_without_detections += 1
             continue
 
-        nearest_time = nearest_frame_rows["time_seconds"].iloc[0]
+        nearest_time = raw_df["time_seconds"].loc[nearest_idx]
         frame_rows = raw_df[raw_df["time_seconds"] == nearest_time]
 
         for _, row in frame_rows.iterrows():
@@ -220,6 +274,13 @@ def build_coco_from_raw_csv(
                 }
             )
 
+    if n_frames_without_detections:
+        logging.info(
+            f"{n_frames_without_detections}/{len(frame_records)} frame(s) had no "
+            f"raw-CSV detections within {max_time_delta_seconds}s — uploaded "
+            "without annotations (expected for sparse training-frame inference)."
+        )
+
     return {
         "info": {"description": "Spyfish Aotearoa — ML MaxN peaks", "version": "1.0"},
         "images": images,
@@ -238,10 +299,11 @@ def extract_frames_from_selections(
     selections_csv_path: str,
     video_path: str,
     raw_csv_path: str,
+    write_coco: bool = True,
 ) -> pd.DataFrame:
     """
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
-    and produce a COCO JSON with the corresponding YOLO bounding boxes.
+    and (by default) produce a COCO JSON with the corresponding YOLO bounding boxes.
 
     The frame is grabbed at the absolute video timestamp in csv_clip_max_time_column (TimeOfMaxnSeconds).
     This is the exact frame that was the deciding factor in the MaxN calculation.
@@ -257,14 +319,17 @@ def extract_frames_from_selections(
         selections_csv_path: CSV from select_clips.select_zooniverse_clips().
         video_path: Full path to the source video file.
         raw_csv_path: Raw YOLO CSV ({drop_id}_{model}_raw.csv), for COCO annotations.
+        write_coco: When True (default), build and write the COCO JSON next to
+            the extracted frames. Pass False from callers that will rebuild the
+            COCO themselves — e.g. the Zooniverse → BIIGLE path, where the ML
+            raw CSV has no detections at the volunteer-selected timestamps and
+            ``rerun_inference_on_extracted_frames`` writes the COCO instead.
 
     Returns:
         selections_df with 'FramePath' column added.
     """
     if not os.path.exists(selections_csv_path):
         raise FileNotFoundError(f"Selections CSV not found: {selections_csv_path}")
-    if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Source video not found: {video_path}")
 
     df = pd.read_csv(selections_csv_path)
     if df.empty:
@@ -286,13 +351,11 @@ def extract_frames_from_selections(
     # videos and is non-trivial even locally for many selections.
     # extract_frame() applies rotation to pixel data, so swap w/h for 90°/270° videos
     # so that COCO image dimensions match the actual saved frame orientation.
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video with cv2: {video_path}")
+    cap = open_video_capture(drop_id, prefer_local_path=video_path)
     try:
         vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        rotation = _read_video_rotation(cap)
+        rotation = read_video_rotation(cap)
 
         if rotation in (90, 270):
             vid_w, vid_h = vid_h, vid_w
@@ -331,7 +394,7 @@ def extract_frames_from_selections(
                 logging.info(
                     f"  [{img_id}/{len(df)}] Frame at {seek_seconds:.3f}s (index={frame_index}) → {out_filename}"
                 )
-                success = _extract_one_frame_from_cap(
+                success = extract_one_frame_from_cap(
                     cap,
                     seek_seconds,
                     out_path,
@@ -380,18 +443,16 @@ def extract_frames_from_selections(
             f"Deduplicated {len(successful_records) - len(deduped_records)} duplicate frame record(s) for {drop_id}"
         )
 
-    coco = build_coco_from_raw_csv(raw_csv_path, deduped_records)
-
-    # Save the COCO annotations to the drop's annotations directory
-    annotations_dir = config.get_drop_annotations_dir(drop_id)
-    annotations_dir.mkdir(parents=True, exist_ok=True)
-
-    coco_path = annotations_dir / f"{drop_id}_coco_annotations_for_biigle.json"
-    with open(coco_path, "w") as f:
-        json.dump(coco, f, indent=2)
-    logging.info(
-        f"COCO annotations → {coco_path} ({len(coco['images'])} images, {len(coco['annotations'])} annotations)"
-    )
+    if write_coco:
+        coco = build_coco_from_raw_csv(raw_csv_path, deduped_records)
+        coco_path = config.get_coco_annotations_path(drop_id)
+        coco_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(coco_path, "w") as f:
+            json.dump(coco, f, indent=2)
+        logging.info(
+            f"COCO annotations → {coco_path} ({len(coco['images'])} images, "
+            f"{len(coco['annotations'])} annotations)"
+        )
 
     successful = df["FramePath"].notna().sum()
     logging.info(f"Extracted {successful}/{len(df)} frames for {drop_id} → {out_dir}")
