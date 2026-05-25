@@ -141,6 +141,22 @@ class MLConfig(BaseConfig):
         return list(self.training_config.get("dominant_species", []) or [])
 
     @property
+    def training_background_ratio(self) -> float:
+        """Target share of background (empty-label) frames in the TRAIN split.
+
+        A background frame is an image paired with an empty .txt (no objects);
+        it teaches the detector to suppress false positives. Ultralytics
+        recommends ~0–10% of the training set (COCO ≈ 1%). Assembly pools every
+        background frame across train drops and subsamples them to hit this
+        ratio — `B = r/(1-r) * P` backgrounds for `P` positive train frames.
+        0 disables (no backgrounds). The main supplier is the training-frame
+        volumes downloaded via `download_training_volume_labels`, where empty
+        frames are real no-fish reviews; without this they'd be dropped at
+        assembly (`assemble_yolo_dataset` discards empty .txt by default).
+        """
+        return float(get_required(self.training_config, "background_ratio", "training"))
+
+    @property
     def training_train_pct(self) -> float:
         return float(get_required(self.training_config, "train_pct", "training"))
 

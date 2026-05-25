@@ -24,6 +24,7 @@ Typical orchestration order (see retrain_runner.py):
 
 import json
 import logging
+import random
 import shutil
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
@@ -37,6 +38,15 @@ from spyfish.config.wrapper import config
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+# Per-drop image dirs the trainer treats as canonical frame sources, in
+# precedence order. `frames/` holds ML-review frames (normal pipeline);
+# `training_frames/` holds the ~10-per-deployment training-frame extraction
+# whose expert labels arrive via `download_training_volume_labels`. Both sit
+# directly under the drop dir, so `<drop>/<source>/<image>` → drop_id is always
+# `path.parent.parent.name`. Derivative dirs (qa_frames, zooniverse_frames,
+# biigle_frames, …) are deliberately excluded.
+_IMAGE_SOURCE_DIRS: Tuple[str, ...] = ("frames", "training_frames")
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +193,6 @@ def discover_extra_drops(
         if drop_id in excluded:
             continue
         annotations_dir = drop_dir / "annotations"
-        frames_dir = drop_dir / "frames"
 
         # Skip if MaxN is present — normal pipeline handles this drop.
         maxn_suffix = config.biigle_expert_maxn_suffix
@@ -193,7 +202,13 @@ def discover_extra_drops(
         label_files = list(labels_dir.glob("*.txt"))
         if not label_files:
             continue
-        if not frames_dir.is_dir() or not any(frames_dir.iterdir()):
+        # Need a non-empty image source dir (frames/ or training_frames/) —
+        # training-frame extras keep their JPEGs in training_frames/.
+        has_images = any(
+            (drop_dir / src).is_dir() and any((drop_dir / src).iterdir())
+            for src in _IMAGE_SOURCE_DIRS
+        )
+        if not has_images:
             continue
 
         # Two distinct lookup needs:
@@ -212,9 +227,12 @@ def discover_extra_drops(
             continue
 
         drop_species: set[str] = set()
-        raw_suffix = config.biigle_expert_raw_suffix
+        # Read the raw label-name export from either source: expert review
+        # (`_biigle_expert_raw.csv`) or a training-frame volume
+        # (`_biigle_training_raw.csv`, from download_training_volume_labels).
         raw_csvs = (
-            list(annotations_dir.glob(f"*{raw_suffix}"))
+            list(annotations_dir.glob(f"*{config.biigle_expert_raw_suffix}"))
+            + list(annotations_dir.glob(f"*{config.biigle_training_raw_suffix}"))
             if annotations_dir.is_dir()
             else []
         )
@@ -377,19 +395,26 @@ def make_binary_labels(
 
 
 def _build_image_index(images_dir: Path) -> Dict[str, Dict[str, Path]]:
-    """Map drop_id → {frame-image stem → path}, restricted to canonical `frames/` dirs.
+    """Map drop_id → {frame-image stem → path}, restricted to canonical image
+    source dirs (`frames/` and `training_frames/` — see `_IMAGE_SOURCE_DIRS`).
 
     Scoping by drop_id prevents stem collisions across deployments from silently
     pairing a label with the wrong drop's image.
 
     One walk of `images_dir`; downstream lookups are O(1). Excludes derivative
-    dirs (qa_frames, zooniverse_frames, biigle_frames, …) by checking that the
-    immediate parent is exactly `frames`.
+    dirs (qa_frames, zooniverse_frames, biigle_frames, …) by checking the
+    immediate parent. A drop may legitimately have both source dirs (different
+    frames); stems don't collide across them, and `copy_split_files` only ever
+    copies images that have a matching label, so indexing both is safe.
     """
     exts = {e.lower() for e in config.image_extensions}
     index: Dict[str, Dict[str, Path]] = {}
     for p in images_dir.rglob("*"):
-        if p.is_file() and p.suffix.lower() in exts and p.parent.name == "frames":
+        if (
+            p.is_file()
+            and p.suffix.lower() in exts
+            and p.parent.name in _IMAGE_SOURCE_DIRS
+        ):
             drop_id = p.parent.parent.name
             index.setdefault(drop_id, {}).setdefault(p.stem, p)
     return index
@@ -728,6 +753,48 @@ def print_assembled_summary(
     logging.info("=" * 90 + "\n")
 
 
+def _sample_background_frames(
+    background_by_drop: Dict[str, List[str]],
+    train_drops: Set[str],
+    n_positives_train: int,
+    background_ratio: float,
+    rng: random.Random,
+) -> Dict[str, Set[str]]:
+    """Choose which background (empty-label) frames to admit into the TRAIN
+    split so backgrounds make up ~``background_ratio`` of it.
+
+    Backgrounds are pooled across ``train_drops`` and subsampled *globally*
+    (not per-drop) — the ratio is a dataset-level property (Ultralytics rec
+    0–10%, COCO ≈ 1%). For ``P`` positive train frames and ratio ``r`` the
+    target count is ``B = r/(1-r) * P`` so that ``B/(P+B) == r``. Returns
+    ``{drop_id: {stems}}`` to merge into the frame_filter; empty when disabled
+    or there's nothing to add.
+
+    Only train drops are considered: the training-frame volumes that supply
+    most backgrounds are train-only, and val/test stay representative.
+    """
+    if background_ratio <= 0 or n_positives_train <= 0:
+        return {}
+    pool = [
+        (drop_id, stem)
+        for drop_id in train_drops
+        for stem in background_by_drop.get(drop_id, [])
+    ]
+    if not pool:
+        return {}
+    if background_ratio >= 1:
+        target = len(pool)  # degenerate config — take every background
+    else:
+        target = round(background_ratio / (1.0 - background_ratio) * n_positives_train)
+    if target <= 0:
+        return {}
+    chosen = pool if len(pool) <= target else rng.sample(pool, target)
+    out: Dict[str, Set[str]] = {}
+    for drop_id, stem in chosen:
+        out.setdefault(drop_id, set()).add(stem)
+    return out
+
+
 def assemble_yolo_dataset(
     train_drops: List[str],
     val_drops: List[str],
@@ -791,26 +858,28 @@ def assemble_yolo_dataset(
     # MVP per-drop frame filter — see claude_docs/todo.md "Per-drop training-frame
     # selection" entry for the smarter design that's still pending.
     # Rules:
-    #   1. Empty .txt files (no surviving labels post workflow-skip) → drop.
+    #   1. Empty .txt files (no surviving labels post workflow-skip) are
+    #      BACKGROUND candidates — pooled per drop and admitted to the TRAIN
+    #      split up to config.training_background_ratio (handled globally after
+    #      this loop, not here). They never count toward the per-drop cap.
     #   2. Frames whose only labels are in `dominant_species` (e.g. Pagrus
     #      auratus, Parapercis colias — overrepresented in the corpus) →
     #      deprioritized: kept if there's spare budget, dropped first when
     #      over the per-drop cap.
-    #   3. Cap at config.training_cap_frames_per_drop frames per drop.
-    #   Extras (no_survey_id drops — bulk-imported BIIGLE volumes) bypass the
-    #   cap entirely: they're externally curated, often hundreds of frames,
-    #   and capping them throws away expensive annotation work.
-    import random as _random
-
+    #   3. Cap positive frames at config.training_cap_frames_per_drop per drop.
+    #   Extras (no_survey_id + training-frame drops) bypass the positive cap
+    #   entirely: they're externally curated and capping them throws away
+    #   expensive annotation work.
     dominant_names = set(config.training_dominant_species or [])
     dominant_class_ids: Set[int] = {
         i for i, n in enumerate(class_names) if n in dominant_names
     }
     cap = config.training_cap_frames_per_drop
-    rng = _random.Random(config.training_split_seed)  # None = system entropy
+    rng = random.Random(config.training_split_seed)  # None = system entropy
     extras_set = set(extra_drops or [])
 
     frame_filter: Dict[str, Set[str]] = {}
+    background_by_drop: Dict[str, List[str]] = {}
     n_dom_dropped = 0
     n_interesting_sampled = 0
     n_under_budget = 0
@@ -823,14 +892,17 @@ def assemble_yolo_dataset(
 
         interesting: List[str] = []
         dominant_only: List[str] = []
+        background: List[str] = []
         for txt in drop_lbl_dir.glob("*.txt"):
             cls_ids = set(_iter_class_ids(txt))
             if not cls_ids:
-                continue  # empty .txt — drop
-            if cls_ids <= dominant_class_ids:
+                background.append(txt.stem)  # empty .txt — background candidate
+            elif cls_ids <= dominant_class_ids:
                 dominant_only.append(txt.stem)
             else:
                 interesting.append(txt.stem)
+        if background:
+            background_by_drop[drop_id] = background
 
         if drop_id in extras_set:
             kept = set(interesting) | set(dominant_only)
@@ -858,6 +930,28 @@ def assemble_yolo_dataset(
         f"{n_dom_dropped} dominant-only frame(s) dropped overall; "
         f"{n_extras_uncapped} extras drop(s) bypassed the cap). "
         f"Dominant species deprioritized: {sorted(dominant_names) if dominant_names else 'none'}"
+    )
+
+    # Background (empty-label) frames: admit a subsample into the TRAIN split so
+    # they're ~training_background_ratio of it. Pooled globally across train
+    # drops — the ratio is a dataset-level property, not per-drop.
+    train_set = set(train_drops)
+    n_positives_train = sum(len(frame_filter.get(d, set())) for d in train_set)
+    n_background_avail = sum(len(background_by_drop.get(d, [])) for d in train_set)
+    bg_ratio = config.training_background_ratio
+    bg_filter = _sample_background_frames(
+        background_by_drop, train_set, n_positives_train, bg_ratio, rng
+    )
+    n_background_kept = 0
+    for drop_id, stems in bg_filter.items():
+        frame_filter.setdefault(drop_id, set()).update(stems)
+        n_background_kept += len(stems)
+    denom = n_positives_train + n_background_kept
+    logging.info(
+        f"assemble_yolo_dataset: background frames — target ratio={bg_ratio:.0%}, "
+        f"{n_background_avail} available across {len(train_set)} train drop(s), "
+        f"{n_background_kept} admitted "
+        f"({(n_background_kept / denom if denom else 0):.0%} of {denom} train frames)."
     )
 
     for split_name, drops in [

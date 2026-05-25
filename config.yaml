@@ -190,6 +190,7 @@ training:
     # - "Pagrus auratus"                   # snapper — overrepresented in current corpus
     # - "Parapercis colias"                # blue cod — overrepresented in current corpus
   split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
+  background_ratio: 0.1                  # target share of background (empty-label) frames in the TRAIN split; 0 disables. Ultralytics rec 0–10%, COCO ≈ 1%. Backgrounds (mostly from training-frame volumes) are pooled across train drops and subsampled to hit this ratio.
 
 
 training_extraction:

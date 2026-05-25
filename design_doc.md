@@ -475,6 +475,12 @@ All three are stored in the same `annotations` table. The `annotated_by` field c
 
 **Expert review model:** Experts aim to review approximately **~10 frames per deployment** (or at survey level). If the ML + citsci signal looks wrong, a closer per-frame review can be triggered. This keeps expert effort tractable at ~1,000 deployments/year while still producing ground-truth labels for model retraining.
 
+**Volunteer data shape — what's in Zooniverse exports.** Three facts to know when working with the legacy classification CSVs or the live Panoptes API:
+
+- `user_ip` is **hashed** in exports — a 20-char hex digest, deterministic per IP within a project. Useful as a `_volunteer_key` fallback when `user_id` and `user_name` are both null (anonymous classifications), but not reversible. **Country / geographic distribution cannot be derived from these CSVs**; if needed, ask Zooniverse for an aggregated server-side report.
+- `metadata.session` is a **browser-session UUID**, not an active-annotation session. The same UUID persists across multi-hour idle windows. For "longest session" or activity-burst analyses, reconstruct from `created_at` gaps (e.g. cut on gaps ≥30 min) rather than trusting the session field.
+- **Workflows split by task type.** Each project runs `... (movies)` workflows for 10-second video clips and historically also ran a `Fish detection (photos)` workflow for still frames (frame uploads have since been removed from the pipeline but the legacy classifications remain in exports). Per-classification timing is structurally different between the two — any speed-based quality filter must key on `workflow_id` rather than treat the project as homogeneous, since 6-8 s is normal on photos but suspicious on a 10-s clip.
+
 **BIIGLE future scope:** Beyond species identification, BIIGLE is planned for **substrate analysis** and **size review** using the same upload/sync pipeline steps — only the downstream parsing logic changes when downloading annotations.
 
 ### S3 bucket layout
@@ -984,6 +990,10 @@ Both are used — for different audiences.
 - **PowerBI** serves DOC/Rangers, connecting to SharePoint for deployment metadata, and displaying MaxN counts on maps and charts for conservation reporting.
 
 These are complementary tools, not competing choices.
+
+### Future direction: multi-project support (Spyfish Anywhere)
+
+Generalizing the pipeline to support other camera-trap projects (different methodologies, regions, metadata sources) — same repo, layered profiles, internal schema pipeline-shaped, exports to Darwin Core Archive (and optionally Camtrap-DP). See [`claude_docs/anywhere_plan.md`](claude_docs/anywhere_plan.md).
 
 ---
 

@@ -396,11 +396,23 @@ class PathsConfig(BaseConfig):
 
     biigle_expert_raw_suffix = "_biigle_expert_raw.csv"
     biigle_expert_maxn_suffix = "_biigle_expert_maxn.csv"
+    # Training-frame volume export (download_training_volume_labels). Kept a
+    # SEPARATE artifact from the expert MaxN-review export above: it's a
+    # training-label source, never a MaxN/ecology source, so it must not share
+    # the expert filename (avoids clobbering the expert CSV and stops db_refresh
+    # from mistaking a training download for completed expert review).
+    biigle_training_raw_suffix = "_biigle_training_raw.csv"
 
     def get_biigle_expert_raw_csv_path(self, drop_id: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_raw_suffix}"
+        )
+
+    def get_biigle_training_raw_csv_path(self, drop_id: str) -> Path:
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_training_raw_suffix}"
         )
 
     def get_biigle_expert_maxn_csv_path(self, drop_id: str) -> Path:
