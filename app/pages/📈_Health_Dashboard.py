@@ -40,7 +40,6 @@ _PIPELINE_ORDER = [
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame | None:
     try:
-        sync_db_if_needed()
         with sqlite3.connect(config.db_path) as conn:
             df = pd.read_sql("SELECT * FROM deployments", conn)
             sites = pd.read_sql("SELECT site_id, protection_status FROM sites", conn)
@@ -76,6 +75,10 @@ def load_data() -> pd.DataFrame | None:
     return df
 
 
+# Sync the DB from S3 before loading. Kept OUT of the cached load_data() so the
+# sync isn't skipped when load_data returns a cached frame; sync_db_if_needed is
+# itself cached (ttl=None) so this still runs only once per session.
+sync_db_if_needed()
 df = load_data()
 if df is None or df.empty:
     st.info("No deployments in the database yet.")

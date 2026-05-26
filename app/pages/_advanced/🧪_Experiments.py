@@ -227,7 +227,7 @@ def experiment_reserve_slope(ctx):
     means = df.groupby(["display_name", "reserve"])["maxn"].mean().round(2).unstack()
     means["effect"] = means["inside"] - means["outside"]
     means["pct_change"] = (
-        (means["effect"] / means["outside"].replace(0, pd.NA)) * 100
+        (means["effect"] / means["outside"].replace(0, np.nan)) * 100
     ).round(1)
     means = means.sort_values("effect", ascending=True)
 
@@ -1221,7 +1221,7 @@ def experiment_source_calibration(ctx):
         # A 23-vs-25 mismatch (9% rel) ranks below a 1-vs-3 mismatch (67% rel) —
         # the latter is a much bigger calibration problem proportionally even
         # though the raw difference is smaller.
-        denom = merged[["x", "y"]].max(axis=1).replace(0, pd.NA)
+        denom = merged[["x", "y"]].max(axis=1).replace(0, np.nan)
         merged["rel_diff_pct"] = (merged["abs_diff"] / denom * 100).round(1).fillna(0)
         st.dataframe(
             merged.nlargest(15, "rel_diff_pct").rename(

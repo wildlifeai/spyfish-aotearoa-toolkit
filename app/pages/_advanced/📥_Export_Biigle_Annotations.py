@@ -69,8 +69,17 @@ with st.form("biigle_form"):
 # ── Fetch & display ──────────────────────────────────────────────────────────
 
 if submitted:
-    if not (email and token and volume_id_str.isdigit()):
-        st.error("Please provide a valid Email, Token, and numeric Volume ID.")
+    if not (email and token):
+        st.error("Please provide a valid Email and Token.")
+        st.stop()
+    if not volume_id_str.isdigit():
+        if whole_project:
+            st.error(
+                "The configured Biigle Project ID is missing or invalid. "
+                "Please check your configuration."
+            )
+        else:
+            st.error("Please provide a numeric Volume ID.")
         st.stop()
 
     try:
