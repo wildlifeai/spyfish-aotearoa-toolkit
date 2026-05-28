@@ -25,6 +25,26 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_section, "project_id", "biigle"))
 
     @property
+    def biigle_projects(self) -> dict:
+        """Named BIIGLE projects (in_progress / done / playground)."""
+        return get_required(self.biigle_section, "projects", "biigle")
+
+    @property
+    def biigle_upload_project_id(self) -> int:
+        """Where the pipeline uploads new volumes (in_progress)."""
+        return int(get_required(self.biigle_projects, "in_progress", "biigle.projects"))
+
+    @property
+    def biigle_done_project_id(self) -> int:
+        """Where annotator-finished volumes live; --biigle-sync reads from here."""
+        return int(get_required(self.biigle_projects, "done", "biigle.projects"))
+
+    @property
+    def biigle_playground_project_id(self) -> int:
+        """Sandbox project for testing — set BIIGLE_PROJECT_ID to point uploads here."""
+        return int(get_required(self.biigle_projects, "playground", "biigle.projects"))
+
+    @property
     def disk_id(self) -> int:
         val = os.getenv("BIIGLE_DISK_ID")
         if val:
@@ -52,6 +72,13 @@ class BiigleConfig(BaseConfig):
     @property
     def done_labels(self) -> list:
         return get_required(self.biigle_section, "done_labels", "biigle")
+
+    @property
+    def biigle_require_done_label(self) -> bool:
+        """When True, --biigle-sync gates on the Done-label whole-file check.
+        When False, every volume awaiting sync is ingested (project membership
+        in `done` is the gate)."""
+        return bool(get_required(self.biigle_section, "require_done_label", "biigle"))
 
     @property
     def default_fish_label_id(self) -> int:

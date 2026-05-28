@@ -174,6 +174,11 @@ class MLConfig(BaseConfig):
             self.training_config, "local_training_dir", "training"
         )
 
+    @property
+    def training_biigle_project_id(self) -> int:
+        """BIIGLE project ID for training-data upload paths."""
+        return int(get_required(self.training_config, "biigle_project_id", "training"))
+
     @staticmethod
     def _parse_drop_ids_from_file(path: Path) -> set:
         """One DropID per line; '#' starts a comment. Empty set if file missing."""

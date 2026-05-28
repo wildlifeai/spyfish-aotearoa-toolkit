@@ -81,10 +81,17 @@ def test_generate_clip_filename_short_duration():
 
 
 def test_generate_frame_filename():
+    # Integer seconds are zero-padded to width 4 so lex sort matches numeric order.
     result = generate_frame_filename("KSF_20240124_BUV_KSF_085_01", 125.5)
-    assert result == "KSF_20240124_BUV_KSF_085_01__frame_125.500s.jpg"
+    assert result == "KSF_20240124_BUV_KSF_085_01__frame_0125.500s.jpg"
 
 
 def test_generate_frame_filename_integer_seconds():
     result = generate_frame_filename("DROP_01", 60.0)
-    assert result == "DROP_01__frame_60.000s.jpg"
+    assert result == "DROP_01__frame_0060.000s.jpg"
+
+
+def test_generate_frame_filename_lex_matches_numeric_order():
+    a = generate_frame_filename("D", 100.077)
+    b = generate_frame_filename("D", 1011.736)
+    assert a < b  # would fail without zero-padding

@@ -224,7 +224,11 @@ def refresh_biigle(db: DatabaseManager) -> int:
         f"  biigle: {len(needs_api)} drop(s) have no local CSV — checking Biigle API..."
     )
     handler = BiigleHandler()
-    all_volumes = handler.get_volumes()
+    # Volumes may live in either the in-progress project or the done project,
+    # so reconcile against both.
+    all_volumes = handler.get_volumes(
+        config.biigle_upload_project_id
+    ) + handler.get_volumes(config.biigle_done_project_id)
 
     # Build lookup: drop_id → first matching volume. Names follow "{drop_id} — ML frames".
     needs_api_set = set(needs_api)

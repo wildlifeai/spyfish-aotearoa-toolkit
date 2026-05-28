@@ -274,13 +274,17 @@ These are complementary tools, not alternatives to each other.
 | ---- | ------- |
 | `⚙️_Deployment_Management.py` | Per-deployment pipeline status, filtering, and per-drop MaxN annotation view (uses `get_maxn_summary()`) |
 | `📈_Health_Dashboard.py` | Programme-level health: deployments per year, bad deployment rates (sorted by %, with 10% threshold reference line), validation errors by type and by failing column, pipeline funnel, annotation depth per survey (stacked horizontal funnel: none → ML → CitSci → Expert), video presence, protection status breakdown |
-| `🧪_Experiments.py` | Read-only ecological sandbox — 15 experiments grouped by category (reserve effect / programme overview / species deep-dive / source quality / distribution). Global filters at the top (source, year range, reserves) apply to every experiment. Pills navigation. See "Experiments architecture" below for the full list. |
+| `🧪_Experiments.py` | Read-only ecological sandbox — 14 experiments grouped by category (reserve effect / programme overview / species deep-dive / source quality / distribution). Global filters at the top (source, year range, reserves) apply to every experiment. Pills navigation. See "Experiments architecture" below for the full list. |
 | `🔍_Error_Review.py` | Validation errors per survey |
 | `📥_Export_Biigle_Annotations.py` | On-demand annotation download from Biigle API |
 | `📊_Model_Metrics.py` | ML training results (mAP, per-class metrics, confusion matrix) |
 | `📺_View_Deployment_Videos.py` | Video player for individual deployments |
+| `🔎_Species_Search.py` | Per-species observation lookup → every (deployment, time) sorted by source priority (expert > citsci > ml). Extracted from the Experiments page so it has its own nav entry; shares the data layer via `ecology_data.py`. |
+| `0_🆘_Error_-_Inform_Kalindi.py` | Dependency-free help page (imports only `streamlit`), pinned to the top of the nav via the `0_` filename prefix; renders even when other pages fail to load. Every other page also shows a sidebar contact note via `utils.render_contact_note()`. |
 
 Species names in `🧪_Experiments.py` are displayed as `"Common name (Scientific name)"` using a lookup loaded from `process_files/training/class_map.json` (`config.class_map_path`) via `load_common_names()`. Species without a common name in the class map fall back to scientific name only.
+
+The shared data layer lives in `app/ecology_data.py`: the cached loaders (`load_maxn`, `load_sites`, `load_common_names`, `search_species_annotations`) and the `_enrich()` drop_id/site join. Both `🧪_Experiments.py` and `🔎_Species_Search.py` import from it — single source of truth for loading + enrichment. Page-specific viz/stat helpers (`_best_source`, `_prot_rank`, `_protection_color_map`, `_shannon`, `_simpson`, …) stay in the Experiments page.
 
 **Experiments architecture (`🧪_Experiments.py`):**
 
@@ -291,7 +295,7 @@ Two filtered dataframes are passed to every experiment via a `ctx` dict:
 - `df` — year/reserve filters + single-source filter applied. Used by most experiments.
 - `df_multi` — year/reserve filters only; all sources retained. Used by **Calibration** and **Disagreement**, which by nature need both sources for every comparison point.
 
-`ctx` also carries the project-wide `protection_status → colour` map (blues for protected, warm for unprotected) and the loaded `sites` / `common_names` for experiments that need to re-query (e.g. **Species search**).
+`ctx` also carries the project-wide `protection_status → colour` map (blues for protected, warm for unprotected) and the loaded `sites` / `common_names`.
 
 | Category | Experiment | Question answered |
 | -------- | ---------- | ----------------- |
@@ -303,7 +307,6 @@ Two filtered dataframes are passed to every experiment via a `ctx` dict:
 | Programme overview | Diversity | Shannon / Simpson / Evenness per reserve. |
 | Programme overview | Leaderboard | Top sites by Sum / Mean / Species richness. |
 | Programme overview | Accumulation | Cumulative species discovered vs deployments surveyed (resampled, 95% CI). |
-| Species deep-dive | Species search | Per-species lookup → every (drop, time) observation sorted by source priority. Uses `search_species_annotations(scientific_name)` — cached per-species query. |
 | Species deep-dive | Bait arrival | Distribution of `time_of_max_seconds` per species (violin). |
 | Species deep-dive | Freq × abundance | Hanski plot: each species classified as core / patchy / transient / incidental by median lines. |
 | Species deep-dive | Co-occurrence | Species × species heatmap; cell = min-normalised intersection. |
@@ -448,7 +451,7 @@ flowchart TD
 
     M --> N["Step 7: BIIGLE Sync<br/>Detect Done volumes<br/>Download annotation CSV<br/>Parse to annotations DB<br/>annotated_by = expert<br/>expert_status: expert_uploaded → expert_complete"]
 
-    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, identify floor species (rare → 'fish' fallback)<br/>Survey-aware 70/15/15 split (with force-val overrides)<br/>Train YOLOv12 (optimizer/lr/dropout from config)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
+    N --> O["Step 8: Retrain<br/>Export BIIGLE labels → YOLO format<br/>Filter excluded drops, identify floor species (rare → 'fish' fallback)<br/>Survey-aware 85/15/0 split (with force-val overrides)<br/>Train YOLOv12 (optimizer/lr/dropout from config)<br/>Evaluate vs production<br/>Promote if mAP improvement ≥ 2%"]
 
     O --> P["Updated production model<br/>All future inference uses new weights"]
 ```
@@ -993,7 +996,7 @@ These are complementary tools, not competing choices.
 
 ### Future direction: multi-project support (Spyfish Anywhere)
 
-Generalizing the pipeline to support other camera-trap projects (different methodologies, regions, metadata sources) — same repo, layered profiles, internal schema pipeline-shaped, exports to Darwin Core Archive (and optionally Camtrap-DP). See [`claude_docs/anywhere_plan.md`](claude_docs/anywhere_plan.md).
+Generalizing the pipeline to support other camera-trap projects (different methodologies, regions, metadata sources) — same repo, layered profiles, internal schema pipeline-shaped with opportunistic Darwin Core alignment, exports to DwC-A Event Core for OBIS/GBIF publishing. See [`claude_docs/anywhere_plan.md`](claude_docs/anywhere_plan.md).
 
 ---
 
@@ -1053,7 +1056,8 @@ Sequenced by dependency, not assigned dates.
 - Marine reserve monitoring reports and report cards generated automatically from deployments with `expert_status = complete` or `reporting_status = complete`
 - BIIGLE substrate and size review parsing (same pipeline, new annotation type)
 - ✅ Programme health dashboard (`📈_Health_Dashboard.py`): KPI row, deployments per year, bad deployments per survey (sorted by % desc, 10% reference line), validation errors by type and column, pipeline funnel, per-survey annotation depth funnel, video presence over time, protection status breakdown, survey summary table
-- ✅ Ecological experiments page (`🧪_Experiments.py`): 15 experiments across reserve effect (slope chart, heatmap, year trend), programme overview (detection rate, composition, diversity, leaderboard, species accumulation), species deep-dive (search, bait arrival, frequency × abundance, co-occurrence), source quality (calibration, disagreement), and full distribution view (box plot). Global filters (source / year / reserves) apply to all experiments via a shared `ctx` dict.
+- ✅ Ecological experiments page (`🧪_Experiments.py`): 14 experiments across reserve effect (slope chart, heatmap, year trend), programme overview (detection rate, composition, diversity, leaderboard, species accumulation), species deep-dive (bait arrival, frequency × abundance, co-occurrence), source quality (calibration, disagreement), and full distribution view (box plot). Global filters (source / year / reserves) apply to all experiments via a shared `ctx` dict.
+- ✅ Species Search page (`🔎_Species_Search.py`): per-species observation lookup extracted from Experiments into its own nav-visible page; loaders + `_enrich` shared via `app/ecology_data.py`.
 - Time-series visualisations of species abundance by marine reserve — foundation in place via Experiments page; dedicated DOC-facing page remaining
 
 ---
@@ -1617,14 +1621,23 @@ python run_pipeline.py --retrain --data-prep --species        # rebuild + train 
 
 **Compose-style flags**: passing no step flag runs all three steps; passing any step flag runs only the named subset. Skipping `--data-prep` reuses the existing `process_files/training/{species,binary}/data.yaml` — useful for fast hyperparameter iteration without re-walking the label tree.
 
+### Getting BIIGLE annotations into training — two-project workflow
+
+Expert annotations are organised into **two BIIGLE projects**, which map onto the two ingestion paths:
+
+- **Per-drop-id project** — volumes named by DropID (the relevant deployments). **Done-gated**: ingested by `python run_pipeline.py --biigle-sync`, which only pulls volumes whose first file carries every label in `biigle.done_labels` (currently just `"Done Volume"` — `"Done QA Review"` to be re-added once a QA pass exists). Writes `_biigle_expert_raw.csv` + `_biigle_expert_maxn.csv`, advances `expert_status`, and these train via the normal MaxN path.
+- **Non-survey project** — old training data + some per-survey training-frame volumes. **No Done gate.** UUID/arbitrary image volumes → `python -m spyfish.biigle.biigle_to_yolo download-volume --volume-id <id>` (flat `extra_no_survey_id/volume_<id>/` bundle); per-survey Training-frames volumes → `python -m spyfish.biigle.biigle_to_yolo download-training-volume --volume-id <id>` (per-drop split keyed off the filename DropID). Both land as **extras** — discovered by `discover_extra_drops`, folded into the train split only, bypassing ceiling/floor balancing; their empty-`.txt` backgrounds are admitted to TRAIN at `training.background_ratio`.
+
+Both paths are the same core operation — *BIIGLE report → per-frame YOLO labels* — differing only in destination folder (per-drop vs `extra_no_survey_id/`). After both are on disk, a single `--retrain` (or `--retrain --data-prep`) assembles **one unified `data.yaml`** across all classes from both projects. (Open: legacy *video* drop-id volumes in the per-drop project still need a dedicated converter — see `claude_docs/todo.md`.)
+
 The orchestrator (`spyfish/orchestrator/retrain_runner.py`) chains together:
 
-1. **Export BIIGLE annotations to YOLO format** (`biigle_to_yolo.py`): Reads frame annotation CSVs from `data_quality/{DropID}/biigle_frames/`, converts bounding boxes to YOLO `.txt` format, generates `class_map.json`.
+1. **Export BIIGLE annotations to YOLO format** (`biigle_to_yolo.py`): Reads per-drop expert CSVs from `deployment_data/{survey}/{drop}/annotations/*_biigle_expert_raw.csv` (skipping frozen `legacy_video_*` exports), converts bounding boxes to YOLO `.txt` format against each drop's `frames/`, generates `class_map.json`.
 2. **Drop exclusion** (`prepare_from_annotations` + helpers): DropIDs in `excluded_drops_file` (default `process_files/training_lists/excluded_drops.txt`) are filtered out everywhere — MaxN filtering, on-disk box counts, label staging, and extras discovery. Bad drops can't tilt floor decisions or leak labels into training.
-3. **Image count + floor identification** (`count_images_per_species_in_source` → `identify_floor_species`): Walks every `<drop>/labels/*.txt` and counts distinct frames-with-species (each frame contributes at most 1 per species, regardless of how many boxes it contains — variety of visual contexts is what drives learnability, not box count). Drops without local frames are skipped (their labels can't reach training). Species appearing in fewer than `class_floor_min_images` (default 100) frames are flagged for the floor. `bait` is exempted from flooring because it must stay its own class so MaxN inference can exclude bait-cage detections from fish counts.
+3. **Image count + floor identification** (`count_images_per_species_in_source` → `identify_floor_species`): Walks every `<drop>/labels/*.txt` and counts distinct frames-with-species (each frame contributes at most 1 per species, regardless of how many boxes it contains — variety of visual contexts is what drives learnability, not box count). Drops without local frames are skipped (their labels can't reach training). Species appearing in fewer than `class_floor_min_images` (currently 50) frames are flagged for the floor. `bait` is exempted from flooring because it must stay its own class so MaxN inference can exclude bait-cage detections from fish counts.
 4. **Flatten + remap labels** (`flatten_and_remap_labels`): Stages source labels into `process_files/training/labels_staged/<drop_id>/` with class IDs rewritten to a unified ordering. Floored species are absent from the unified class list, so their bounding boxes redirect to the `"fish"` fallback class.
-5. **Survey-aware split** (`split_data.py`): Drop-level 70/15/15 train/val/test. Surveys with ≥5 drops donate one each to val + test; ≥3 drops donate one to val; smaller surveys go entirely to train. DropIDs in `force_val_drops_file` (default `process_files/training_lists/force_val_drops.txt`) are pinned to val regardless. No drop appears in two splits (no leakage).
-6. **Assemble** (`assemble_yolo_dataset`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`, copying or symlinking images and remapped labels into per-split `images/` and `labels/` trees. Image lookup is scoped by drop_id (`{drop_id: {stem: Path}}`) so identically-named frames from different drops can never cross-pair. Per-drop frame cap (`cap_frames_per_drop`, default 60) limits each canonical BUV drop to its top-N most-informative frames (dominant-species-only frames are dropped first). **Extras (drops under `extra_no_survey_id/`) bypass the cap** — they're externally curated bulk imports where every annotated frame is high-signal training data.
+5. **Survey-aware split** (`split_data.py`): Drop-level split from `train_pct`/`val_pct`/`test_pct` (currently 0.85 / 0.15 / 0.0 — test disabled, so test drops roll into train). Each survey with ≥2 drops donates one to val (and ≥3 drops one to test, when `test_pct` > 0); smaller surveys go entirely to train. DropIDs in `force_val_drops_file` (default `process_files/training_lists/force_val_drops.txt`) are pinned to val regardless. No drop appears in two splits (no leakage).
+6. **Assemble** (`assemble_yolo_dataset`): Builds the canonical YOLO directory layout under `process_files/training/{species,binary}/`, copying or symlinking images and remapped labels into per-split `images/` and `labels/` trees. Image lookup is scoped by drop_id (`{drop_id: {stem: Path}}`) so identically-named frames from different drops can never cross-pair. Per-drop frame cap (`cap_frames_per_drop`, currently 120) limits each canonical BUV drop to its top-N most-informative frames (dominant-species-only frames are dropped first). Background (empty-`.txt`) frames are admitted to the train split up to `training.background_ratio` (default 0.1). **Extras (drops under `extra_no_survey_id/`, and training-frame drops) bypass the per-drop cap** — they're externally curated bulk imports where every annotated frame is high-signal training data.
 7. **Train** (`train.py`): YOLOv12 with optimizer / `lr0` / `dropout` from `config.yaml`'s `training:` section (defaults: AdamW + 0.001 + 0.1, validated 2026-04). Underwater-tuned augmentation (HSV shifts, rotation, horizontal flip), `imgsz=640`. AMP disabled (prevents NaN losses on some underwater data). Stability params: `warmup_epochs=5`, `warmup_bias_lr=0.0001`, `nbs=64`, `box=5.0`.
 8. **Evaluate + promote** (`evaluate.py`): Evaluates new model vs production model on the val/test split. Promotes if mAP@0.5 improvement ≥ `retrain_min_improvement_pct` (2%). Auto-promotion can be disabled by passing `auto_promote=False` to `run_retraining`.
 
@@ -1885,6 +1898,14 @@ python -m spyfish.biigle.biigle_to_yolo download-volume \
 This downloads the raw annotation CSV from BIIGLE, converts bounding boxes to YOLO `.txt` label files, and writes a `class_map.json`. The output can be used directly as training data alongside pipeline-generated labels.
 
 > **TODO:** `download-volume` currently writes YOLO labels only — does not write to `spyfish_annotations.db`. See `claude_docs/todo.md` for the per-row drop_id resolution plan.
+
+### BIIGLE projects: video-era archive (4920) and frame consolidation (3711)
+
+Two BIIGLE projects hold the historical video-era data alongside the current per-drop frame work:
+
+- **Project 4920 — video clip archive.** Per-drop **video** volumes that *stream the GoPro clips straight from S3*. Most volumes reference `disk-134://process_files/clips/biigle/{survey}/{drop}/...` (marine-buv); a small number reference `disk-98://biigle_clips/...` (marine-buv-kalindi, e.g. `AHE_119`, `TUH_034`). **BIIGLE keeps no copy of its own** — the only physical store is the S3 clip files. Deleting a clip from S3 removes it from 4920 playback (annotation metadata persists in BIIGLE's DB, but the video can no longer be loaded). Treat any clip referenced by a 4920 volume as load-bearing.
+- **Project 3711 — frames + expert labels.** Holds the per-drop `{drop} — ML frames` image volumes *and* the consolidated legacy video expert annotations as `{drop} — video labels` image volumes (regenerated from the old project 4626 OBB exports). Frames live at `process_files/deployment_data/{survey}/{drop}/frames/` (disk-134). The 4626 exports themselves are backup-of-record — read from S3, don't re-export. See `claude_docs/todo.md` for the one-time uploader (`scripts/upload_video_labels_to_3711.py`).
+- **AWS clip housekeeping.** Clips under `process_files/clips/biigle/` that aren't referenced by any 4920 volume are reclaimable; clips referenced by 4920 must stay. Any deletion under that prefix must be cross-checked against 4920's volume URLs first.
 
 ### Legacy expert annotations (pre-BIIGLE)
 
