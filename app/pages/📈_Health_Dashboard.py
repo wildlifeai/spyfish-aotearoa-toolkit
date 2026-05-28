@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from utils import render_sidebar_refresh, sync_db_if_needed
+from utils import render_contact_note, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.config.base import CitSciStatus, ExpertStatus, MlStatus, VideoPresence
 from spyfish.config.wrapper import config
@@ -19,6 +19,7 @@ from spyfish.utils import extract_survey_id
 
 st.set_page_config(page_title="Programme Health", page_icon="📈", layout="wide")
 st.title("📈 Programme Health")
+render_contact_note()
 render_sidebar_refresh()
 
 # ── Data loading ──────────────────────────────────────────────────────────────

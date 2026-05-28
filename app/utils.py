@@ -29,6 +29,21 @@ def render_sidebar_refresh():
         st.rerun()
 
 
+def render_contact_note():
+    """Sidebar fallback contact note, shown on every page.
+
+    Single source of truth for the "something broke, tell Kalindi" message — keep
+    the wording here so it only changes in one place. Best-effort: it renders only
+    if the page got far enough to call it. The guaranteed fallback when a page
+    fails to load at all is the dependency-free
+    ``pages/0_🆘_Error_-_Inform_Kalindi.py`` page.
+    """
+    st.sidebar.error(
+        "⚠️ **If this tool doesn't work**, contact Kalindi immediately on "
+        "Slack, or email [kalindi@wildlife.ai](mailto:kalindi@wildlife.ai)."
+    )
+
+
 # --- Password protection ---
 def check_password():
     """Returns True if the user entered the correct password."""

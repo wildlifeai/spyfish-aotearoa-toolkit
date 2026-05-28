@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from utils import render_sidebar_refresh, sync_db_if_needed
+from utils import render_contact_note, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.config.base import (
     CitSciStatus,
@@ -384,6 +384,7 @@ def get_all_annotations_export(_adb):
 def main():
     st.set_page_config(page_title="Deployment Management", page_icon="⚙️", layout="wide")
 
+    render_contact_note()
     render_sidebar_refresh()
 
     st.title("⚙️ Deployment Management")

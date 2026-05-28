@@ -13,18 +13,19 @@ Architecture:
 Each experiment is a self-contained function that takes `ctx` and renders.
 """
 
-import json
-import sqlite3
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from ecology_data import (
+    _SOURCE_PRIORITY,
+    _enrich,
+    load_common_names,
+    load_maxn,
+    load_sites,
+)
 from utils import render_sidebar_refresh
-
-from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
 
 st.set_page_config(page_title="Experiments", page_icon="🧪", layout="wide")
 st.title("🧪 Experiments")
@@ -32,7 +33,6 @@ render_sidebar_refresh()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_SOURCE_PRIORITY = {"expert": 0, "citsci": 1, "ml": 2}
 _BEST_KEY = "_best"  # sentinel value for "best available" source
 
 
@@ -83,86 +83,9 @@ def _best_source(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=["_rank"])
 
 
-# ── Data loading (cached) ─────────────────────────────────────────────────────
-
-
-@st.cache_data(ttl=300)
-def load_maxn() -> pd.DataFrame:
-    return AnnotationDatabaseManager().get_maxn_summary()
-
-
-@st.cache_data(ttl=300)
-def search_species_annotations(scientific_name: str) -> pd.DataFrame:
-    """Every raw annotation row for one species — cached per species.
-
-    Unlike `get_maxn_summary()` (peak per drop only), this returns every
-    time-window observation so the species-search experiment can list
-    every timestamp the species was seen. Cached by argument so each
-    species selection is fetched once per session.
-    """
-    with sqlite3.connect(config.annotations_db_path) as conn:
-        return pd.read_sql(
-            "SELECT drop_id, scientific_name, time_of_max, time_of_max_seconds, "
-            "max_interval, annotated_by, confidence_agreement, external_id "
-            "FROM annotations WHERE scientific_name = ? "
-            "ORDER BY drop_id, time_of_max_seconds",
-            conn,
-            params=(scientific_name,),
-        )
-
-
-@st.cache_data(ttl=300)
-def load_sites() -> pd.DataFrame:
-    with sqlite3.connect(config.db_path) as conn:
-        return pd.read_sql(
-            "SELECT site_id, site_name, protection_status FROM sites", conn
-        )
-
-
-@st.cache_data(ttl=3600)
-def load_common_names() -> dict:
-    """scientific_name → 'Common name (Scientific name)' from class_map.json.
-
-    Returns empty dict when the file is missing or for legacy/generic entries.
-    """
-    path = config.class_map_path
-    if not path.exists():
-        return {}
-    with open(path) as f:
-        data = json.load(f)
-    return {
-        entry["scientific_name"]: f"{entry['common_name']} ({entry['scientific_name']})"
-        for entry in data.values()
-        if entry.get("scientific_name")
-        and entry.get("common_name")
-        and entry["common_name"].lower() not in ("fish", "bait", "unknown")
-        and entry["common_name"] != entry["scientific_name"]
-    }
-
-
-# ── Enrichment ────────────────────────────────────────────────────────────────
-
-
-def _enrich(df: pd.DataFrame, sites: pd.DataFrame, common_names: dict) -> pd.DataFrame:
-    """Parse drop_id segments, join sites, attach display_name. Done once globally."""
-    parts = df["drop_id"].str.split("_", expand=True)
-    df = df.copy()
-    df["reserve_code"] = parts.get(0, pd.Series("", index=df.index)).fillna("")
-    df["survey_date"] = pd.to_datetime(parts[1], format="%Y%m%d", errors="coerce")
-    df["survey_year"] = df["survey_date"].dt.year
-    p3 = parts.get(3, pd.Series("", index=df.index)).fillna("")
-    p4 = parts.get(4, pd.Series("", index=df.index)).fillna("")
-    df["site_id"] = p3 + "_" + p4
-    df["site_id"] = df["site_id"].replace("_", pd.NA)
-    df = df.merge(
-        sites[["site_id", "site_name", "protection_status"]], on="site_id", how="left"
-    )
-    df["site_name"] = df["site_name"].fillna(df["site_id"])
-    df["protection_status"] = df["protection_status"].fillna("unknown")
-    df["display_name"] = df["scientific_name"].map(
-        lambda s: common_names.get(s, s) if pd.notna(s) else s
-    )
-    return df
+# Data loaders (load_maxn, load_sites, load_common_names,
+# search_species_annotations) and _enrich live in ecology_data now — shared
+# with the Species Search page, imported at the top of this file.
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1745,189 +1668,6 @@ def experiment_freq_abundance(ctx):
         )
 
 
-def experiment_species_search(ctx):
-    df_multi = ctx["df_multi"]
-    sites = ctx["sites"]
-    common_names = ctx["common_names"]
-
-    st.subheader("Species search: every observation timeline")
-    st.caption(
-        "Pick a species — get every (drop, time) where it was observed, "
-        "grouped by source priority: expert > citsci > ml. "
-        "Queries the annotations DB per species (not loaded upfront)."
-    )
-    st.info(
-        "Uses **all sources** regardless of the global source filter — the point "
-        "is to see what each source recorded. Year/reserve filters do apply."
-    )
-
-    # Species picker: drawn from species that exist in current filtered view,
-    # using display_name for UX but keying on scientific_name for the query.
-    spp_lookup = (
-        df_multi[df_multi["scientific_name"].notna()][
-            ["scientific_name", "display_name"]
-        ]
-        .drop_duplicates()
-        .sort_values("display_name")
-    )
-    if spp_lookup.empty:
-        st.warning("No species found in the current filter.")
-        return
-
-    display_to_sci = dict(
-        zip(spp_lookup["display_name"], spp_lookup["scientific_name"])
-    )
-    species_label = st.selectbox(
-        "Species (type to filter)",
-        options=spp_lookup["display_name"].tolist(),
-        key="search_species",
-    )
-    if not species_label:
-        return
-    scientific_name = display_to_sci[species_label]
-
-    # Per-species query — fast, scales with the species' own row count
-    obs = search_species_annotations(scientific_name)
-    if obs.empty:
-        st.warning(f"No annotations found for {species_label}.")
-        return
-
-    # Attach site / reserve / date metadata using the existing _enrich pipeline.
-    # Re-enrich keeps the join logic in one place rather than duplicating it.
-    obs = _enrich(obs, sites, common_names)
-
-    # Apply the same year/reserve filters that gate the rest of the page
-    if ctx["year_range"]:
-        lo, hi = ctx["year_range"]
-        obs = obs[obs["survey_year"].between(lo, hi) | obs["survey_year"].isna()]
-    if ctx["reserves"]:
-        obs = obs[obs["reserve_code"].isin(ctx["reserves"])]
-
-    if obs.empty:
-        st.warning("No observations match the current year/reserve filter.")
-        return
-
-    # View toggle: peak per (drop, source) vs every observation
-    view = st.radio(
-        "View",
-        ["Peak per deployment", "All observations"],
-        horizontal=True,
-        key="search_view",
-        help=(
-            "Peak: one row per (deployment, source) — the time-window with the "
-            "highest count, matching the canonical MaxN. "
-            "All: every individual observation/time-window the source recorded "
-            "(can be many rows per deployment for citsci and expert)."
-        ),
-    )
-    if view == "Peak per deployment":
-        # Keep the row with the highest max_interval per (drop_id, annotated_by).
-        # Ties broken by smallest time_of_max_seconds (earliest peak).
-        obs = obs.sort_values(
-            ["max_interval", "time_of_max_seconds"],
-            ascending=[False, True],
-            na_position="last",
-        ).drop_duplicates(subset=["drop_id", "annotated_by"], keep="first")
-
-    # Sort by source priority, then most recent first
-    obs["_rank"] = obs["annotated_by"].map(_SOURCE_PRIORITY).fillna(99)
-    obs = obs.sort_values(
-        ["_rank", "survey_date", "drop_id", "time_of_max_seconds"],
-        ascending=[True, False, True, True],
-        na_position="last",
-    )
-
-    # Summary metrics per source
-    counts = obs["annotated_by"].value_counts()
-    drops_per_source = obs.groupby("annotated_by")["drop_id"].nunique()
-    m_cols = st.columns(4)
-    m_cols[0].metric("Total observations", len(obs))
-    m_cols[1].metric(
-        "Expert",
-        f"{int(counts.get('expert', 0))} obs",
-        f"{int(drops_per_source.get('expert', 0))} deployments",
-        delta_color="off",
-    )
-    m_cols[2].metric(
-        "CitSci",
-        f"{int(counts.get('citsci', 0))} obs",
-        f"{int(drops_per_source.get('citsci', 0))} deployments",
-        delta_color="off",
-    )
-    m_cols[3].metric(
-        "ML",
-        f"{int(counts.get('ml', 0))} obs",
-        f"{int(drops_per_source.get('ml', 0))} deployments",
-        delta_color="off",
-    )
-
-    # Formatted date column for display
-    obs_display = obs.copy()
-    obs_display["Date"] = obs_display["survey_date"].dt.strftime("%Y-%m-%d")
-
-    cols_to_show = [
-        "annotated_by",
-        "Date",
-        "reserve_code",
-        "site_id",
-        "drop_id",
-        "time_of_max",
-        "max_interval",
-        "confidence_agreement",
-    ]
-    if "external_id" in obs_display.columns:
-        cols_to_show.append("external_id")
-
-    display = obs_display[cols_to_show].rename(
-        columns={
-            "annotated_by": "Source",
-            "reserve_code": "Reserve",
-            "site_id": "Site",
-            "drop_id": "Drop ID",
-            "time_of_max": "Video time",
-            "max_interval": "Count",
-            "confidence_agreement": "Confidence",
-            "external_id": "External ID",
-        }
-    )
-
-    st.dataframe(
-        display,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Source": st.column_config.TextColumn("Source", width="small"),
-            "Date": st.column_config.TextColumn("Survey date", width="small"),
-            "Reserve": st.column_config.TextColumn("Reserve", width="small"),
-            "Site": st.column_config.TextColumn("Site", width="small"),
-            "Drop ID": st.column_config.TextColumn("Drop ID"),
-            "Video time": st.column_config.TextColumn(
-                "Video time",
-                width="small",
-                help="HH:MM:SS within the deployment",
-            ),
-            "Count": st.column_config.NumberColumn("Count", width="small"),
-            "Confidence": st.column_config.NumberColumn(
-                "Confidence",
-                format="%.2f",
-                width="small",
-            ),
-            "External ID": st.column_config.TextColumn(
-                "External ID",
-                width="small",
-                help="Model name (ml) or BIIGLE annotation ID (expert)",
-            ),
-        },
-    )
-
-    st.download_button(
-        f"⬇ Download {species_label} observations (CSV)",
-        data=display.to_csv(index=False).encode("utf-8"),
-        file_name=f"{scientific_name.replace(' ', '_')}_observations.csv",
-        mime="text/csv",
-    )
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 #  Main flow: load → enrich → global controls → filter → dispatch
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2031,7 +1771,6 @@ EXPERIMENTS = {
     "Leaderboard": experiment_site_leaderboard,
     "Accumulation": experiment_species_accumulation,
     # Species deep-dive
-    "Species search": experiment_species_search,
     "Bait arrival": experiment_bait_arrival,
     "Freq × abundance": experiment_freq_abundance,
     "Co-occurrence": experiment_cooccurrence,
