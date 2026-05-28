@@ -177,8 +177,13 @@ def generate_clip_filename(drop_id: str, duration: float, start_seconds: float) 
 
 
 def generate_frame_filename(drop_id: str, time_seconds: float) -> str:
-    """Standardizes Zooniverse/Biigle JPEG frame naming."""
-    return f"{drop_id}__frame_{time_seconds:.3f}s.jpg"
+    """Standardizes Zooniverse/Biigle JPEG frame naming.
+
+    Integer-second part is zero-padded to 4 digits so lexicographic sort
+    (e.g. BIIGLE's file listing) matches numeric time order for any video
+    under 10 000s. Existing un-padded frames on S3 are unaffected.
+    """
+    return f"{drop_id}__frame_{time_seconds:08.3f}s.jpg"
 
 
 # ── Species labels (shared Biigle label-tree export) ────────────────────────

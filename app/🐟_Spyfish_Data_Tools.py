@@ -1,4 +1,5 @@
 import streamlit as st
+from utils import render_contact_note
 
 st.set_page_config(
     page_title="Spyfish Data Tools",
@@ -6,6 +7,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+render_contact_note()
 
 st.title("🐟 Spyfish Aotearoa Data Tools")
 st.caption(

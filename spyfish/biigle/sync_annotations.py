@@ -137,15 +137,15 @@ def maxn_rows_to_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
 
 def sync_biigle_annotations():
     """
-    Sync annotations from Biigle volumes marked as Done.
+    Sync annotations from Biigle volumes that the annotator has marked as done.
 
     For each deployment with expert_status=uploaded and a biigle_volume_id:
-    - Check if the volume is marked Done (file-level labels)
-    - Download the annotation report
-    - Save raw CSV for YOLO retraining
-    - Aggregate into MaxN counts and ingest into annotations DB
-    - Export MaxN CSV per drop
-    - Rebuild YOLO labels from all expert CSVs
+    - Confirm the volume lives in the `done` project (3711). In-progress
+      volumes (4942) are skipped so the annotator's WIP isn't pulled prematurely.
+    - When `biigle.require_done_label` is true, ALSO require the legacy
+      `Done Volume` whole-file label gate (belt-and-braces during transition).
+    - Download the annotation report, save raw CSV, aggregate to MaxN, ingest
+      into the annotations DB, export MaxN CSV per drop, rebuild YOLO labels.
     """
     logging.info("Starting Biigle annotation sync...")
 
@@ -159,6 +159,14 @@ def sync_biigle_annotations():
         logging.info("No active deployments with Biigle volumes found to check.")
         return
 
+    # Project-membership gate: only volumes currently in `done` (3711) are ready
+    # to sync. One API call instead of per-volume get_volume_info.
+    done_project_id = config.biigle_done_project_id
+    # Cache full volume dicts (not just IDs) so we can reuse media_type below
+    # without a per-volume get_volume_info() round-trip.
+    done_volumes = {v["id"]: v for v in handler.get_volumes(done_project_id)}
+    logging.info(f"Project {done_project_id} (done) has {len(done_volumes)} volume(s)")
+
     processed_drops = []
     for dep in deployments:
         drop_id = dep["drop_id"]
@@ -167,16 +175,31 @@ def sync_biigle_annotations():
         logging.debug(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
-            is_done, media_type = handler.volume_is_done(volume_id)
-            if not is_done:
+            if volume_id not in done_volumes:
                 logging.debug(
-                    f"  Volume {volume_id} for {drop_id} not marked Done yet. Skipping."
+                    f"  Volume {volume_id} for {drop_id} not in project "
+                    f"{done_project_id} (done) yet. Skipping."
                 )
                 continue
 
-            logging.info(
-                f"  Volume {volume_id} for {drop_id} is DONE ({media_type}). Downloading report..."
-            )
+            if config.biigle_require_done_label:
+                is_done, media_type = handler.volume_is_done(volume_id)
+                if not is_done:
+                    logging.debug(
+                        f"  Volume {volume_id} for {drop_id} in done project but "
+                        "Done-label gate enabled and label missing. Skipping."
+                    )
+                    continue
+                logging.info(
+                    f"  Volume {volume_id} for {drop_id} is DONE ({media_type}). Downloading report..."
+                )
+            else:
+                # Reuse cached metadata — saves a get_volume_info() round-trip per volume
+                media_type = done_volumes[volume_id].get("media_type", "image")
+                logging.info(
+                    f"  Volume {volume_id} for {drop_id} in done project "
+                    f"({media_type}). Downloading report..."
+                )
 
             parser = BiigleParser()
             report_type = (

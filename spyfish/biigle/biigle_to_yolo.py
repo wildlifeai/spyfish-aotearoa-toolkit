@@ -8,6 +8,7 @@ into process_files/deployment_data/{drop_id}/annotations/.
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -759,6 +760,63 @@ def download_training_volume_labels(
     return summary
 
 
+def _drop_id_from_volume_name(name: str) -> Optional[str]:
+    """Parse a canonical drop_id from a volume name like
+    `"{drop_id} — video labels"` or `"{drop_id} — ML frames"`. Returns None when
+    the first token doesn't validate as a drop_id (i.e. a multi-drop volume)."""
+    head = re.split(r"\s+|—|–|-", name.strip(), maxsplit=1)[0]
+    try:
+        config.validate_drop_id(head)
+    except ValueError:
+        return None
+    return head
+
+
+def download_project_volume_labels(
+    project_id: int, force: bool = False
+) -> Dict[int, Dict[str, Dict[str, int]]]:
+    """Per-project download wrapper around `download_training_volume_labels`.
+
+    For each volume in `project_id`:
+      - if the volume name starts with a canonical drop_id (per-drop volume)
+        and that drop's `_biigle_training_raw.csv` already exists, skip unless
+        ``force`` — fast path, no API calls beyond the project's volume list;
+      - otherwise hand off to `download_training_volume_labels(volume_id)`
+        (which handles multi-drop survey-level volumes via the
+        `{drop_id}__frame_<secs>s.jpg` filename convention).
+
+    Returns ``{volume_id: per-drop summary}`` for volumes that were downloaded.
+    Skipped volumes are not in the dict.
+    """
+    from spyfish.biigle.biigle_handler import BiigleHandler
+
+    handler = BiigleHandler()
+    volumes = handler.get_volumes(project_id)
+    logging.info(f"Project {project_id}: {len(volumes)} volume(s)")
+
+    out: Dict[int, Dict[str, Dict[str, int]]] = {}
+    skipped = downloaded = 0
+    for v in volumes:
+        vol_id = v["id"]
+        name = v.get("name", "")
+        drop_id = _drop_id_from_volume_name(name)
+        if drop_id and not force:
+            raw_path = config.get_biigle_training_raw_csv_path(drop_id)
+            if raw_path.exists():
+                logging.info(f"  skip {vol_id} ({drop_id}) — {raw_path.name} exists")
+                skipped += 1
+                continue
+        logging.info(f"  download {vol_id} ({name})")
+        out[vol_id] = download_training_volume_labels(vol_id)
+        downloaded += 1
+
+    logging.info(
+        f"Project {project_id}: downloaded {downloaded}, skipped {skipped} "
+        f"(use --force to re-download)"
+    )
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert local Biigle expert CSVs to YOLO labels."
@@ -825,6 +883,23 @@ def main():
         "--volume-id", required=True, type=int, help="Biigle training-frames volume ID"
     )
 
+    # New: per-project loop. Skips per-drop volumes whose training raw CSV is
+    # already on disk; --force re-downloads everything.
+    proj_cmd = subparsers.add_parser(
+        "download-project",
+        help=(
+            "Download labels for every volume in a BIIGLE project. Per-drop "
+            "volumes whose `_biigle_training_raw.csv` already exists are "
+            "skipped (use --force to re-download)."
+        ),
+    )
+    proj_cmd.add_argument(
+        "--project-id", required=True, type=int, help="BIIGLE project ID"
+    )
+    proj_cmd.add_argument(
+        "--force", action="store_true", help="Re-download even when local CSV exists"
+    )
+
     args = parser.parse_args()
 
     if args.command == "convert":
@@ -836,6 +911,8 @@ def main():
         )
     elif args.command == "download-training-volume":
         download_training_volume_labels(args.volume_id)
+    elif args.command == "download-project":
+        download_project_volume_labels(args.project_id, force=args.force)
     else:
         parser.print_help()
 

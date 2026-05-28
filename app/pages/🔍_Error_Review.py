@@ -3,7 +3,7 @@ from typing import Optional
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from utils import render_sidebar_refresh, sync_db_if_needed
+from utils import render_contact_note, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.database.manager import DatabaseManager
 
@@ -150,6 +150,7 @@ def main():
     st.set_page_config(page_title="Error Review", page_icon="🔍", layout="wide")
 
     # --- Sidebar ---
+    render_contact_note()
     render_sidebar_refresh()
 
     st.title("🔍 Data Validation & Error Review")

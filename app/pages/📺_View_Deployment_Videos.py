@@ -1,4 +1,5 @@
 import streamlit as st
+from utils import render_contact_note
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
@@ -104,6 +105,12 @@ def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
         except OSError:
             pass
 
+
+# --- Contact note ---
+# Shared helper (single source of truth in utils.render_contact_note). Rendered
+# first, before any video/S3 logic, so it paints even if the rest of the page
+# errors out — the clip-download path has broken this page before.
+render_contact_note()
 
 # --- MAIN APP ---
 # --- Streamlit UI ---
@@ -225,6 +232,10 @@ if presigned_url:
 
             duration = clip_end - clip_start
             t0 = _t.monotonic()
+            # Drop any previously extracted clip first so its bytes (and the
+            # backing Streamlit media file) are released before we build the next.
+            for _k in ("clip_bytes", "clip_file_name", "clip_drop_id"):
+                st.session_state.pop(_k, None)
             with st.status(
                 f"Extracting {duration:.0f}s clip, wait time depends on your "
                 "connection (S3 download + browser upload). Often under a "
@@ -247,13 +258,36 @@ if presigned_url:
                     )
                     start_label = f"{start_min}m{start_sec:02d}s"
                     end_label = f"{end_min}m{end_sec:02d}s"
-                    # Render the download button in the same run; bytes don't
-                    # need to live in st.session_state because Streamlit ships
-                    # the data to the browser at render time.
-                    st.download_button(
-                        label="⬇️ Download Clip",
-                        data=clip_bytes,
-                        file_name=f"{current_drop_id}_clip_{start_label}_{end_label}.mp4",
-                        mime="video/mp4",
-                        type="primary",
+                    # Stash the bytes in session_state so the download button
+                    # (rendered below, on every run) keeps re-registering the
+                    # media file. st.download_button does NOT inline the data —
+                    # it registers the bytes with Streamlit's MediaFileManager
+                    # and hands the browser a /media/<hash>.mp4 URL. That media
+                    # file is garbage-collected on any rerun that doesn't
+                    # re-render the button — and clicking the button itself
+                    # triggers a rerun — so a button rendered only inside this
+                    # `if` block leaves the browser fetching an already-evicted
+                    # file → MediaFileStorageError (the broken page that needed
+                    # an app reboot).
+                    st.session_state["clip_bytes"] = clip_bytes
+                    st.session_state["clip_file_name"] = (
+                        f"{current_drop_id}_clip_{start_label}_{end_label}.mp4"
                     )
+                    st.session_state["clip_drop_id"] = current_drop_id
+
+    # Render the download button on EVERY run — not just the extract run — so the
+    # media file stays registered until the user actually clicks download. Gate it
+    # on the clip belonging to the currently-loaded video, so switching drops hides
+    # (and frees) a stale clip from a previous deployment.
+    current_drop_label = st.session_state.get("presigned_drop_id") or "clip"
+    if (
+        st.session_state.get("clip_bytes")
+        and st.session_state.get("clip_drop_id") == current_drop_label
+    ):
+        st.download_button(
+            label="⬇️ Download Clip",
+            data=st.session_state["clip_bytes"],
+            file_name=st.session_state["clip_file_name"],
+            mime="video/mp4",
+            type="primary",
+        )

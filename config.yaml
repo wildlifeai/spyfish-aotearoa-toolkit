@@ -78,8 +78,8 @@ ml_inference:
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
-  confidence_threshold: 0.25      # Base YOLO inference threshold
-  maxn_confidence_threshold: 0.50  # Threshold for counting fish in MaxN
+  confidence_threshold: 0.15      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
+  maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
   remote_host: "mahuika"
   remote_user: "kalindi"
   extraction:
@@ -134,14 +134,33 @@ ffmpeg:
 
 
 biigle:
-  project_id: 3711      #  4081 playground 3711 Spyfish Aotearoa project 4626 spyfish model
+  # Named projects. Workflow: pipeline uploads to `in_progress`; annotator moves
+  # the volume to `done` when finished, which is where --biigle-sync reads from.
+  # `playground` is the testing sandbox — point uploads there by setting
+  # BIIGLE_PROJECT_ID=4081 in the environment.
+  projects:
+    in_progress: 4942        # upload target — pipeline pushes new volumes here
+    done: 3711               # Spyfish Aotearoa — annotator-finished volumes
+    playground: 4081         # sandbox for testing / try-things-out
+    training: 4626           # legacy backup-of-record for training-data uploads
+  # Default project for generic handler methods (used when no role is specified).
+  # Points at in_progress so plain `config.biigle_project_id` = upload target.
+  project_id: 4942
   disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
   volume_report_type_video: 10                   # TODO Volume overview report
   volume_report_type_image: 10                   # TODO Volume overview report
-  # Done labels — whole-file labels that signal a volume is ready for ingestion
-  done_labels: ["Done Volume", "Done QA Review"]
+  # Done labels — whole-file labels that signal a volume is ready for ingestion.
+  # All listed labels must be present. Gated on "Done Volume" only for now;
+  # re-add "Done QA Review" once the QA pass is part of the workflow (see todo).
+  done_labels: ["Done Volume"]
+  # When true, --biigle-sync requires the Done-label gate (volume_is_done) before
+  # ingesting a volume's annotations. When false, the volume's presence in the
+  # `done` project (3711) is treated as sufficient and every volume awaiting sync
+  # is ingested. Flipped to false 2026-05-28 — project moves are the workflow;
+  # see todo to retire the label gate entirely.
+  require_done_label: false
   # Default fish label for ML annotations uploaded to Biigle
   # This is the exact fallback if a species is not found in label_mapping below.
   default_fish_label_id: 531298   # tree 3375 → "Fish: review required" — fallback for fish-bucket / unknown ML predictions
@@ -179,7 +198,7 @@ training:
   train_pct: 0.85
   val_pct: 0.15
   test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
-  class_floor_min_images: 200   # merge species appearing in fewer than this many distinct frames into "fish"
+  class_floor_min_images: 50    # merge species appearing in fewer than this many distinct frames into "fish"
   local_training_dir: "process_files/training"
   excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
   force_val_drops_file: "process_files/training_lists/force_val_drops.txt" # drops to force into val (overrides survey-aware donation)

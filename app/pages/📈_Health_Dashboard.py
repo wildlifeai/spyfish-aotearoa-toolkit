@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from utils import render_sidebar_refresh, sync_db_if_needed
+from utils import render_contact_note, render_sidebar_refresh, sync_db_if_needed
 
 from spyfish.config.base import CitSciStatus, ExpertStatus, MlStatus, VideoPresence
 from spyfish.config.wrapper import config
@@ -19,6 +19,7 @@ from spyfish.utils import extract_survey_id
 
 st.set_page_config(page_title="Programme Health", page_icon="📈", layout="wide")
 st.title("📈 Programme Health")
+render_contact_note()
 render_sidebar_refresh()
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -40,7 +41,6 @@ _PIPELINE_ORDER = [
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame | None:
     try:
-        sync_db_if_needed()
         with sqlite3.connect(config.db_path) as conn:
             df = pd.read_sql("SELECT * FROM deployments", conn)
             sites = pd.read_sql("SELECT site_id, protection_status FROM sites", conn)
@@ -76,6 +76,10 @@ def load_data() -> pd.DataFrame | None:
     return df
 
 
+# Sync the DB from S3 before loading. Kept OUT of the cached load_data() so the
+# sync isn't skipped when load_data returns a cached frame; sync_db_if_needed is
+# itself cached (ttl=None) so this still runs only once per session.
+sync_db_if_needed()
 df = load_data()
 if df is None or df.empty:
     st.info("No deployments in the database yet.")
