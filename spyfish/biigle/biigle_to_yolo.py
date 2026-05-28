@@ -764,7 +764,7 @@ def _drop_id_from_volume_name(name: str) -> Optional[str]:
     """Parse a canonical drop_id from a volume name like
     `"{drop_id} — video labels"` or `"{drop_id} — ML frames"`. Returns None when
     the first token doesn't validate as a drop_id (i.e. a multi-drop volume)."""
-    head = re.split(r"\s+|—", name.strip(), maxsplit=1)[0]
+    head = re.split(r"\s+|—|–|-", name.strip(), maxsplit=1)[0]
     try:
         config.validate_drop_id(head)
     except ValueError:

@@ -162,10 +162,10 @@ def sync_biigle_annotations():
     # Project-membership gate: only volumes currently in `done` (3711) are ready
     # to sync. One API call instead of per-volume get_volume_info.
     done_project_id = config.biigle_done_project_id
-    done_volume_ids = {v["id"] for v in handler.get_volumes(done_project_id)}
-    logging.info(
-        f"Project {done_project_id} (done) has {len(done_volume_ids)} volume(s)"
-    )
+    # Cache full volume dicts (not just IDs) so we can reuse media_type below
+    # without a per-volume get_volume_info() round-trip.
+    done_volumes = {v["id"]: v for v in handler.get_volumes(done_project_id)}
+    logging.info(f"Project {done_project_id} (done) has {len(done_volumes)} volume(s)")
 
     processed_drops = []
     for dep in deployments:
@@ -175,7 +175,7 @@ def sync_biigle_annotations():
         logging.debug(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
-            if volume_id not in done_volume_ids:
+            if volume_id not in done_volumes:
                 logging.debug(
                     f"  Volume {volume_id} for {drop_id} not in project "
                     f"{done_project_id} (done) yet. Skipping."
@@ -194,9 +194,8 @@ def sync_biigle_annotations():
                     f"  Volume {volume_id} for {drop_id} is DONE ({media_type}). Downloading report..."
                 )
             else:
-                media_type = handler.get_volume_info(volume_id).get(
-                    "media_type", "image"
-                )
+                # Reuse cached metadata — saves a get_volume_info() round-trip per volume
+                media_type = done_volumes[volume_id].get("media_type", "image")
                 logging.info(
                     f"  Volume {volume_id} for {drop_id} in done project "
                     f"({media_type}). Downloading report..."

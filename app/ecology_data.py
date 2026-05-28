@@ -79,7 +79,11 @@ def _enrich(df: pd.DataFrame, sites: pd.DataFrame, common_names: dict) -> pd.Dat
     parts = df["drop_id"].str.split("_", expand=True)
     df = df.copy()
     df["reserve_code"] = parts.get(0, pd.Series("", index=df.index)).fillna("")
-    df["survey_date"] = pd.to_datetime(parts[1], format="%Y%m%d", errors="coerce")
+    df["survey_date"] = pd.to_datetime(
+        parts.get(1, pd.Series("", index=df.index)),
+        format="%Y%m%d",
+        errors="coerce",
+    )
     df["survey_year"] = df["survey_date"].dt.year
     p3 = parts.get(3, pd.Series("", index=df.index)).fillna("")
     p4 = parts.get(4, pd.Series("", index=df.index)).fillna("")

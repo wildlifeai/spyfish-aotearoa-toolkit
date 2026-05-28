@@ -142,6 +142,7 @@ biigle:
     in_progress: 4942        # upload target — pipeline pushes new volumes here
     done: 3711               # Spyfish Aotearoa — annotator-finished volumes
     playground: 4081         # sandbox for testing / try-things-out
+    training: 4626           # legacy backup-of-record for training-data uploads
   # Default project for generic handler methods (used when no role is specified).
   # Points at in_progress so plain `config.biigle_project_id` = upload target.
   project_id: 4942
@@ -186,8 +187,6 @@ biigle:
   report_download_retry_interval_secs: 2.0
 
 training:
-  # BIIGLE project used by training-data upload paths (legacy backup-of-record).
-  biigle_project_id: 4626
   image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"]   # canonical image suffixes accepted anywhere in the pipeline
   epochs: 100
   patience: 25

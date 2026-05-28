@@ -45,6 +45,11 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_projects, "playground", "biigle.projects"))
 
     @property
+    def biigle_training_project_id(self) -> int:
+        """Legacy backup-of-record where training-data uploads land."""
+        return int(get_required(self.biigle_projects, "training", "biigle.projects"))
+
+    @property
     def disk_id(self) -> int:
         val = os.getenv("BIIGLE_DISK_ID")
         if val:
