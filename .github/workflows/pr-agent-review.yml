@@ -1,0 +1,23 @@
+# PR-Agent code review (Gemini) — org starter workflow
+# Adds AI review to this repo: automatic on PR open, plus /review, /describe,
+# /improve and /ask commands in PR comments. Logic and house rules live in
+# wildlifeai/.github; this file just calls them. Docs: wildlifeai/.github/docs/pr-agent.md
+
+name: PR-Agent code review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    uses: wildlifeai/.github/.github/workflows/pr-agent.yml@main
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
