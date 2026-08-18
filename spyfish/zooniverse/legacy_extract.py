@@ -29,7 +29,7 @@ _LEGACY_KEY_MAP: dict[str, str] = {
     # video filename
     "video_filename": SubjectKeys.VIDEO_FILENAME,
     "#video_filename": SubjectKeys.VIDEO_FILENAME,
-    # upl seconds — the clip's start offset within the source video
+    # upl seconds, the clip's start offset within the source video
     "upl_seconds": SubjectKeys.UPL_SECONDS,
     "#upl_seconds": SubjectKeys.UPL_SECONDS,
     "#UplAbsSeconds": SubjectKeys.UPL_SECONDS,
@@ -57,7 +57,7 @@ def _normalize_legacy_metadata(meta: dict) -> dict:
     """Add canonical keys for any legacy-named values present in `meta`.
 
     Returns a copy with canonical aliases added. Existing canonical keys are
-    never overwritten — they take precedence over legacy variants.
+    never overwritten, they take precedence over legacy variants.
     """
     out = dict(meta)
     for legacy_key, canonical_key in _LEGACY_KEY_MAP.items():
@@ -81,7 +81,7 @@ def build_legacy_prefix_index(db_drop_ids: list[str]) -> dict[str, list[str]]:
 
     The prefix key includes the trailing underscore before the replicate
     suffix so site numbers cannot prefix-collide (``062`` vs ``0621``).
-    Drop_ids without a trailing ``_<digits>`` replicate are skipped — they
+    Drop_ids without a trailing ``_<digits>`` replicate are skipped, they
     cannot be hit by the query keys this resolver builds.
 
     Each bucket is sorted so ``bucket[-1]`` yields the highest replicate
@@ -106,7 +106,7 @@ def build_year_fuzzy_index(
     Group canonical drop_ids by (reserve, site, year) for year-fuzzy lookup.
 
     Used as a fallback when the exact date in a legacy stem doesn't match
-    any DB entry — e.g. SLI_NEW_017 recorded as 03/03/2022 but the DB has
+    any DB entry, e.g. SLI_NEW_017 recorded as 03/03/2022 but the DB has
     the survey dated 28/02/2022. Key: ("SLI", "017", "2022").
     Each bucket is sorted so ``bucket[-1]`` yields the highest replicate.
     """
@@ -139,13 +139,13 @@ def resolve_legacy_drop_id(
     1. Strip ``_NEW`` upload-suffix from the reserve code if present
        (e.g. ``SLI_NEW_003_28_02_2022`` → ``SLI_003_28_02_2022``).
     2. Exact date match via ``legacy_index`` (DMY or YMD pattern).
-    3. Year-fuzzy match via ``year_fuzzy_index``: (reserve, site, year) —
+    3. Year-fuzzy match via ``year_fuzzy_index``: (reserve, site, year),
        handles surveys where the filename date differs from the DB date by
        days or weeks (seen in practice for SLI and KPT surveys).
 
     Returns ``None`` if no match is found at any pass.
     """
-    # Pass 1 — strip _NEW upload-suffix so SLI_NEW_* resolves like SLI_*
+    # Pass 1, strip _NEW upload-suffix so SLI_NEW_* resolves like SLI_*
     stem = _NEW_SUFFIX_RE.sub(r"\1_", stem)
 
     m = _LEGACY_DMY_PATTERN.match(stem)
@@ -160,13 +160,13 @@ def resolve_legacy_drop_id(
         else:
             return None
 
-    # Pass 2 — exact date
+    # Pass 2, exact date
     prefix = f"{reserve}_{date_str}_BUV_{reserve}_{site}_"
     matches = legacy_index.get(prefix)
     if matches:
         return matches[-1]
 
-    # Pass 3 — year-fuzzy (same reserve + site + year, any month/day)
+    # Pass 3, year-fuzzy (same reserve + site + year, any month/day)
     if year_fuzzy_index is None:
         return None
     fuzzy = year_fuzzy_index.get((reserve, site, yyyy))
@@ -174,7 +174,7 @@ def resolve_legacy_drop_id(
         return None
     if len(fuzzy) > 1:
         logging.warning(
-            f"Year-fuzzy: {len(fuzzy)} matches for ({reserve}, {site}, {yyyy}) — "
+            f"Year-fuzzy: {len(fuzzy)} matches for ({reserve}, {site}, {yyyy}), "
             f"returning highest replicate {fuzzy[-1]}"
         )
     return fuzzy[-1]
@@ -291,7 +291,7 @@ def subject_completion_from_csv(subjects_csv_paths: list[str]) -> pd.DataFrame:
         stem = Path(vf).stem
         # Try the strict canonical pattern first; fall through to the legacy
         # DMY/YMD resolver for stems that don't match. Either branch returns
-        # None for unresolvable junk — caller treats that as "no drop_id".
+        # None for unresolvable junk, caller treats that as "no drop_id".
         try:
             return config.validate_drop_id(stem)
         except ValueError:
@@ -331,7 +331,7 @@ def parse_legacy_classifications(
     ``drop_id`` is None by resolving the filename stem through the legacy
     prefix index. Unresolvable legacy stems stay as ``drop_id=None``.
     """
-    # Step 1 — strict parse. Warnings about missing keys and unresolved filenames
+    # Step 1, strict parse. Warnings about missing keys and unresolved filenames
     # are expected here: legacy subjects use old key names and non-canonical stems.
     # Step 2 below patches both.
     logging.info(
@@ -343,7 +343,7 @@ def parse_legacy_classifications(
     if df.empty:
         return df
 
-    # Step 2 — legacy post-process: resolve DMY/YMD/year-fuzzy stems and _NEW variants.
+    # Step 2, legacy post-process: resolve DMY/YMD/year-fuzzy stems and _NEW variants.
     legacy_index = build_legacy_prefix_index(db_drop_ids)
     year_fuzzy_index = build_year_fuzzy_index(db_drop_ids)
 
@@ -377,7 +377,7 @@ def parse_legacy_classifications(
     logging.info(
         f"Legacy parse step 2/2: resolved {n_resolved}/{n_unmatched} legacy stem(s). "
         f"{n_still_unresolved} genuinely unresolvable (pre-standard filenames, "
-        f"surveys not yet in DB — see claude_docs/todo.md resolver audit)."
+        f"surveys not yet in DB, see claude_docs/todo.md resolver audit)."
     )
     return df
 
@@ -394,7 +394,7 @@ def _filter_to_complete_drops(
     )
     for _, row in partial.iterrows():
         logging.info(
-            f"  Skipping {row['drop_id']} — {row['retired']}/{row['total']} subjects retired "
+            f"  Skipping {row['drop_id']}, {row['retired']}/{row['total']} subjects retired "
             f"({row['pct_retired']:.0f}%)"
         )
 
@@ -407,7 +407,7 @@ def _filter_to_complete_drops(
     return df[mask].copy()
 
 
-# ── Orchestrator — the --legacy entry point for Zooniverse backfill ──────────
+# ── Orchestrator, the --legacy entry point for Zooniverse backfill ──────────
 
 
 def run_legacy_zooniverse_backfill() -> None:
@@ -437,7 +437,7 @@ def run_legacy_zooniverse_backfill() -> None:
         return
 
     # Load subjects CSV first so we can filter classifications to retired-only
-    # before aggregation — mirrors the retirement gate in fetch_classifications().
+    # before aggregation, mirrors the retirement gate in fetch_classifications().
     retired_subject_ids: set[str] = set()
     if subjects_csvs:
         logging.info(
@@ -451,7 +451,7 @@ def run_legacy_zooniverse_backfill() -> None:
         )
     else:
         logging.warning(
-            f"No *subject*.csv in {legacy_dir} — retirement filter skipped. "
+            f"No *subject*.csv in {legacy_dir}, retirement filter skipped. "
             "Download subjects export from Zooniverse project lab and place in this directory."
         )
 
@@ -490,7 +490,7 @@ def run_legacy_zooniverse_backfill() -> None:
         completion_df = subject_completion_from_csv([str(p) for p in subjects_csvs])
         aggregated_df = _filter_to_complete_drops(aggregated_df, completion_df)
     else:
-        logging.warning(f"No *subject*.csv in {legacy_dir} — completion gate skipped.")
+        logging.warning(f"No *subject*.csv in {legacy_dir}, completion gate skipped.")
 
     if aggregated_df.empty:
         logging.info("Legacy backfill: no fully-complete drop_ids to export. Done.")

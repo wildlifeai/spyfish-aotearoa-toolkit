@@ -29,9 +29,9 @@ class MLRunner:
         )
         self.ml_fps = config.ml_fps
         self.imgsz = int(config.imgsz)
-        self.confidence = get_required(
-            config.ml_inference, "confidence_threshold", "ml_inference"
-        )
+        # Via the property (not raw get_required) so the (0, 1] validation fires,
+        # a stray confidence_threshold=0 floods inference with max_det garbage.
+        self.confidence = config.confidence_threshold
         self.model = str(validate_model_path(config.pipeline_model_path))
 
     def get_inference_targets(self) -> List[dict]:
@@ -67,7 +67,7 @@ class MLRunner:
             if df.at[idx, "video_presence"] == VideoPresence.ARCHIVED:
                 drop_id = df.at[idx, "drop_id"]
                 logging.warning(
-                    f"Skipping {drop_id}: video in DEEP_ARCHIVE — "
+                    f"Skipping {drop_id}: video in DEEP_ARCHIVE, "
                     f"restore with `aws s3api restore-object` before ML can run."
                 )
                 continue
@@ -173,19 +173,37 @@ class MLRunner:
                     maxn_conf=maxn_conf,
                 )
                 self.db.sync_annotation_counts([drop_id])
-                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
+                # sync_annotation_counts already advances ml_status → ml_complete for
+                # any drop that gained annotations; only advance here if it didn't
+                # (e.g. a zero-detection drop still in ml_running), so we never trip
+                # the ml_complete → ml_complete guard.
+                dep = self.db.get_deployment(drop_id)
+                if not dep or dep["ml_status"] != MlStatus.COMPLETE:
+                    self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
                 success_targets.append(drop_id)
 
             except Exception as e:
                 logging.error(f"ML processing failed for {drop_id}: {e}", exc_info=True)
-                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
-                self.db.add_validation_error(
-                    survey_id=config.get_survey_id_from_drop(drop_id),
-                    drop_id=drop_id,
-                    error_type=MlStatus.ERROR,
-                    column_name="ml_inference",
-                    error_message=f"ML processing failed: {type(e).__name__}: {e}",
-                )
+                # Only a drop still in ml_running can legally move to ml_error. If it
+                # already reached ml_complete (inference succeeded but a later step
+                # raised), forcing ml_error would itself be an invalid transition and
+                # mask the real success, so skip it.
+                dep = self.db.get_deployment(drop_id)
+                if dep and dep["ml_status"] == MlStatus.RUNNING:
+                    self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
+                    self.db.add_validation_error(
+                        survey_id=config.get_survey_id_from_drop(drop_id),
+                        drop_id=drop_id,
+                        error_type=MlStatus.ERROR,
+                        column_name="ml_inference",
+                        error_message=f"ML processing failed: {type(e).__name__}: {e}",
+                    )
+                else:
+                    current = dep["ml_status"] if dep else "unknown"
+                    logging.error(
+                        f"{drop_id}: exception after status reached {current!r}, not "
+                        "forcing ml_error (would be an invalid transition)."
+                    )
 
         return success_targets
 
@@ -205,7 +223,7 @@ class MLRunner:
             dep = self.db.get_deployment(drop_id)
             if dep and dep["ml_status"] == MlStatus.RUNNING:
                 logging.error(
-                    f"Drop {drop_id} is still ml_status=running after batch — advancing to error."
+                    f"Drop {drop_id} is still ml_status=running after batch, advancing to error."
                 )
                 self.db.update_section_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
 

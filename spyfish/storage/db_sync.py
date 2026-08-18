@@ -33,7 +33,13 @@ def _download_db_if_newer(s3_key: str, local_path: Path, label: str) -> bool:
 
     logging.info(f"Downloading {label} to {local_path} (S3 is newer)...")
     try:
-        s3.download_object_from_s3(s3_key, str(local_path))
+        # download_object_from_s3 swallows its own errors and returns False,
+        # it does NOT raise, so the return value is the only failure signal.
+        # Stamping the mtime after a failed download would make every later run
+        # believe the stale local file is current and skip the download forever.
+        if not s3.download_object_from_s3(s3_key, str(local_path)):
+            logging.error(f"Failed to download {label} (see S3Handler error above).")
+            return False
         # Match local mtime to S3 so the next run's timestamp check skips correctly.
         os.utime(local_path, (time.time(), s3_mtime))
         logging.info(f"{label.capitalize()} downloaded successfully.")
@@ -57,7 +63,13 @@ def _upload_db(s3_key: str, local_path: Path, label: str) -> bool:
     logging.info(f"Uploading {label} to s3://{config.s3_bucket}/{s3_key}...")
     try:
         s3 = S3Handler()
-        s3.upload_file_to_s3(str(local_path), s3_key)
+        # upload_file_to_s3 catches BotoCoreError itself and returns False, it
+        # does NOT raise, so the except below never fires on a transport failure.
+        # Ignoring the return value reported failed uploads as successes and left
+        # S3 silently stale (observed 2026-08-07 on the annotations DB).
+        if not s3.upload_file_to_s3(str(local_path), s3_key):
+            logging.error(f"Failed to upload {label} (see S3Handler error above).")
+            return False
         logging.info(f"{label.capitalize()} uploaded successfully.")
         return True
     except Exception as e:
@@ -67,7 +79,7 @@ def _upload_db(s3_key: str, local_path: Path, label: str) -> bool:
 
 # ── Public wrappers ──
 # One-liners over the generic helpers. Kept as distinct functions so callers
-# can name the specific DB they mean — changing the label or wiring up a third
+# can name the specific DB they mean, changing the label or wiring up a third
 # DB is a single-line edit.
 
 
@@ -94,7 +106,7 @@ def upload_annotations_db() -> bool:
 def sync_annotations() -> bool:
     """
     Synchronizes the local nested annotations and images to S3.
-    Excludes .mp4 files — Zooniverse clips are uploaded directly to Zooniverse,
+    Excludes .mp4 files. Zooniverse clips are uploaded directly to Zooniverse,
     and raw BUV footage already lives in media/ on S3.
     """
     s3 = S3Handler()
@@ -121,7 +133,7 @@ def sync_annotations() -> bool:
     # data.yaml) and noise (YOLO debug-image dumps, tensorboard event files,
     # symlinked dataset trees that re-resolve to deployment_data/ frames,
     # intermediate label-staging dirs, spot-check audits). A proper home for
-    # training artifacts in S3 — and the right include/exclude rules — is a
+    # training artifacts in S3, and the right include/exclude rules, is a
     # design decision for later. Promoted models still flow to S3 via the
     # models/ prefix below.
     # See claude_docs/todo.md "ML pipeline" entry.
@@ -132,7 +144,7 @@ def sync_annotations() -> bool:
 
     # Exclude external Biigle volumes that live under extra_no_survey_id/.
     # Those are pre-curated bulk imports already hosted on Biigle's storage
-    # (disk-134) — re-uploading them to the project bucket duplicates GBs of
+    # (disk-134), re-uploading them to the project bucket duplicates GBs of
     # frames + annotations for no benefit. Drop annotations + class_map + frames
     # were synced once at download time; if a volume needs to be re-shared,
     # re-pull from Biigle rather than relying on this bucket as backup.
@@ -148,7 +160,7 @@ def sync_pipeline_results() -> bool:
     """
     Comprehensive sync of all pipeline outputs to S3:
     1. Uploads both databases (pipeline and annotations)
-    2. Syncs the data_quality directory (CSVs, images, models — no .mp4s)
+    2. Syncs the data_quality directory (CSVs, images, models, no .mp4s)
     """
     logging.info("Starting consolidated pipeline sync to S3...")
     success = True

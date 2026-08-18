@@ -28,7 +28,6 @@ import os
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Union
 
@@ -115,47 +114,6 @@ class ProgressTracker:
         logging.info(
             f"   ✅ {self.filename}: {self.total_size / (1024 * 1024):.1f} MB "
             f"in {elapsed:.1f}s (avg {speed_mbps:.2f} MB/s)"
-        )
-
-
-@dataclass
-class S3FileConfig:
-    """
-    Configuration class for S3 file operations containing file paths and environment variables.
-
-    Attributes:
-        keyword (str): Identifier for the type of data (e.g., 'survey', 'site', 'movie')
-        kso_env_var (str): Environment variable name for KSO file path
-        sharepoint_env_var (str): Environment variable name for Sharepoint file path
-        kso_filename (str): Temporary filename for KSO data
-        sharepoint_filename (str): Temporary filename for Sharepoint data
-    """
-
-    keyword: str
-    kso_env_var: str
-    sharepoint_env_var: str
-    kso_filename: str
-    sharepoint_filename: str
-
-    @classmethod
-    def from_keyword(cls, keyword: str) -> "S3FileConfig":
-        """
-        Creates a configuration object for S3 file operations based on
-        a keyword (e.g., "survey", "site").
-
-        Args:
-            keyword(str): String identifier for the type of data
-
-        Returns:
-            S3FileConfig: The configuration information for S3 handler.
-        """
-        upper = keyword.upper()
-        return cls(
-            keyword=keyword,
-            kso_env_var=f"S3_KSO_{upper}_CSV",
-            sharepoint_env_var=f"S3_SHAREPOINT_{upper}_CSV",
-            kso_filename=f"{keyword}_kso_temp.csv",
-            sharepoint_filename=f"{keyword}_sharepoint_temp.csv",
         )
 
 
@@ -355,31 +313,6 @@ class S3Handler:
             logging.error("Failed to upload data to S3 %s, with error: %s", s3_path, e)
             return False
 
-    def read_data_from_s3(self, s3_path: str) -> str:
-        """
-        Downloads a text file from S3 and returns it as a string.
-
-        Args:
-            s3_path (str): The S3 object key.
-
-        Returns:
-            str: The file contents as a string.
-
-        Raises:
-            S3FileNotFoundError: If the file cannot be read from S3.
-        """
-        logging.info("Reading data from S3 %s", s3_path)
-        try:
-            response = self.s3.get_object(Bucket=self.bucket, Key=s3_path)
-            text_data = response["Body"].read().decode("utf-8")
-            logging.info("Successfully read data from S3 %s", s3_path)
-            return text_data
-        except BotoCoreError as e:
-            logging.error("Failed to read data from S3 %s: %s", s3_path, e)
-            raise S3FileNotFoundError(
-                f"Failed to read data from S3 {s3_path}: {e}"
-            ) from e
-
     def upload_file_to_s3(
         self,
         filename: str,
@@ -479,7 +412,7 @@ class S3Handler:
             # that files deleted locally persist in S3 for backup/recovery.
             # NOTE: '--size-only' makes the comparison size-based only, ignoring
             # last-modified timestamps. Without this flag, aws s3 sync re-uploads
-            # any file whose mtime differs from S3 — which causes spurious
+            # any file whose mtime differs from S3, which causes spurious
             # re-uploads when files are touched, regenerated, or copied between
             # machines (timestamps drift even when content is identical).
             cmd = [
@@ -505,38 +438,6 @@ class S3Handler:
         except Exception as e:
             logging.error(f"Unexpected error during S3 sync: {e}")
             return False
-
-    def upload_updated_df_to_s3(
-        self,
-        df: pd.DataFrame,
-        key: str,
-        filename: Optional[str] = None,
-        keyword: Optional[str] = None,
-        keep_df_index=True,
-    ) -> None:
-        """
-        Upload an updated DataFrame to S3 with progress bar and error handling.
-
-        Args:
-            df (pd.DataFrame): DataFrame to upload.
-            key (str): S3 key for the file.
-            keyword (str): String identifier for the type of data (e.g., "survey", "site").
-            keep_df_index (bool): Whether to write the DataFrame index to the CSV.
-        """
-        if keyword:
-            temp_filename = f"updated_{keyword}_kso_temp.csv"
-        elif filename:
-            temp_filename = filename
-        else:
-            raise ValueError("Either keyword or filename must be provided.")
-
-        try:
-            df.to_csv(temp_filename, index=keep_df_index)
-            self.upload_file_to_s3(temp_filename, key)
-        except (BotoCoreError, IOError) as e:
-            logging.error("Failed to upload updated %s data to S3: %s", keyword, e)
-        finally:
-            delete_file(temp_filename)
 
     def get_file_paths_set_from_s3(
         self, prefix: str = "", suffixes: tuple = ()
@@ -757,6 +658,36 @@ class S3Handler:
             raise S3FileNotFoundError(
                 f"Failed to read CSV {csv_s3_path} from S3: {e}"
             ) from e
+
+    def list_common_prefixes(self, prefix: str) -> list:
+        """Immediate "subdirectory" names under an S3 prefix.
+
+        Uses Delimiter="/" so only the first level below `prefix` is returned,
+        as bare names (no trailing slash, no parent path), e.g. run folders
+        under training/results/.
+
+        Raises on transport/credential errors rather than returning [], an
+        empty listing and a failed listing are different answers, and callers
+        showing "no results yet" on an S3 outage mislead.
+        """
+        paginator = self.s3.get_paginator("list_objects_v2")
+        pages = paginator.paginate(
+            Bucket=self.bucket, Prefix=prefix.rstrip("/") + "/", Delimiter="/"
+        )
+        names = []
+        for page in pages:
+            for entry in page.get("CommonPrefixes", []):
+                names.append(Path(entry["Prefix"]).name)
+        return names
+
+    def read_bytes_from_s3(self, key: str) -> bytes:
+        """Raw bytes of an S3 object (images, model files, anything binary).
+
+        Raises ClientError when the object is absent or unreachable; callers
+        that want a soft miss should catch it.
+        """
+        response = self.s3.get_object(Bucket=self.bucket, Key=key)
+        return response["Body"].read()
 
     def generate_presigned_url(self, key: str, expiration: int = 3600) -> Optional[str]:
         """

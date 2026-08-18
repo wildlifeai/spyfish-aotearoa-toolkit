@@ -16,7 +16,6 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
-
 from sftk.common import VALIDATION_PATTERNS
 from sftk.validation_strategies import (
     CleanRowTracker,

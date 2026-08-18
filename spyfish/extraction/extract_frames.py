@@ -5,7 +5,7 @@ Reads the selections CSV output from selection strategies and extracts one clean
 per row at the exact TimeOfMax moment (absolute video timestamp in seconds).
 
 Also converts the corresponding YOLO bounding boxes from the raw ML CSV into
-COCO-format JSON alongside the frames — ready for upload (e.g., to Biigle).
+COCO-format JSON alongside the frames, ready for upload (e.g., to Biigle).
 
 Separation of concerns:
   - select_clips.py  → which intervals are interesting (selections CSV)
@@ -42,7 +42,7 @@ def open_video_capture(
     """Open a cv2.VideoCapture for a drop's video, local first then S3.
 
     If ``prefer_local_path`` is given and the file exists, opens that. Otherwise
-    generates a presigned S3 URL and opens that — cv2 streams the moov atom
+    generates a presigned S3 URL and opens that, cv2 streams the moov atom
     upfront and uses HTTP byte-range requests for subsequent seeks, no full
     download. The presigned URL is valid for 1 hour.
 
@@ -89,7 +89,7 @@ def extract_one_frame_from_cap(
 ) -> bool:
     """Seek into an already-open cv2.VideoCapture and write one JPEG.
 
-    Caller owns the lifecycle of `cap` — open it once, call this in a loop,
+    Caller owns the lifecycle of `cap`, open it once, call this in a loop,
     release at the end. This avoids re-opening the video (and re-fetching the
     moov atom over HTTP for remote videos) per frame.
 
@@ -137,7 +137,7 @@ def extract_frame(
     attempt a second rotation.
 
     For multi-frame extraction from the same video, prefer opening one
-    cv2.VideoCapture and calling `extract_one_frame_from_cap` in a loop —
+    cv2.VideoCapture and calling `extract_one_frame_from_cap` in a loop,
     that avoids re-fetching the MP4 moov atom on every call (significant
     over remote/HTTP video URLs).
 
@@ -154,7 +154,7 @@ def extract_frame(
 
     rotation = read_video_rotation(cap)
     if rotation:
-        logging.debug(f"Video rotation metadata: {rotation}° — will apply to frames.")
+        logging.debug(f"Video rotation metadata: {rotation}°, will apply to frames.")
     try:
         return extract_one_frame_from_cap(
             cap, seek_seconds, out_path, frame_index=frame_index, rotation=rotation
@@ -192,7 +192,7 @@ def build_coco_from_raw_csv(
     The tolerance guards against a footgun in the training-frames flow:
     raw CSVs there are sparse (only frames with detections produce rows),
     so a frame with zero detections would otherwise inherit annotations
-    from the closest *other* training frame — sometimes hundreds of
+    from the closest *other* training frame, sometimes hundreds of
     seconds away. The MaxN flow's raw CSV is dense (one row per
     detection per video frame), so the nearest row is normally within
     ~1/fps; the default 1.0s tolerance is comfortably above that.
@@ -222,6 +222,7 @@ def build_coco_from_raw_csv(
     for rec in frame_records:
         img_id = rec["image_id"]
         time_of_max = rec["time_of_max"]  # absolute seconds from video start
+        rec_drop_id = rec.get("drop_id", "")
 
         images.append(
             {
@@ -230,26 +231,50 @@ def build_coco_from_raw_csv(
                 "width": rec.get("img_w", img_w),
                 "height": rec.get("img_h", img_h),
                 "time_of_max": time_of_max,
-                "drop_id": rec.get("drop_id", ""),
+                "drop_id": rec_drop_id,
                 "selection_reason": rec.get("selection_reason", ""),
             }
         )
 
+        # Every frame record must identify its source video, all callers
+        # populate it. A missing drop_id means a global nearest-time lookup
+        # could silently pull boxes from a different video, so fail loudly
+        # instead of guessing.
+        if not rec_drop_id:
+            raise ValueError(
+                f"Frame record {img_id} ({rec.get('file_name')!r}) has no drop_id. "
+                "Every record must identify its source video so detections are "
+                "matched within the correct video, not globally."
+            )
+
         if raw_df.empty:
             continue
 
+        # When the raw CSV spans multiple videos (the merged-volume case), the
+        # same time_seconds occurs in every video, each chapter's clock runs
+        # 0–707s, so a global nearest-time lookup could pull boxes from a
+        # different video at the same timestamp. Restrict to this frame's own
+        # video. Single-video pipeline raw CSVs have no drop_id column (one
+        # video, so the whole file is already the right scope).
+        candidates = raw_df
+        if "drop_id" in raw_df.columns:
+            candidates = raw_df[raw_df["drop_id"] == rec_drop_id]
+            if candidates.empty:
+                n_frames_without_detections += 1
+                continue
+
         # Find the raw CSV frame closest to this time_of_max
-        deltas = (raw_df["time_seconds"] - time_of_max).abs()
+        deltas = (candidates["time_seconds"] - time_of_max).abs()
         nearest_idx = deltas.idxmin()
         nearest_delta = deltas.loc[nearest_idx]
         if nearest_delta > max_time_delta_seconds:
-            # No raw-CSV row close enough — this frame has no detections.
+            # No raw-CSV row close enough, this frame has no detections.
             # Skip rather than snap to a distant row.
             n_frames_without_detections += 1
             continue
 
-        nearest_time = raw_df["time_seconds"].loc[nearest_idx]
-        frame_rows = raw_df[raw_df["time_seconds"] == nearest_time]
+        nearest_time = candidates["time_seconds"].loc[nearest_idx]
+        frame_rows = candidates[candidates["time_seconds"] == nearest_time]
 
         for _, row in frame_rows.iterrows():
             cls_name = str(row.get("class", "unknown"))
@@ -277,12 +302,12 @@ def build_coco_from_raw_csv(
     if n_frames_without_detections:
         logging.info(
             f"{n_frames_without_detections}/{len(frame_records)} frame(s) had no "
-            f"raw-CSV detections within {max_time_delta_seconds}s — uploaded "
+            f"raw-CSV detections within {max_time_delta_seconds}s, uploaded "
             "without annotations (expected for sparse training-frame inference)."
         )
 
     return {
-        "info": {"description": "Spyfish Aotearoa — ML MaxN peaks", "version": "1.0"},
+        "info": {"description": "Spyfish Aotearoa. ML MaxN peaks", "version": "1.0"},
         "images": images,
         "annotations": annotations,
         "categories": [
@@ -309,7 +334,7 @@ def extract_frames_from_selections(
     This is the exact frame that was the deciding factor in the MaxN calculation.
 
     Unlike draw_frames.py (which draws boxes ON the frame using cv2 for QA),
-    this extracts a clean frame with annotations stored separately as COCO JSON —
+    this extracts a clean frame with annotations stored separately as COCO JSON,
     suitable for upload.
 
     Frames are written to the canonical frames/ directory for the drop and shared
@@ -321,7 +346,7 @@ def extract_frames_from_selections(
         raw_csv_path: Raw YOLO CSV ({drop_id}_{model}_raw.csv), for COCO annotations.
         write_coco: When True (default), build and write the COCO JSON next to
             the extracted frames. Pass False from callers that will rebuild the
-            COCO themselves — e.g. the Zooniverse → BIIGLE path, where the ML
+            COCO themselves, e.g. the Zooniverse → BIIGLE path, where the ML
             raw CSV has no detections at the volunteer-selected timestamps and
             ``rerun_inference_on_extracted_frames`` writes the COCO instead.
 
@@ -346,7 +371,7 @@ def extract_frames_from_selections(
         pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
     )
 
-    # Open the video once and reuse the cap for every frame in this drop —
+    # Open the video once and reuse the cap for every frame in this drop,
     # avoids re-fetching the MP4 moov atom per call, which matters for remote
     # videos and is non-trivial even locally for many selections.
     # extract_frame() applies rotation to pixel data, so swap w/h for 90°/270° videos
@@ -369,7 +394,7 @@ def extract_frames_from_selections(
         frame_paths = []
 
         for img_id, (_, row) in enumerate(df.iterrows(), start=1):
-            # TimeOfMaxAbsSeconds is an absolute video timestamp — use it directly.
+            # TimeOfMaxAbsSeconds is an absolute video timestamp, use it directly.
             seek_seconds = float(row[config.csv_clip_max_time_column])
             frame_index = None
 
@@ -419,7 +444,7 @@ def extract_frames_from_selections(
 
     df["FramePath"] = frame_paths
 
-    # Build and save COCO JSON — only include records for frames that were successfully extracted
+    # Build and save COCO JSON, only include records for frames that were successfully extracted
     successful_records = [
         rec for rec, path in zip(frame_records, frame_paths) if path is not None
     ]

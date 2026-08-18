@@ -5,19 +5,15 @@ import sys
 
 import pandas as pd
 
+from spyfish.config.base import SECTION_VALUES
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.db_sync import upload_db
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-_SECTION_COLUMNS = {
-    "ml_status",
-    "citsci_status",
-    "expert_status",
-    "reporting_status",
-    "ingest_status",
-}
+# Derived from the status registry so a new section is picked up automatically.
+_SECTION_COLUMNS = set(SECTION_VALUES)
 
 
 def process_csv_targets(csv_path: str, push_s3: bool = False):
@@ -30,7 +26,7 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
         KSF_20240124_BUV_KSF_085_01,ml_ready,10,12345
         KSF_20240124_BUV_KSF_085_02,,5,
 
-    Row order implies priority — first row has highest priority. If a 'priority'
+    Row order implies priority, first row has highest priority. If a 'priority'
     column is present it takes precedence; otherwise row order is used.
     """
     if not os.path.exists(csv_path):
@@ -54,6 +50,7 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
     has_volume_col = "biigle_volume_id" in df.columns
 
     updates = []
+    invalid_values = 0
     for _, row in df.iterrows():
         drop_id = str(row[drop_col]).strip()
         if not drop_id or drop_id == "nan":
@@ -67,7 +64,20 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
         for col in section_cols:
             val = row.get(col)
             if pd.notna(val) and str(val).strip():
-                entry["sections"][col] = str(val).strip()
+                value = str(val).strip()
+                # These values are written with update_section_status(), which is
+                # the low-level setter and validates neither transition nor
+                # vocabulary. This is the only guard between a hand-edited CSV and
+                # the state machine, without it a shifted column silently writes
+                # e.g. a priority into citsci_status.
+                if value not in SECTION_VALUES[col]:
+                    logging.error(
+                        f"{drop_id}: '{value}' is not a valid {col}, expected one "
+                        f"of {SECTION_VALUES[col]}. Skipping this value."
+                    )
+                    invalid_values += 1
+                    continue
+                entry["sections"][col] = value
         if has_priority_col and pd.notna(row.get("priority")):
             entry["priority"] = int(row["priority"])
         if has_volume_col and pd.notna(row.get("biigle_volume_id")):
@@ -117,7 +127,7 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
             if entry["biigle_volume_id"]:
                 extras.append(f"biigle_volume_id={entry['biigle_volume_id']}")
             logging.info(
-                f"Updated '{drop_id}' — priority={priority}"
+                f"Updated '{drop_id}', priority={priority}"
                 + ("" if not extras else ", " + ", ".join(extras))
             )
         except Exception as e:
@@ -126,6 +136,12 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
     logging.info(
         f"Summary: Updated {success_count} deployments. ({missing_count} skipped/not found)."
     )
+    if invalid_values:
+        logging.error(
+            f"{invalid_values} status value(s) were rejected as invalid and NOT written. "
+            "Check the CSV headers line up with the columns, a shifted column is the "
+            "usual cause."
+        )
 
     if push_s3 and success_count > 0:
         logging.info("Pushing updated database to S3...")

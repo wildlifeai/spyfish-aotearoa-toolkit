@@ -14,6 +14,54 @@ from spyfish.config.base import (
 from spyfish.config.wrapper import config
 
 
+def parse_geo_value(value) -> Optional[float]:
+    """Coerce a CSV coordinate/depth cell to float, or None.
+
+    Returns None for blanks, non-numeric text and 0. Zero is explicitly allowed by
+    the Latitude/Longitude range rules in config.yaml as a "not recorded" sentinel,
+    but 0,0 is a real place in the Atlantic, storing it as a number would put
+    deployments off the coast of Africa on any map. None is the honest answer.
+
+    Note this must NOT go through str() like the text columns do, or a missing
+    value becomes the string "nan" instead of NULL.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number == 0:  # NaN or the not-recorded sentinel
+        return None
+    return number
+
+
+def _clean_protection_status(value) -> str:
+    """Normalise a ProtectionStatus cell so variants collapse to one category.
+
+    The source data carries "No protection", "No Protection" and "No protection "
+    as three spellings of one thing, which renders as three separate bars on any
+    chart. Whitespace is normalised here; case variants are resolved through the
+    `protection_status_aliases` map in config.yaml, keyed by the lowercased form.
+    """
+    text = " ".join(str(value or "").split())
+    if not text or text.lower() == "nan":
+        return ""
+    return config.protection_status_aliases.get(text.lower(), text)
+
+
+def _add_column_if_missing(cursor, table: str, column: str, decl: str) -> None:
+    """Idempotent ``ALTER TABLE ... ADD COLUMN`` for in-place schema migration.
+
+    Re-raises anything that is not a duplicate-column error, so a genuine schema
+    fault still surfaces instead of being swallowed. `table` and `column` are
+    always code literals here, never user input.
+    """
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
+
+
 class DatabaseManager:
     """
     Core SQLite database manager for the Spyfish pipeline.
@@ -93,6 +141,9 @@ class DatabaseManager:
                     expert_annotations INTEGER DEFAULT 0,
                     biigle_volume_id TEXT,
                     training_biigle_volume_id INTEGER,
+                    latitude REAL,
+                    longitude REAL,
+                    depth REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -108,6 +159,13 @@ class DatabaseManager:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     raise
+
+            # Where the drop actually landed, and how deep. Distinct from the
+            # planned position on `sites`, comparing the two surfaces mis-sited
+            # drops. Both coordinate pairs are in config `sensitive_columns`.
+            _add_column_if_missing(cursor, "deployments", "latitude", "REAL")
+            _add_column_if_missing(cursor, "deployments", "longitude", "REAL")
+            _add_column_if_missing(cursor, "deployments", "depth", "REAL")
 
             # Idempotent rename of biigle_status → expert_status. The column
             # represents data-presence semantics (does this drop have expert
@@ -126,10 +184,20 @@ class DatabaseManager:
                     site_id TEXT PRIMARY KEY,
                     site_name TEXT,
                     link_to_marine_reserve TEXT,
-                    protection_status TEXT
+                    protection_status TEXT,
+                    region TEXT,
+                    latitude REAL,
+                    longitude REAL
                 )
             """
             )
+
+            # `region` is the only geographic grouping the pipeline has, there is
+            # no region column on deployments and none derivable from a DropID.
+            # latitude/longitude here are the PLANNED site position.
+            _add_column_if_missing(cursor, "sites", "region", "TEXT")
+            _add_column_if_missing(cursor, "sites", "latitude", "REAL")
+            _add_column_if_missing(cursor, "sites", "longitude", "REAL")
 
             cursor.execute(
                 """
@@ -194,7 +262,7 @@ class DatabaseManager:
     def upsert_sites(self, sites_df) -> None:
         """Replace all site metadata from BUV Survey Sites DataFrame.
 
-        Full replace (delete + insert) rather than upsert — sites are config data with no
+        Full replace (delete + insert) rather than upsert, sites are config data with no
         pipeline state, so removed sites should not linger in the DB.
         """
         with self.get_connection() as conn:
@@ -208,23 +276,39 @@ class DatabaseManager:
                     continue
                 cursor.execute(
                     """
-                    INSERT INTO sites (site_id, site_name, link_to_marine_reserve, protection_status)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO sites (
+                        site_id, site_name, link_to_marine_reserve, protection_status,
+                        region, latitude, longitude
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(site_id) DO UPDATE SET
                         site_name=excluded.site_name,
                         link_to_marine_reserve=excluded.link_to_marine_reserve,
-                        protection_status=excluded.protection_status
+                        protection_status=excluded.protection_status,
+                        region=excluded.region,
+                        latitude=excluded.latitude,
+                        longitude=excluded.longitude
                     """,
                     (
                         site_id,
                         str(row.get(config.site_name_column, "")),
                         str(row.get(config.link_to_marine_reserve_column, "")),
-                        str(row.get(config.protection_status_column, "")),
+                        _clean_protection_status(
+                            row.get(config.protection_status_column)
+                        ),
+                        # Region is not on this sheet, it is resolved from
+                        # Marine Reserves.csv via LinkToMarineReserve, so the
+                        # caller passes it in on the row when available.
+                        str(row.get(config.region_column, "")).strip(),
+                        # Site coordinates are the PLANNED position and are named
+                        # Targeted* upstream; the actual fix lives on deployments.
+                        parse_geo_value(row.get(config.targeted_latitude_column)),
+                        parse_geo_value(row.get(config.targeted_longitude_column)),
                     ),
                 )
             if skipped:
                 logging.warning(
-                    f"Skipped {skipped} site rows with missing/empty site_id — check column mapping in config.yaml."
+                    f"Skipped {skipped} site rows with missing/empty site_id, check column mapping in config.yaml."
                 )
             conn.commit()
         logging.info(f"Upserted {len(sites_df) - skipped} sites into DB.")
@@ -242,6 +326,9 @@ class DatabaseManager:
             config.site_name_column: row["site_name"],
             config.link_to_marine_reserve_column: row["link_to_marine_reserve"],
             config.protection_status_column: row["protection_status"],
+            config.region_column: row["region"],
+            config.latitude_column: row["latitude"],
+            config.longitude_column: row["longitude"],
         }
 
     def add_or_update_deployment(
@@ -256,14 +343,21 @@ class DatabaseManager:
         sampling_start: Optional[int] = None,
         sampling_end: Optional[int] = None,
         biigle_volume_id: Optional[str] = None,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        depth: Optional[float] = None,
     ) -> None:
         """Insert a deployment, or update its metadata if it already exists.
 
         INSERT-only (ignored on conflict): ml_status, and the citsci/biigle/
         reporting status columns (set by SQL defaults on insert only).
         UPDATE-on-conflict: ingest_status, video_path, video_presence,
-        is_bad_deployment, sampling_start, sampling_end, biigle_volume_id.
+        is_bad_deployment, sampling_start, sampling_end, biigle_volume_id,
+        latitude, longitude, depth.
         Annotation counts (ml/citsci/expert) are owned by sync_annotation_counts.
+
+        latitude/longitude/depth are COALESCEd so a re-ingest from a CSV that has
+        blanked them does not erase a previously recorded position.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -273,9 +367,9 @@ class DatabaseManager:
                     drop_id, video_path, video_presence,
                     ingest_status, ml_status,
                     is_bad_deployment, sampling_start, sampling_end,
-                    biigle_volume_id
+                    biigle_volume_id, latitude, longitude, depth
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
                     video_presence=excluded.video_presence,
@@ -283,7 +377,10 @@ class DatabaseManager:
                     is_bad_deployment=excluded.is_bad_deployment,
                     sampling_start=excluded.sampling_start,
                     sampling_end=excluded.sampling_end,
-                    biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id)
+                    biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id),
+                    latitude=COALESCE(excluded.latitude, deployments.latitude),
+                    longitude=COALESCE(excluded.longitude, deployments.longitude),
+                    depth=COALESCE(excluded.depth, deployments.depth)
                 """,
                 (
                     drop_id,
@@ -295,6 +392,9 @@ class DatabaseManager:
                     sampling_start,
                     sampling_end,
                     biigle_volume_id,
+                    latitude,
+                    longitude,
+                    depth,
                 ),
             )
             conn.commit()
@@ -305,7 +405,7 @@ class DatabaseManager:
         Caller-supplied column names (section, prerequisite keys) MUST be
         checked against the real schema before being interpolated into SQL.
         The allowed set is derived from `PRAGMA table_info(deployments)` at
-        init time — there is no hand-maintained list to drift from the schema.
+        init time, there is no hand-maintained list to drift from the schema.
         """
         if column not in self._deployments_columns:
             raise ValueError(
@@ -318,7 +418,7 @@ class DatabaseManager:
 
         When transitioning out of the section's ERROR value, clears that
         section's rows from validation_errors so a retry starts clean. This
-        is the low-level setter — bypasses transition validation. Pipeline
+        is the low-level setter, bypasses transition validation. Pipeline
         code should use `advance_status()` instead.
         """
         self.validate_column(section)
@@ -360,7 +460,7 @@ class DatabaseManager:
         """Bulk-set a section's status across many drops in one transaction.
 
         Designed for ingest paths that need to advance hundreds of drops at
-        once (legacy CSV ingest, bootstrap orchestrator) — calling
+        once (legacy CSV ingest, bootstrap orchestrator), calling
         `advance_status` in a Python loop is ~3 roundtrips per drop and
         gets slow fast.
 
@@ -407,7 +507,7 @@ class DatabaseManager:
             n_changed = cursor.rowcount
 
             # If the target isn't ERROR, clear any error rows for these drops
-            # in this section — mirrors `update_section_status`'s behaviour.
+            # in this section, mirrors `update_section_status`'s behaviour.
             if (
                 status_cls is not None
                 and new_status != status_cls.ERROR
@@ -499,7 +599,7 @@ class DatabaseManager:
         """Sets the training_biigle_volume_id for a specific deployment.
 
         Called only after the training-frames batch has been successfully uploaded
-        to a Biigle volume — a non-NULL value means "this drop's training frames
+        to a Biigle volume, a non-NULL value means "this drop's training frames
         are in Biigle volume <id>".
         """
         with self.get_connection() as conn:
@@ -525,14 +625,14 @@ class DatabaseManager:
 
     def get_drops_for_survey_with_video_window(self, survey_id: str) -> List[str]:
         """Returns drop_ids in `survey_id` that have a downloadable video AND a
-        defined sampling window — the eligibility set for training-frame extraction.
+        defined sampling window, the eligibility set for training-frame extraction.
 
         Filters:
           - drop_id starts with `{survey_id}_` (e.g. AHE_20250513_BUV → AHE_20250513_BUV_*)
           - video_presence = 'present' (excludes ABSENT, ARCHIVED, NO_VIDEO_BAD_DEP)
           - sampling_start AND sampling_end are both set
 
-        Deliberately does NOT filter on is_bad_deployment or ingest_status —
+        Deliberately does NOT filter on is_bad_deployment or ingest_status,
         per-spec, bad/short deployments still produce useful training frames
         as long as they have a video and a sampling window.
         """
@@ -550,35 +650,6 @@ class DatabaseManager:
                 (survey_id, VideoPresence.PRESENT),
             )
             return [row["drop_id"] for row in cursor.fetchall()]
-
-    def get_deployments_by_section_status(
-        self, section: str, status: str
-    ) -> List[Dict[str, Any]]:
-        """Returns all deployments where a specific section matches the given status."""
-        self.validate_column(section)
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"SELECT * FROM deployments WHERE {section} = ? ORDER BY priority DESC",
-                (status,),
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
-    def get_deployments_by_section_statuses(
-        self, section: str, statuses: List[str]
-    ) -> List[Dict[str, Any]]:
-        """Returns all deployments where a specific section is in the given statuses."""
-        self.validate_column(section)
-        if not statuses:
-            return []
-        placeholders = ", ".join(["?"] * len(statuses))
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"SELECT * FROM deployments WHERE {section} IN ({placeholders}) ORDER BY priority DESC",
-                statuses,
-            )
-            return [dict(row) for row in cursor.fetchall()]
 
     def get_deployments_eligible(
         self,
@@ -630,7 +701,7 @@ class DatabaseManager:
 
         Used by the Biigle annotation-sync stage to find volumes that have been
         uploaded but not yet marked complete. Deliberately does NOT filter by
-        `ingest_status='ok'` — a deployment can be excluded *after* its Biigle
+        `ingest_status='ok'`, a deployment can be excluded *after* its Biigle
         volume was created, and we still want to sync back any annotations the
         experts produced before it was flagged.
         """
@@ -683,17 +754,6 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM deployments ORDER BY priority DESC")
             return {row["drop_id"]: dict(row) for row in cursor.fetchall()}
-
-    def clear_pipeline_errors(self, drop_id: str):
-        """Remove all pipeline errors (we now just delete all for drop_id to restart)."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM validation_errors WHERE DropID = ?",
-                (drop_id,),
-            )
-            conn.commit()
-            logging.info(f"Cleared errors entries for {drop_id}")
 
     def clear_validation_errors(self):
         """Clears all validation errors from the database."""
@@ -833,7 +893,7 @@ class DatabaseManager:
         # Advance section status for any drop that now has annotations.
         # Data presence overrides intent: a drop with annotations is complete
         # for that section regardless of prior pipeline state (including
-        # SKIPPED — if someone produced annotations anyway, they're done).
+        # SKIPPED, if someone produced annotations anyway, they're done).
         # Skip only drops already at COMPLETE for that section (idempotent).
         # The three (source → column → complete-value) tuples are part of
         # the fixed schema contract; hardcoded here to keep DatabaseManager
@@ -865,20 +925,3 @@ class DatabaseManager:
             f"Updated annotation counts for {len(counts_by_drop)} deployments "
             f"(advanced status on {total_advanced} drop-section(s))."
         )
-
-    def export_to_csv(self, output_dir: Optional[str] = None) -> List[str]:
-        """Export all DB tables to CSV files. Returns list of written file paths."""
-        import pandas as pd
-
-        out = Path(output_dir) if output_dir else Path(self.db_path).parent
-        out.mkdir(parents=True, exist_ok=True)
-
-        tables = ["deployments", "validation_errors", "sites"]
-        written = []
-        with self.get_connection() as conn:
-            for table in tables:
-                path = out / f"{table}.csv"
-                pd.read_sql(f"SELECT * FROM {table}", conn).to_csv(path, index=False)
-                written.append(str(path))
-                logging.info(f"Exported {table} → {path}")
-        return written

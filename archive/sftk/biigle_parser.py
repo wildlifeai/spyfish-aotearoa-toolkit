@@ -3,7 +3,6 @@ import math
 from typing import Optional
 
 import pandas as pd
-
 from sftk.biigle_handler import BiigleHandler
 from sftk.common import (
     BIIGLE_ANNOTATION_REPORT_TYPE,

@@ -1,5 +1,5 @@
 """
-retrain_runner.py — Orchestrator for the Spyfish retraining pipeline.
+retrain_runner.py. Orchestrator for the Spyfish retraining pipeline.
 
 This module coordinates the full flow:
 3. Balance and prepare training data (prepare_training_data).
@@ -17,26 +17,28 @@ from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
 from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
+    _write_sidecar_class_map,
     apply_post_assembly_floor,
     assemble_yolo_dataset,
     discover_extra_drops,
     flatten_and_remap_labels,
+    generate_data_yaml,
     prepare_from_annotations,
     print_assembled_summary,
     print_per_drop_species_inventory,
 )
-from spyfish.ml.training.split_data import split_data
+from spyfish.ml.training.split_data import balance_val_drops, split_data
 from spyfish.ml.training.train import run_training_pipeline
 
 
 def _archive_pipeline_model_dir() -> None:
     """Move any .pt files currently in `pipeline_model_dir` to `archived_models_dir`.
 
-    Called before writing new weights on promotion so the outgoing production
-    model is preserved for rollback. Filenames are kept as-is. If a file with
-    the same name already exists in the archive (unlikely but possible when
-    re-promoting an identical model), the older archived copy is overwritten
-    — the currently-deployed model is always more recent and more relevant.
+     Called before writing new weights on promotion so the outgoing production
+     model is preserved for rollback. Filenames are kept as-is. If a file with
+     the same name already exists in the archive (unlikely but possible when
+     re-promoting an identical model), the older archived copy is overwritten
+    , the currently-deployed model is always more recent and more relevant.
     """
     src_dir = config.pipeline_model_dir
     if not src_dir.exists():
@@ -58,7 +60,7 @@ def _derive_promoted_filename(model_path: str, model_type: str) -> str:
     """Derive the promoted filename from the training run directory.
 
     `train.py` writes best.pt to `runs/{timestamp}_{model_type}/weights/best.pt`,
-    so `best.pt.parent.parent.name` is `{timestamp}_{model_type}` — a unique,
+    so `best.pt.parent.parent.name` is `{timestamp}_{model_type}`, a unique,
     human-readable identifier that already encodes when the model was trained.
 
     We reuse that directly as the promoted filename so:
@@ -77,7 +79,7 @@ def _derive_promoted_filename(model_path: str, model_type: str) -> str:
         pass
     logging.warning(
         f"Could not derive training run name from {model_path!r}; "
-        f"using fallback filename 'promoted_{model_type}.pt' — "
+        f"using fallback filename 'promoted_{model_type}.pt', "
         "note this will overwrite any prior fallback-named promotion."
     )
     return f"promoted_{model_type}.pt"
@@ -106,15 +108,22 @@ def run_retraining(
     binary: bool = True,
     species: bool = True,
     auto_promote: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """
-    Run the retraining pipeline. Steps are composable — pass any subset of
+    Run the retraining pipeline. Steps are composable, pass any subset of
     `data_prep`, `binary`, `species` to scope the run.
 
     Defaults run all three. Skipping `data_prep` reuses the existing data.yaml
     on disk (faster iteration on hyperparameter changes). Skipping `binary`
     or `species` runs only the other model. The optimizer / lr / dropout
     used for training come from `config.yaml` (training section).
+
+    `dry_run` runs the FAST part only, flatten labels, build the class map +
+    data.yaml, compute the split, print the summary, then stops before the slow
+    assembly (image-index walk + symlinking + floor). Use it to sanity-check the
+    split and to produce the maps `scripts/wip/suggest_val_drops.py` reads, so
+    you can iterate the val balance cheaply before paying for one full assembly.
     """
     logging.info("Starting Retraining Pipeline...")
     logging.info(
@@ -132,7 +141,7 @@ def run_retraining(
     binary_yaml: Optional[Path] = local_training_dir / "binary" / "data.yaml"
 
     if not data_prep:
-        # Reuse the existing dataset on disk — skip every walk/extract/flatten step.
+        # Reuse the existing dataset on disk, skip every walk/extract/flatten step.
         logging.info(
             "Skipping data prep (data_prep=False). Reusing existing data.yaml files."
         )
@@ -165,13 +174,13 @@ def run_retraining(
         logging.warning("No labels exported from Biigle. Retraining cannot proceed.")
         return {}
 
-    # 2. Balance & prepare — must run before remap so we know the unified class ordering.
+    # 2. Balance & prepare, must run before remap so we know the unified class ordering.
     logging.info("Balancing annotations and computing unified class list...")
     balanced_df, species_names = prepare_from_annotations()
 
     if balanced_df.empty:
         logging.warning(
-            "No data remaining after ceiling/floor balancing — retraining cannot proceed. "
+            "No data remaining after ceiling/floor balancing, retraining cannot proceed. "
             "Check the ceiling threshold or collect more annotations."
         )
         return {}
@@ -188,7 +197,7 @@ def run_retraining(
 
     # 2c. Build the unified species list. The post-assembly floor (step 7b)
     # decides which species to merge into 'fish' based on actual train image
-    # counts after cap + split — so flatten just keeps every species here.
+    # counts after cap + split, so flatten just keeps every species here.
     all_species = set(species_names) | set(extra_species) | {"fish"}
     species_names = sorted(all_species)
 
@@ -206,15 +215,15 @@ def run_retraining(
     # 3b. Show per-drop bounding-box counts so the user sees imbalance before splits.
     print_per_drop_species_inventory(labels_staged_dir, species_names)
 
-    # 4. Spot-check visualisation uses the remapped labels — reflects what the model actually sees.
+    # 4. Spot-check visualisation uses the remapped labels, reflects what the model actually sees.
     unified_class_map = {name: idx for idx, name in enumerate(species_names)}
     spot_check_dir = local_training_dir / "spot_checks"
     draw_frames_on_images(
         images_dir, labels_staged_dir, unified_class_map, spot_check_dir
     )
 
-    # 5. Filter to drops that have BOTH labels AND images — skip drops missing either.
-    # Both checks resolve directly to the canonical per-drop dirs — no tree walk:
+    # 5. Filter to drops that have BOTH labels AND images, skip drops missing either.
+    # Both checks resolve directly to the canonical per-drop dirs, no tree walk:
     #   labels: labels_staged_dir/<drop_id>/*.txt   (flatten_and_remap_labels writes here)
     #   images: deployment_data_dir/<survey>/<drop>/frames/*.{jpg,…}  (config.get_frames_dir)
     image_exts = set(config.image_extensions)
@@ -230,7 +239,7 @@ def run_retraining(
             _trainable_drops.append(drop_id)
         else:
             logging.warning(
-                f"Skipping drop {drop_id} — "
+                f"Skipping drop {drop_id}, "
                 f"{'no labels' if not has_labels else ''}"
                 f"{' and ' if not has_labels and not has_images else ''}"
                 f"{'no images' if not has_images else ''} found. "
@@ -240,7 +249,7 @@ def run_retraining(
     balanced_df = balanced_df[balanced_df["DropID"].isin(_trainable_drops)]
     if balanced_df.empty:
         logging.error(
-            "No drops have both labels and images — retraining cannot proceed.\n"
+            "No drops have both labels and images, retraining cannot proceed.\n"
             f"  Labels dir: {labels_staged_dir}\n"
             f"  Images dir: {images_dir}\n"
             "Ensure frame extraction and Biigle Rectangle annotation export have both run."
@@ -250,18 +259,50 @@ def run_retraining(
         f"  {len(_trainable_drops)} drops ready for training: {_trainable_drops}"
     )
 
-    # 6. Split — only MaxN-backed drops participate in survey-aware splitting.
+    # 6. Split. Extras participate in the survey-aware split alongside MaxN
+    # drops so `force_val_drops` / `force_train_drops` and the per-survey
+    # val_pct apply to them too. Canonical-ID extras (BNP_*, SLI_*, TUH_*) group
+    # with their real survey; volume_<id> extras group under UNKNOWN_SURVEY.
+    # Without forcing, the splitter pulls ~val_pct of each group into val,
+    # essential for species diversity in val when extras dominate the dataset.
     logging.info("Splitting data into train/val/test...")
-    train_drops, val_drops, test_drops = split_data(
-        balanced_df=balanced_df, images_dir=images_dir, output_dir=local_training_dir
-    )
-
-    # 6b. Fold extras into train split only (no drop/survey metadata for safe val/test).
-    if extra_drops:
-        train_drops = sorted(set(train_drops) | set(extra_drops))
-        logging.info(
-            f"Added {len(extra_drops)} extra drop(s) to train split: {extra_drops}"
+    if config.training_auto_balance_val:
+        # Species-balanced val: pick whole drops so each multi-source species
+        # hits ~val_balance_pct of its boxes (the suggester, inline). Decodes
+        # labels via the in-memory species_names, no class_map.json drift.
+        candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
+        train_drops, val_drops, test_drops = balance_val_drops(
+            labels_staged_dir=labels_staged_dir,
+            species_names=species_names,
+            candidate_drops=candidate_drops,
+            val_pct=config.training_val_balance_pct,
+            tolerance=config.training_val_balance_tolerance,
+            force_val=config.training_force_val_drops,
+            force_train=config.training_force_train_drops,
         )
+    else:
+        train_drops, val_drops, test_drops = split_data(
+            balanced_df=balanced_df,
+            images_dir=images_dir,
+            output_dir=local_training_dir,
+            extra_drop_ids=list(extra_drops),
+        )
+
+    if dry_run:
+        # Fast path: write just the maps the suggester needs (the 59-class
+        # decoder + data.yaml), skip the slow assembly (image-index walk +
+        # symlink + floor). Lets you iterate the val balance cheaply, then pay
+        # for one full assembly on the split you actually want.
+        species_dir = local_training_dir / "species"
+        species_dir.mkdir(parents=True, exist_ok=True)
+        generate_data_yaml(species_names, species_dir)
+        _write_sidecar_class_map(species_names, species_dir, class_map_path)
+        logging.info(
+            "DRY RUN, wrote class_map.json + data.yaml and stopped before "
+            "assembly. Run scripts/wip/suggest_val_drops.py to plan val, then "
+            "re-run --data-prep (without --dry-run) for the full dataset."
+        )
+        return {"dry_run_complete": True}
 
     # 7. Assemble YOLO layout.
     logging.info("Assembling final YOLO dataset layout...")
@@ -278,11 +319,11 @@ def run_retraining(
         extra_drops=set(extra_drops),
     )
 
-    # 7b. Post-assembly floor — re-merge any class whose actual train image count
+    # 7b. Post-assembly floor, re-merge any class whose actual train image count
     # (after cap + split) is below class_floor_min_images. The source-level floor
     # works on pre-cap counts; this catches classes that pass that floor but lose
     # most of their frames to per-drop capping or splitter quirks. Always runs
-    # when the species dataset was assembled — the data.yaml on disk reflects
+    # when the species dataset was assembled, the data.yaml on disk reflects
     # what training will see, so the floor needs to run regardless of whether
     # the user requested species training in this same invocation. Re-prints the
     # assembled summary so the user sees the final post-floor composition (the

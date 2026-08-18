@@ -19,7 +19,7 @@ class ZooniverseConfig(BaseConfig):
 
     @property
     def zooniverse_project_id(self) -> int:
-        """Upload target — single project."""
+        """Upload target, single project."""
         return int(get_required(self._zooniverse, "project_id", "zooniverse"))
 
     @property
@@ -64,10 +64,6 @@ class ZooniverseConfig(BaseConfig):
         return float(
             get_required(self._zooniverse, "consensus_something_here_pct", "zooniverse")
         )
-
-    @property
-    def zooniverse_max_frames_per_run(self) -> int:
-        return int(get_required(self._zooniverse, "max_frames_per_run", "zooniverse"))
 
 
 zooniverse_config = ZooniverseConfig()

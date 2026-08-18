@@ -1,6 +1,6 @@
 # Source: https://github.com/biigle/community-resources/blob/master/biigle/biigle.py
 # Commit: df7eddbcaa5bde01538fc3e4c60d11655109a99b (2021-04-30)
-# Local copy — do not modify. Update by replacing this file from upstream.
+# Local copy, do not modify. Update by replacing this file from upstream.
 
 import copy
 import os

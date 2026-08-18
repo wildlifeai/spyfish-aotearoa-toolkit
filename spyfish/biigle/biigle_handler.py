@@ -67,17 +67,6 @@ class BiigleHandler:
 
     # ── Projects & Volumes ────────────────────────────────────────────────────
 
-    def get_projects(self) -> List[Dict[str, Any]]:
-        """Get all projects accessible to the authenticated user."""
-        try:
-            response = self.api.get("projects")
-            projects = response.json()
-            logging.info(f"Retrieved {len(projects)} projects")
-            return projects
-        except Exception as e:
-            logging.error(f"Failed to get projects: {e}")
-            raise
-
     def get_volumes(self, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get all volumes in a project (defaults to config.biigle_project_id)."""
         project_id = project_id or config.biigle_project_id
@@ -179,7 +168,7 @@ class BiigleHandler:
 
         Pending volumes are configured atomically in a single PUT (name + url +
         files). After Biigle finalizes the volume, this endpoint no longer
-        applies — to append more files later, use `add_files_to_volume`.
+        applies, to append more files later, use `add_files_to_volume`.
         """
         try:
             payload = {"name": volume_name, "url": s3_url, "files": files}
@@ -220,7 +209,7 @@ class BiigleHandler:
             )
             logging.info(f"Created volume '{volume_name}' with {len(files)} files")
 
-            # The pending volume ID is temporary — resolve the real (finalized) volume ID
+            # The pending volume ID is temporary, resolve the real (finalized) volume ID
             # by looking it up in the project's volume list.
             real_id = self.resolve_real_volume_id(volume_name, project_id)
             if not real_id:
@@ -279,7 +268,7 @@ class BiigleHandler:
                     return best_match["id"]
             except Exception as e:
                 logging.warning(
-                    f"Attempt {attempt}/{max_tries}: failed to list volumes — {e}"
+                    f"Attempt {attempt}/{max_tries}: failed to list volumes, {e}"
                 )
 
             if attempt < max_tries:
@@ -303,7 +292,7 @@ class BiigleHandler:
         *pending* volume in one shot via PUT, this one appends to a
         *finalized* one. Use the right method for the lifecycle stage.
 
-        API: ``POST volumes/{id}/files`` with body ``{"files": [...]}`` —
+        API: ``POST volumes/{id}/files`` with body ``{"files": [...]}``,
         verified against the Biigle apidoc (group "Volumes", title
         "Add images/videos"). Caller must be a project admin. Filenames must
         already be present in the volume's S3 folder; this call only registers
@@ -423,11 +412,11 @@ class BiigleHandler:
     ) -> int:
         """
         Request a BIIGLE annotation report. Returns the report ID.
-        Reports are generated asynchronously — use download_report_zip_bytes() to fetch.
+        Reports are generated asynchronously, use download_report_zip_bytes() to fetch.
         Defaults to the video annotation CSV report type (config.annotation_report_type_video).
 
         `type_id` defaults to None and is resolved to config at call time rather
-        than at class-definition time — evaluating `config.x` in a default arg
+        than at class-definition time, evaluating `config.x` in a default arg
         runs at module import, which is brittle if import order changes.
         """
         if type_id is None:
@@ -653,7 +642,7 @@ class BiigleHandler:
         done_labels = config.done_labels
 
         try:
-            # Get media_type directly from volume metadata — no guessing needed
+            # Get media_type directly from volume metadata, no guessing needed
             volume_info = self.get_volume_info(volume_id)
             media_type = volume_info.get("media_type", "image")
 

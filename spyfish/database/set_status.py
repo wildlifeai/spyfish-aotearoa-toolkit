@@ -6,7 +6,7 @@ Usage examples:
   # Inspect current state
   python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03
 
-  # Override a section status (bypasses transition checks — admin use only)
+  # Override a section status (bypasses transition checks, admin use only)
   python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03 --ml-status ml_ready
   python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03 --citsci-status citsci_skipped
 
@@ -23,20 +23,9 @@ import argparse
 import logging
 import sys
 
-from spyfish.config.base import SECTIONS, IngestStatus
+from spyfish.config.base import SECTION_VALUES as _SECTION_VALUES
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
-
-_STATUS_CLASSES = {IngestStatus.COLUMN: IngestStatus, **SECTIONS}
-
-_SECTION_VALUES = {
-    col: [
-        v
-        for k, v in vars(cls).items()
-        if not k.startswith("_") and k != "COLUMN" and isinstance(v, str)
-    ]
-    for col, cls in _STATUS_CLASSES.items()
-}
 
 
 def cmd_show(db: DatabaseManager, drop_id: str):
@@ -128,7 +117,7 @@ def main():
         )
         sys.exit(1)
 
-    # Validate before any DB writes — fail the whole command atomically.
+    # Validate before any DB writes, fail the whole command atomically.
     start = (
         args.sampling_start
         if args.sampling_start is not None
@@ -144,7 +133,7 @@ def main():
         if errors:
             for e in errors:
                 logging.error(e)
-            logging.error("No changes applied — fix the values above and rerun.")
+            logging.error("No changes applied, fix the values above and rerun.")
             sys.exit(1)
 
     if not existing and args.create:

@@ -34,6 +34,27 @@ class ExtractionConfig(BaseConfig):
         return bool(get_required(self._extraction, "sample_all_clips", "extraction"))
 
     @property
+    def min_frames_per_drop(self) -> int:
+        """Frame floor per deployment, never a ceiling, peaks may exceed it."""
+        return int(get_required(self._extraction, "min_frames_per_drop", "extraction"))
+
+    @property
+    def catchall_class(self) -> str:
+        """The model's catch-all class, an animal it detected but could not name."""
+        return str(
+            get_required(
+                get_required(self._yaml_config, "reporting", ""),
+                "catchall_class",
+                "reporting",
+            )
+        )
+
+    @property
+    def frame_strategy(self) -> dict:
+        """Per-species bucket quotas for FRAME selection (clips have their own)."""
+        return get_required(self._extraction, "frame_strategy", "extraction")
+
+    @property
     def binary_strategy(self) -> dict:
         return get_required(self._extraction, "binary_strategy", "extraction")
 

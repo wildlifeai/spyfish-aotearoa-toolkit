@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=genoa
 #SBATCH --gpus-per-node=1
-#SBATCH --output=/nesi/project/wildlife03546/spyfish-play-new/slurm_logs/spyfish_train_%j.out
-#SBATCH --error=/nesi/project/wildlife03546/spyfish-play-new/slurm_logs/spyfish_train_%j.err
+#SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.out
+#SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.err
 
 # Spyfish Aotearoa training job wrapper.
 #
@@ -34,7 +34,7 @@ module load CUDA/11.0.2
 # TODO update to your venv
 VENV=/nesi/project/wildlife03546/kso_venv_0627/bin/activate
 # TODO update to where this repo is checked out on NeSI
-PROJECT_DIR=/nesi/project/wildlife03546/spyfish-play-new
+PROJECT_DIR=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit
 
 source "${VENV}"
 cd "${PROJECT_DIR}"

@@ -268,23 +268,35 @@ graph TB
 
 These are complementary tools, not alternatives to each other.
 
-**Streamlit pages (`app/pages/`):**
+**Streamlit app structure:**
+
+The entrypoint (`app/🐟_Spyfish_Data_Tools.py`) builds an explicit `st.navigation` — pages not registered there have no route. Three groups:
+
+**DOC report (`app/doc_report/`)** — two sections of function-defined views registered in `doc_report/shell.py`. Reporting answers "what is out there"; Operations answers "what state is the data in". Views share the same year / MPA / source filters and a common context dict from `doc_report/data.py`.
+
+| Section | Views |
+| ---- | ------- |
+| Reporting | Report home, MPA, Sites, Annotations, Species, Species search (per-species observation lookup, sorted by source priority expert > citsci > ml). Surveys and Deployments not built yet. |
+| Operations | Operations home (pipeline funnel), MPA, Surveys, Deployments (media state), Annotations, Metadata error review. Sites and Species not built yet. |
+
+These Operations views supersede the earlier standalone `⚙️_Deployment_Management`, `📈_Health_Dashboard`, `🔍_Error_Review`, and `🔎_Species_Search` pages (removed; git history holds them).
+
+**Tools group (`app/pages/`):**
 
 | Page | Purpose |
 | ---- | ------- |
-| `⚙️_Deployment_Management.py` | Per-deployment pipeline status, filtering, and per-drop MaxN annotation view (uses `get_maxn_summary()`) |
-| `📈_Health_Dashboard.py` | Programme-level health: deployments per year, bad deployment rates (sorted by %, with 10% threshold reference line), validation errors by type and by failing column, pipeline funnel, annotation depth per survey (stacked horizontal funnel: none → ML → CitSci → Expert), video presence, protection status breakdown |
-| `🧪_Experiments.py` | Read-only ecological sandbox — 14 experiments grouped by category (reserve effect / programme overview / species deep-dive / source quality / distribution). Global filters at the top (source, year range, reserves) apply to every experiment. Pills navigation. See "Experiments architecture" below for the full list. |
-| `🔍_Error_Review.py` | Validation errors per survey |
-| `📥_Export_Biigle_Annotations.py` | On-demand annotation download from Biigle API |
+| `🧪_Experiments.py` | Read-only ecological sandbox — experiments grouped by category (reserve effect / programme overview / species deep-dive / source quality / distribution). Global filters at the top (source, year range, reserves) apply to every experiment. See "Experiments architecture" below. |
 | `📊_Model_Metrics.py` | ML training results (mAP, per-class metrics, confusion matrix) |
 | `📺_View_Deployment_Videos.py` | Video player for individual deployments |
-| `🔎_Species_Search.py` | Per-species observation lookup → every (deployment, time) sorted by source priority (expert > citsci > ml). Extracted from the Experiments page so it has its own nav entry; shares the data layer via `ecology_data.py`. |
-| `0_🆘_Error_-_Inform_Kalindi.py` | Dependency-free help page (imports only `streamlit`), pinned to the top of the nav via the `0_` filename prefix; renders even when other pages fail to load. Every other page also shows a sidebar contact note via `utils.render_contact_note()`. |
+| `_advanced/🐚_Mussel_Insights.py` | "Dashboard test" — unreleased dashboard concepts, gated on `TEST_DASHBOARD_PASSWORD` |
+| `_archive/ML_vs_Expert.py` | Pre-rebuild comparison page kept until the rebuilt equivalent is verified against it |
+| `0_🆘_Error_-_Inform_Kalindi.py` | Dependency-free support page (imports only `streamlit`); registered so `/support` resolves but hidden from the nav — the sidebar contact note is the way in. |
 
-Species names in `🧪_Experiments.py` are displayed as `"Common name (Scientific name)"` using a lookup loaded from `process_files/training/class_map.json` (`config.class_map_path`) via `load_common_names()`. Species without a common name in the class map fall back to scientific name only.
+**In development:** `_advanced/🪨_Substrate_Cover.py` — usable but numbers and layout still moving.
 
-The shared data layer lives in `app/ecology_data.py`: the cached loaders (`load_maxn`, `load_sites`, `load_common_names`, `search_species_annotations`) and the `_enrich()` drop_id/site join. Both `🧪_Experiments.py` and `🔎_Species_Search.py` import from it — single source of truth for loading + enrichment. Page-specific viz/stat helpers (`_best_source`, `_prot_rank`, `_protection_color_map`, `_shannon`, `_simpson`, …) stay in the Experiments page.
+Species names are displayed as `"Common name (Scientific name)"` via the species registry (`spyfish/config/species.py`, sourced from `process_files/training/class_map.json`). Species without a common name fall back to scientific name only.
+
+The shared data layer lives in `app/ecology_data.py`: the cached loaders (`load_maxn`, `load_sites`, `load_common_names`, `search_species_annotations`) and the identity/enrichment helpers (`add_drop_id_columns`, `join_site_metadata`). The report's `doc_report/data.py` and the Experiments page both import from it — single source of truth for loading + enrichment. Shared visual conventions (colors, protection-status ordering) live in `app/theme.py`.
 
 **Experiments architecture (`🧪_Experiments.py`):**
 
@@ -1055,9 +1067,9 @@ Sequenced by dependency, not assigned dates.
 - Annotation data export format defined and connected to PowerBI
 - Marine reserve monitoring reports and report cards generated automatically from deployments with `expert_status = complete` or `reporting_status = complete`
 - BIIGLE substrate and size review parsing (same pipeline, new annotation type)
-- ✅ Programme health dashboard (`📈_Health_Dashboard.py`): KPI row, deployments per year, bad deployments per survey (sorted by % desc, 10% reference line), validation errors by type and column, pipeline funnel, per-survey annotation depth funnel, video presence over time, protection status breakdown, survey summary table
-- ✅ Ecological experiments page (`🧪_Experiments.py`): 14 experiments across reserve effect (slope chart, heatmap, year trend), programme overview (detection rate, composition, diversity, leaderboard, species accumulation), species deep-dive (bait arrival, frequency × abundance, co-occurrence), source quality (calibration, disagreement), and full distribution view (box plot). Global filters (source / year / reserves) apply to all experiments via a shared `ctx` dict.
-- ✅ Species Search page (`🔎_Species_Search.py`): per-species observation lookup extracted from Experiments into its own nav-visible page; loaders + `_enrich` shared via `app/ecology_data.py`.
+- ✅ DOC report (`app/doc_report/`): two-section shell (Reporting / Operations) with shared filters and context dict — supersedes the earlier standalone Health Dashboard, Deployment Management, Error Review, and Species Search pages. Some views still to build (Reporting: Surveys, Deployments; Operations: Sites, Species).
+- ✅ Ecological experiments page (`🧪_Experiments.py`): experiments across reserve effect, programme overview, species deep-dive, source quality, and distribution. Global filters (source / year / reserves) apply to all experiments via a shared `ctx` dict.
+- ✅ Species search as a Reporting view (`doc_report/species_search.py`): per-species observation lookup using the report's shared filters.
 - Time-series visualisations of species abundance by marine reserve — foundation in place via Experiments page; dedicated DOC-facing page remaining
 
 ---
@@ -1107,7 +1119,6 @@ Workflow 17057 is a 2012 expert annotation workflow where volunteers drew boundi
 
 **Open items:**
 - Validate `--zooniverse-sync` end-to-end against real API data on first production run
-- Wire retirement gates (`citsci_clips_done` / `citsci_frames_done`) — see `CitSciStatus` TODO in `base.py`
 
 ### PowerBI — annotation data feed is manual
 
@@ -1764,6 +1775,44 @@ pytest -v tests/                # Verbose output
 Tests use real SQLite databases (not mocked). Integration tests use a full ephemeral environment set up in `tests/conftest.py`. Always use realistic, validation-passing IDs in fixtures (e.g. `KSF_20240124_BUV_KSF_085_01`), not placeholder strings.
 
 For manual testing: set `is_test_run: true` in `config.yaml` and use `set_status` to create test records. The test deployment metadata CSV lives at `process_files/orchestration/test_deployment_metadata.csv`.
+
+### Sample data environment (fake end-to-end dataset)
+
+Two deterministic generators build a complete fake copy of the production bucket for
+testing against a dev bucket (`marine-buv-kalindi`) without touching real data:
+
+```bash
+python scripts/generate_sample_metadata.py     # CSVs + videos → process_files/sample_bucket/
+python scripts/generate_sample_metadata.py --metadata-only   # CSVs only (fast)
+python scripts/generate_sample_annotations.py  # fake ml/citsci/expert rows → annotations DB
+```
+
+What the data contains (everything fake except real species names + AphiaIDs):
+
+- **Two fictional reserves** = two coordinate clusters in open ocean, inside the
+  validator's lat/lon ranges: Testy Beach (TSB) and Samply Bay (SBY). 6 sites each
+  (4 protected, 2 control), stable across years.
+- **Three annual surveys per reserve** (2023–2025), 45 good deployments, 6 bad
+  deployments (`IsBadDeployment` → `excluded`), and 6 deliberate error rows covering
+  every validation failure mode (bad DropID format, FK miss, template mismatch,
+  lat out of range, sampling-window errors) so the error-review page has content.
+- **Videos are genuinely ~32 min** (no container tricks — ffprobe/cv2/clip extraction
+  behave normally) but compress to ~2.5 MB: static seafloor except one minute of
+  cartoon fish at t=120–180s, placed after the max possible `SamplingStart` so the
+  sampling window always contains it. Each frame is watermarked with the DropID.
+- **Annotations carry a fake reserve effect**: indicator species at protected sites
+  gain ~1 MaxN per year, controls stay flat. Expert rows sometimes disagree with
+  ML/citsci counts (expert wins; others kept for audit). ML includes `fish`
+  catch-all rows to exercise `non_species_classes` exclusion.
+
+The scripts write through the real code paths (`config.*` accessors,
+`AnnotationDatabaseManager`, `sync_annotation_counts`), so counts and section
+statuses land exactly as the pipeline would set them. Everything is seeded —
+re-running regenerates identical data.
+
+To switch a machine between real and sample DBs: the real DBs are kept alongside as
+`process_files/db/*.real_backup_<date>` — rename over the sample ones to switch back,
+then re-run the relevant uploads so S3 matches local.
 
 ---
 

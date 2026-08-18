@@ -22,7 +22,7 @@ def _select_all_clips(
     starts = np.arange(sampling_start, sampling_end - clip_length + 0.001, clip_length)
     if len(starts) == 0:
         logging.warning(
-            f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id} — no clips generated."
+            f"Sampling window ({sampling_end - sampling_start}s) shorter than clip_length ({clip_length}s) for {drop_id}, no clips generated."
         )
         return pd.DataFrame()
     if clip_cap and len(starts) > clip_cap:
@@ -74,7 +74,7 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
     sampling_start = dep_row["sampling_start"]
     sampling_end = dep_row["sampling_end"]
 
-    # Full-video sampling — bypasses ML strategy and MaxN CSV entirely
+    # Full-video sampling, bypasses ML strategy and MaxN CSV entirely
     if config.sample_all_clips:
         logging.info(
             f"sample_all_clips=true: selecting every clip in sampling window for {drop_id}."
@@ -163,7 +163,7 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
     if len(selections_df) < min_clips:
         n_needed = min_clips - len(selections_df)
         logging.info(
-            f"Only {len(selections_df)} clips from ML strategy — "
+            f"Only {len(selections_df)} clips from ML strategy, "
             f"topping up with {n_needed} health check clips to reach {min_clips}."
         )
         selector = ClipSelector(drop_id, sampling_start, config.clip_length)

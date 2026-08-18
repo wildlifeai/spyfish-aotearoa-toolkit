@@ -307,11 +307,6 @@ def test_get_deployments_eligible_rejects_unknown_prerequisite_key(temp_db):
         )
 
 
-def test_get_deployments_by_section_status_rejects_unknown_column(temp_db):
-    with pytest.raises(ValueError, match="Invalid column name"):
-        temp_db.get_deployments_by_section_status("nonexistent_column", 0)
-
-
 def test_advance_status_rejects_unknown_section(temp_db):
     """advance_status has its own SECTIONS check separate from validate_column."""
     temp_db.add_or_update_deployment(drop_id=DROP)

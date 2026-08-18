@@ -1,0 +1,210 @@
+"""Sites tab for the DOC reporting page.
+
+The site-level view: species abundance, per-MPA and per-site rollups,
+protection-status breakdown, the gated map, and indicator species over time.
+Reached through the reporting nav (`?view=Sites`).
+
+Everything the view needs arrives through `render(ctx)`, nothing is read
+from module scope, so a second caller cannot change what the first sees.
+"""
+
+import sys
+from pathlib import Path
+
+# The shared `utils` / `ecology_data` modules live in app/, which is not on
+# sys.path when Streamlit runs a page from a subfolder. parents[1] is app/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import streamlit as st  # noqa: E402
+from ecology_data import (  # noqa: E402
+    add_drop_id_columns,
+    join_site_metadata,
+    load_effort,
+    load_sites,
+)
+from theme import protection_sort_key  # noqa: E402
+
+from .charts.sites import render_site_leaderboard, render_site_map  # noqa: E402
+from .charts.species import render_yearly_trend  # noqa: E402
+from .data import experiments_frame  # noqa: E402
+from .layout import chips, extra_filters, section  # noqa: E402
+from .site_data import (  # noqa: E402
+    apply_filters,
+    best_per_drop_species,
+    load_site_view,
+    render_map_gate,
+    split_reserves,
+)
+
+
+def render(ctx: dict | None = None) -> None:
+    """Render the whole Sites view.
+
+    `ctx` is accepted for interface parity with the other tabs and is not
+    read yet. Sites still owns its filters, which are richer than the
+    page-level ones. Folding them together is a later step.
+    """
+    # Above this view's own filters, so the strip sits directly under the
+    # report-wide filter band on every view rather than after a row of widgets
+    # on this one.
+    chips(
+        [
+            "Site detail",
+            "Site map",
+            "Leaderboard",
+            "Year trend",
+        ]
+    )
+
+    # ── Filters ───────────────────────────────────────────────────────────────────
+
+    # This view renders no map, so it never needs coordinates, but the gate is
+    # honoured anyway (locked by default) so the frame in this view's cache
+    # entry only ever carries lat/lon in a session that has unlocked them. The
+    # unlock control itself lives on the MPA view, next to the map.
+    # The unlock control, in the sidebar, so the map at the foot of this view
+    # can be opened without leaving for the MPA view to do it.
+    show_coords = render_map_gate()
+
+    df_all = load_site_view(show_coords)
+
+    # Every surveyed deployment, enriched the same way, so effort can be sliced by the
+    # same site/protection/region attributes as the sightings.
+    effort_all = join_site_metadata(
+        add_drop_id_columns(load_effort()), load_sites(show_coords)
+    )
+
+    if df_all.empty:
+        st.warning("No annotation data found. Has the pipeline run yet?")
+        st.stop()
+
+    df_all = best_per_drop_species(df_all)
+
+    # Survey year and Marine reserve come from the report-wide filter on the
+    # title row, so they are not repeated here. Species, Region and Protection
+    # status are specific to this view.
+    year_range = (ctx or {}).get("years")
+    reserves = (ctx or {}).get("reserves") or []
+
+    # Into the sticky header, in the same right-hand region and on the same
+    # grid as the report-wide filters directly above them, with the chips
+    # underneath. All six filters read as one block.
+    with extra_filters(3) as filter_cols:
+        with filter_cols[0]:
+            all_species = sorted(df_all["display_name"].dropna().unique())
+            species = st.multiselect("Species", all_species, default=[])
+
+        with filter_cols[1]:
+            all_regions = sorted(r for r in df_all["region"].dropna().unique() if r)
+            regions = st.multiselect("Region", all_regions, default=[])
+
+        with filter_cols[2]:
+            all_prot = sorted(
+                df_all["protection_status"].dropna().unique(), key=protection_sort_key
+            )
+            protections = st.multiselect("Protection status", all_prot, default=[])
+
+    _filters = dict(
+        years=year_range, regions=regions, reserves=reserves, protections=protections
+    )
+
+    # Everything except the species filter. "Deployments where nothing was seen" has
+    # to be measured against this, not against `df`, with a species selected, `df`
+    # would report every drop lacking THAT species as blank, which is a different and
+    # much larger number.
+    df_context = apply_filters(df_all, **_filters)
+    effort_view = apply_filters(effort_all, **_filters)
+
+    df = df_context
+    if species:
+        df = df[df["display_name"].isin(species)]
+
+    if df.empty:
+        st.warning("No sites match these filters.")
+        st.stop()
+
+    # ── Headline counts ───────────────────────────────────────────────────────────
+
+    kpis = st.columns(4)
+    kpis[0].metric("Deployments", f"{df['drop_id'].nunique():,}")
+    kpis[1].metric("Sites", f"{df['site_id'].nunique():,}")
+    kpis[2].metric(
+        "Marine reserves", f"{len(split_reserves(df['link_to_marine_reserve'])):,}"
+    )
+    kpis[3].metric("Species", f"{df['scientific_name'].nunique():,}")
+
+    st.divider()
+
+    # ── Species totals ────────────────────────────────────────────────────────────
+
+    # "Species abundance" moved to the Species view: it reports on species,
+    # not on sites, and every other section here is keyed by site.
+
+    # ── Per-site breakdown ────────────────────────────────────────────────────────
+
+    section("Site detail")
+
+    site_rows = (
+        df.groupby(["site_id", "region", "protection_status"])
+        .agg(species=("scientific_name", "nunique"), total_maxn=("maxn", "sum"))
+        .reset_index()
+    )
+    site_effort = (
+        effort_view.groupby("site_id")["drop_id"].nunique().reset_index(name="analysed")
+    )
+    site_rows = site_rows.merge(site_effort, on="site_id", how="left")
+    site_rows["analysed"] = site_rows["analysed"].fillna(0)
+    site_rows["mean_maxn"] = site_rows["total_maxn"] / site_rows["analysed"].clip(
+        lower=1
+    )
+    site_rows = site_rows.sort_values("mean_maxn", ascending=False)
+
+    st.dataframe(
+        site_rows,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "site_id": st.column_config.TextColumn("SiteID"),
+            "region": st.column_config.TextColumn("Region"),
+            "protection_status": st.column_config.TextColumn("Protection status"),
+            "analysed": st.column_config.NumberColumn("Analysed"),
+            "species": st.column_config.NumberColumn("Species"),
+            "mean_maxn": st.column_config.NumberColumn("Mean MaxN", format="%.2f"),
+        },
+        column_order=[
+            "site_id",
+            "region",
+            "protection_status",
+            "analysed",
+            "species",
+            "mean_maxn",
+        ],
+    )
+
+    st.download_button(
+        "Download site summary (CSV)",
+        data=site_rows.to_csv(index=False).encode("utf-8"),
+        file_name="site_summary.csv",
+        mime="text/csv",
+    )
+
+    # "Deployments by protection status" is on the MPA view: everything here is
+    # per-site, while that counts deployments by the protection class of the
+    # area, which is an MPA question.
+
+    # ── Ported from the Experiments page ─────────────────────────────────────
+    #
+    # Reads the annotations in the shape that page works in, one row per
+    # (deployment, source, species) with `maxn`, built by `experiments_frame`.
+    ann = (ctx or {}).get("annotations")
+    if ann is not None and not ann.empty:
+        st.divider()
+        exp = experiments_frame(ann)
+        render_site_leaderboard(exp)
+        st.divider()
+        # One line per site over the years: a per-site question, which is
+        # why it sits here rather than on Species where it was first put.
+        render_yearly_trend(exp)
+
+    st.divider()
+    render_site_map(df_context, effort_view, show_coords)

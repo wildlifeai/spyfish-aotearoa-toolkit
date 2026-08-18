@@ -25,7 +25,6 @@ Usage in tests:
         assert env.db.get_deployment(DROP_NORMAL)["ml_status"] == MlStatus.READY
 """
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -84,14 +83,13 @@ csv_mapping:
 paths:
   base_dir: "process_files"
   deployment_targets_csv: process_files/deployment_targets.csv
-  test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
   legacy:
     zooniverse: "process_files/zooniverse/legacy_classifications"
   metadata:
-    root: "metadata"
+    root: "spyfish_metadata"
     sharepoint_dir: "sharepoint_lists"
     status_dir: "status"
     files:
@@ -166,8 +164,6 @@ biigle:
   disk_id: 1
   annotation_report_type_video: 8
   annotation_report_type_images: 3
-  volume_report_type_video: 10
-  volume_report_type_image: 10
   done_labels: ["Done Volume", "Done QA Review"]
   default_fish_label_id: 1
   default_label_tree_id: 1
@@ -196,7 +192,7 @@ validation_patterns:
 
 validation_rules:
   deployments:
-    file_name: "metadata/sharepoint_lists/BUV Deployment.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID", "SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     info_columns: ["SurveyID", "SiteID"]
@@ -227,7 +223,7 @@ validation_rules:
         range: [170, 178.5]
         allowed_values: [0]
   surveys:
-    file_name: "metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
     required: ["SurveyID"]
     unique: ["SurveyID"]
     info_columns: ["SurveyName"]
@@ -235,7 +231,7 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   sites:
-    file_name: "metadata/sharepoint_lists/BUV Survey Sites.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
     required: ["SiteID", "LinkToMarineReserve"]
     unique: ["SiteID"]
     info_columns: ["SiteName", "LinkToMarineReserve"]
@@ -243,14 +239,14 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   species:
-    file_name: "metadata/sharepoint_lists/BUV Species.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
     required: ["AphiaID", "CommonName", "ScientificName"]
     unique: ["AphiaID", "ScientificName", "CommonName"]
     info_columns: ["AphiaID", "CommonName", "ScientificName"]
     foreign_keys: {}
     relationships: []
   reserves:
-    file_name: "metadata/sharepoint_lists/Marine Reserves.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
     required: []
     unique: []
     info_columns: []
@@ -406,7 +402,6 @@ class PipelineEnv:
         config_path:       Path to the test config.yaml written on disk.
         db:                Pipeline DatabaseManager, DB at tmp_path/process_files/db/.
         ann_db:            Annotation DatabaseManager, DB at tmp_path/process_files/db/.
-        video_paths:       {drop_id: Path} — 5 s, 320×240, 25 fps synthetic MP4s.
         raw_csv_paths:     {drop_id: Path} — raw ML CSVs for drops that have them.
         expected_maxn:     {drop_id: DataFrame} — ground truth for process_maxn().
         model_name:        Model name string used in CSV/DB path construction.
@@ -416,7 +411,6 @@ class PipelineEnv:
     config_path: Path
     db: DatabaseManager
     ann_db: AnnotationDatabaseManager
-    video_paths: dict
     raw_csv_paths: dict
     expected_maxn: dict
     model_name: str = MODEL_NAME
@@ -433,10 +427,7 @@ def pipeline_env(tmp_path, monkeypatch):
 
     Folder structure created under tmp_path:
         config.yaml
-        media/
-            KSF_20240124_BUV_KSF_085_01.mp4    ← READY_FOR_ML
-            KSF_20240124_BUV_KSF_085_02.mp4    ← PROCESSING_ML (stuck)
-            KSF_20240124_BUV_KSF_085_03.mp4    ← ML_COMPLETE
+        media/                                 (empty — no test needs a video)
         process_files/
             db/
                 spyfish_pipeline.db
@@ -448,7 +439,11 @@ def pipeline_env(tmp_path, monkeypatch):
                 KSF_20240124_BUV_KSF_085_03/annotations/
                     KSF_20240124_BUV_KSF_085_03_ml_yolov8n_maxn.csv
 
-    Skips the test if ffmpeg is not installed.
+    No video files: the fixture used to shell out to ffmpeg for three synthetic
+    MP4s, which gated every test that used it on a binary only one test needed.
+    That test is gone; a test that genuinely needs a decodable video should
+    generate one in its own fixture rather than putting the dependency back
+    here.
     """
     # ── 1. Write test config.yaml to disk ─────────────────────────────────
     config_path = tmp_path / "config.yaml"
@@ -499,31 +494,7 @@ def pipeline_env(tmp_path, monkeypatch):
         sampling_end=5,
     )
 
-    # ── 6. Generate tiny real videos ──────────────────────────────────────
-    # 5 s, 320×240, 25 fps solid-colour H.264 — decodable by cv2 and ffmpeg.
-    video_paths = {}
-    for drop_id in [DROP_NORMAL, DROP_STUCK, DROP_ML_COMPLETE]:
-        video_path = config.get_video_path(drop_id)
-        video_path.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=blue:size=320x240:rate=25",
-                "-t",
-                "5",
-                str(video_path),
-            ],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            pytest.skip("ffmpeg not found in PATH — skipping pipeline_env fixture")
-        video_paths[drop_id] = video_path
-
-    # ── 7. Write raw ML CSV for DROP_NORMAL ───────────────────────────────
+    # ── 6. Write raw ML CSV for DROP_NORMAL ───────────────────────────────
     # DROP_STUCK has no CSV (the crash happened before inference wrote output).
     # DROP_ML_COMPLETE has no raw CSV (a prior run already post-processed it).
     raw_csv_paths = {}
@@ -531,7 +502,7 @@ def pipeline_env(tmp_path, monkeypatch):
     RAW_ML_DETECTIONS[DROP_NORMAL].to_csv(raw_csv_path, index=False)
     raw_csv_paths[DROP_NORMAL] = raw_csv_path
 
-    # ── 8. Pre-write MaxN CSV and seed annotations for DROP_ML_COMPLETE ───
+    # ── 7. Pre-write MaxN CSV and seed annotations for DROP_ML_COMPLETE ───
     maxn_df = pd.DataFrame(_ML_COMPLETE_MAXN_ROWS)
     maxn_csv_path = config.get_maxn_csv_path(DROP_ML_COMPLETE, MODEL_NAME)
     maxn_df.to_csv(maxn_csv_path, index=False)
@@ -562,7 +533,6 @@ def pipeline_env(tmp_path, monkeypatch):
         config_path=config_path,
         db=db,
         ann_db=ann_db,
-        video_paths=video_paths,
         raw_csv_paths=raw_csv_paths,
         expected_maxn=EXPECTED_MAXN,
     )
@@ -571,25 +541,11 @@ def pipeline_env(tmp_path, monkeypatch):
 # ── Unit test fixtures (unchanged) ────────────────────────────────────────────
 
 
-@pytest.fixture
-def mock_db():
-    """
-    Provides a DatabaseManager connected to an in-memory SQLite database.
-    This ensures tests do not touch the real filesystem database.
-    """
-    # Initialize DatabaseManager with :memory:
-    db = DatabaseManager(db_path=":memory:")
-
-    # Actually, DatabaseManager.get_connection() opens a new connection each time.
-    # For :memory: databases, each new connection is a NEW empty database.
-    # To share an in-memory database across methods, we need a shared URI
-    # or to mock the connection generation itself.
-
-    # The better way is to use a temporary file for the database per test.
-
-    yield db
-
-
+# NOTE: there is deliberately no ":memory:" fixture. DatabaseManager resolves
+# db_path via Path(...).absolute(), which turns the string ":memory:" into a
+# literal file named `:memory:` in the repo root — and get_connection() opens a
+# fresh connection per call, so an in-memory DB would be empty each time anyway.
+# Use temp_db.
 @pytest.fixture
 def temp_db(tmp_path):
     """Provides a DatabaseManager connected to a temporary file database."""

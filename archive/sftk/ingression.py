@@ -1,9 +1,11 @@
 import logging
 from collections import defaultdict
-from sftk.email_handler import EmailHandler
-from sftk.common import KEYWORDS, KEYWORD_LOOKUP
+
 from sftk import log_config
+from sftk.common import KEYWORD_LOOKUP, KEYWORDS
+from sftk.email_handler import EmailHandler
 from sftk.utils import flatten_list
+
 
 class DataIngression:
     """
@@ -15,6 +17,7 @@ class DataIngression:
     Could be standardised to provide input -> process -> output functionality
     This would allow us to standardise the way data is ingressed into the system
     """
+
     def __init__(self):
         pass
 
@@ -24,6 +27,7 @@ class DataIngression:
     def cleanup(self):
         pass
 
+
 class EmailIngression(DataIngression):
     # TODO: Implement a method for handling failed extractions
     """
@@ -32,6 +36,7 @@ class EmailIngression(DataIngression):
     The original email_to_sharepoint_copy.py script does not handle this
     Nor does it actually use the move_to_archive method to archive processed emails
     """
+
     def __init__(self):
         """
         Initialises the EmailIngression object and sets up the EmailHandler object
@@ -81,7 +86,9 @@ class EmailIngression(DataIngression):
                 self.email_handler.move_to_archive(id)
                 logging.info(f"Moved email with ID: {id} to the archive folder.")
             except Exception as e:
-                logging.error(f"Failed to move email with ID: {id} to the archive folder: {e}")
+                logging.error(
+                    f"Failed to move email with ID: {id} to the archive folder: {e}"
+                )
 
         self.email_handler.expunge()
         self.email_handler.close()
@@ -98,7 +105,7 @@ class EmailIngression(DataIngression):
         """
         keyword_emails = {}
         for k in keywords:
-            email_ids = self.email_handler.search(None, "UNSEEN", "SUBJECT", f'{k}')
+            email_ids = self.email_handler.search(None, "UNSEEN", "SUBJECT", f"{k}")
             if email_ids:
                 keyword_emails[k] = email_ids
                 logging.info(f"Found {len(email_ids)} emails with the keyword ''.")
@@ -119,6 +126,6 @@ class EmailIngression(DataIngression):
         # Get email content will raise an exception and return None if the email is not found
         if message is None:
             return None
-        body = message['body']
+        body = message["body"]
         datum = self.email_handler.extract_json_from_body(body)
         return datum

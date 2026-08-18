@@ -19,7 +19,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-from utils import render_contact_note, render_sidebar_refresh
+from utils import CACHE_TTL_SECONDS
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
@@ -30,30 +30,23 @@ from spyfish.utils import validate_model_path
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=300)
-def list_result_dirs_from_s3(bucket: str, results_prefix: str) -> list[str]:
-    """List available result directories in S3."""
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def list_result_dirs_from_s3(bucket: str, results_prefix: str) -> Optional[list[str]]:
+    """List available result directories in S3.
+
+    Returns None when the listing itself failed (no credentials, no network),
+    so the caller can tell "S3 unreachable" apart from "no results yet", the
+    two need different messages.
+    """
     try:
         s3 = S3Handler(bucket=bucket)
-        # We look for common prefixes (directories) under results_prefix
-        paginator = s3.s3.get_paginator("list_objects_v2")
-        result = paginator.paginate(
-            Bucket=bucket, Prefix=results_prefix.rstrip("/") + "/", Delimiter="/"
-        )
-
-        dirs = []
-        for page in result:
-            for prefix in page.get("CommonPrefixes", []):
-                # prefix['Prefix'] is e.g. 'process_files/training/results/20260301_100000/'
-                dir_name = Path(prefix["Prefix"]).name
-                dirs.append(dir_name)
-        return sorted(dirs, reverse=True)  # newest first
+        return sorted(s3.list_common_prefixes(results_prefix), reverse=True)
     except Exception as e:
         logging.warning(f"Could not list S3 result dirs: {e}")
-        return []
+        return None
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_metrics_csv_from_s3(bucket: str, s3_key: str) -> Optional[pd.DataFrame]:
     """Download and parse a metrics CSV from S3."""
     try:
@@ -64,19 +57,12 @@ def load_metrics_csv_from_s3(bucket: str, s3_key: str) -> Optional[pd.DataFrame]
         return None
 
 
-@st.cache_data(ttl=300)
-def load_yolo_results_csv_from_s3(bucket: str, s3_key: str) -> Optional[pd.DataFrame]:
-    """Load YOLO's results.csv (training curves) from S3."""
-    return load_metrics_csv_from_s3(bucket, s3_key)
-
-
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_image_from_s3(bucket: str, s3_key: str) -> Optional[bytes]:
     """Download an image from S3 and return raw bytes."""
     try:
         s3 = S3Handler(bucket=bucket)
-        response = s3.s3.get_object(Bucket=bucket, Key=s3_key)
-        return response["Body"].read()
+        return s3.read_bytes_from_s3(s3_key)
     except Exception as e:
         logging.warning(f"Could not load image {s3_key}: {e}")
         return None
@@ -196,15 +182,13 @@ def render_promote_button(
 def main():
     st.set_page_config(page_title="Model Metrics", page_icon="📊", layout="wide")
 
-    render_contact_note()
-    render_sidebar_refresh()
+    # Rendered for every page by the entrypoint now.
 
     st.title("📊 Model Metrics")
     st.caption(
         "Review and compare trained ML model performance before promoting to production."
     )
 
-    training_cfg = config.get_section("training")
     bucket = config.s3_bucket
     results_prefix = config.training_results_s3_prefix
     local_results_root = config.training_results_dir
@@ -213,6 +197,14 @@ def main():
     st.sidebar.header("Select Run")
 
     result_dirs = list_result_dirs_from_s3(bucket, results_prefix)
+    if result_dirs is None:
+        # An outage is not "no results yet", say which one happened, or the
+        # message sends someone off to re-run evaluate for nothing.
+        st.warning(
+            "Could not list results on S3 (check network / AWS credentials). "
+            "Showing local results only."
+        )
+        result_dirs = []
 
     # Also check local results as a fallback
     local_result_dirs = []
@@ -284,9 +276,9 @@ def main():
                         "Production mAP@0.5", f"{float(prod_row['mAP50'].iloc[0]):.4f}"
                     )
                 with col3:
-                    min_improvement = (
-                        training_cfg.get("retrain_min_improvement_pct", 2.0) / 100.0
-                    )
+                    # Same config property the evaluate step's promote decision
+                    # reads, so the page and the pipeline share one threshold.
+                    min_improvement = config.retrain_min_improvement_pct / 100.0
                     st.metric(
                         "Improvement",
                         f"{delta:+.4f}",
@@ -315,7 +307,7 @@ def main():
                 curves_df = pd.read_csv(local_csv)
         else:
             curves_key = f"{results_prefix}/{run_name}/results.csv"
-            curves_df = load_yolo_results_csv_from_s3(bucket, curves_key)
+            curves_df = load_metrics_csv_from_s3(bucket, curves_key)
 
         if curves_df is not None and not curves_df.empty:
             render_training_curves(curves_df)
@@ -344,7 +336,7 @@ def main():
         if confusion_img:
             st.image(
                 confusion_img,
-                caption=f"Confusion matrix — {run_name}",
+                caption=f"Confusion matrix, {run_name}",
                 use_container_width=True,
             )
         else:

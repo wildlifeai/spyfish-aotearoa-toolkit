@@ -94,7 +94,7 @@ class ValidationConfig(BaseConfig):
 
         if sampling_start == 0:
             errors.append(
-                f"{drop_id}: sampling_start=0 — likely missing sampling window metadata."
+                f"{drop_id}: sampling_start=0, likely missing sampling window metadata."
             )
 
         if sampling_end < (expected - buffer):

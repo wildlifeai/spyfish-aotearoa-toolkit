@@ -13,6 +13,21 @@ csv_mapping:
   video_file_link_column: "LinkToVideoFile"
   sampling_start_column: "SamplingStart"
   sampling_end_column: "SamplingEnd"
+  # Region lives on Marine Reserves.csv (67 rows), NOT on the sites sheet — it is
+  # reached by joining a site's LinkToMarineReserve to the reserve Title.
+  region_column: "Region"
+  reserve_title_column: "Title"                     # Marine Reserves.csv
+  reserve_acronym_column: "SurveyLocationAcronym"   # the 3-letter DropID prefix
+  # Coordinates appear on both sheets and mean different things. The site pair is
+  # the PLANNED position and is named Targeted* upstream; the deployment pair is
+  # where the drop actually landed. Ingesting both lets the two be compared — a
+  # large gap means a mis-sited drop or a typo.
+  # Treat all four as sensitive — see `sensitive_columns` below.
+  latitude_column: "Latitude"                   # BUV Deployment.csv — actual
+  longitude_column: "Longitude"                 # BUV Deployment.csv — actual
+  targeted_latitude_column: "TargetedLatitude"   # BUV Survey Sites.csv — planned
+  targeted_longitude_column: "TargetedLongitude" # BUV Survey Sites.csv — planned
+  depth_column: "DepthDeployment"               # BUV Deployment.csv only
   # Selection CSV columns
   # All time columns are absolute seconds from frame 0 of the source video file.
   clip_start_absolute_column: "ClipStartAbsoluteSeconds"
@@ -29,12 +44,82 @@ csv_mapping:
   time_seconds_column: "TimeAbsoluteSeconds"
   subject_id_column: "SubjectID"  # Zooniverse subject_id — written into citsci MaxN CSVs and the annotations DB external_id for provenance
 
+# SQLite column names that must never leave the pipeline unauthenticated. Stripped
+# from DatabaseManager.export_to_csv() and from every dashboard download button.
+#
+# BUV sites are baited and deliberately placed where fish aggregate, so a list of
+# coordinates joined to MaxN counts is in effect a ranked fishing map; for rare
+# species it is a poaching aid. Deployment coordinates are the more sensitive pair
+# because they are the exact drop positions rather than a nominal site label.
+#
+# These are DB column names (snake_case), not CSV headers — the strip runs against
+# dataframes read out of SQLite.
+sensitive_columns:
+  - latitude
+  - longitude
+
+# ProtectionStatus arrives from SharePoint with case and whitespace variants that
+# split one category across several chart bars. Keys are the lowercased, whitespace-
+# collapsed form; values are the spelling to store. Whitespace alone is handled in
+# code — only add an entry here when the CASE differs too.
+protection_status_aliases:
+  "no protection": "No protection"
+
+# Reporting / dashboard defaults.
+reporting:
+  # Classes that are NOT species: the binary model's catch-all detection plus
+  # non-animal labels. They must be excluded from any abundance figure by default
+  # — "fish" alone is ~70% of all recorded MaxN, so leaving it in makes every
+  # site and reserve total a measure of detector activity rather than ecology.
+  # The unknown/UnID variants come from legacy expert CSVs, which spell
+  # "animal we could not identify" several ways.
+  # The BIIGLE label names are here as well as the normalised `fish`: class_map
+  # folds them into `fish` on the way in, but legacy expert rows imported before
+  # that mapping existed still carry the raw label, and two of them are in the
+  # annotations database today. Listing them costs nothing and stops an
+  # unidentified animal being counted as a species called "Fish: final".
+  non_species_classes: ["fish", "bait", "unknown", "Unknown", "UnID", "unid",
+                        "Fish: final", "Fish - Final", "Fish: review required",
+                        "To review"]
+
+  # What the report calls them once they are merged. One bucket, shown rather
+  # than silently dropped: "we saw something and could not name it" is a real
+  # observation, and hiding it makes the identified species look like the whole
+  # catch. Charts that count SPECIES (richness, accumulation, co-occurrence)
+  # still exclude it, because it is not one species.
+  unidentified_label: "Unidentified"
+
+  # The model's catch-all detection — an animal it could not identify. Named once
+  # here because two places need it: excluded from abundance figures above, and
+  # banded by box size in extraction.frame_strategy (it is not one species but N
+  # unknown ones, so it earns several review frames rather than one).
+  catchall_class: "fish"
+
+  # Species used to characterise a reserve's population. These are the fished
+  # species whose recovery inside reserves is the thing BUV surveys exist to
+  # measure, so summing every species together (mixing a snapper with a spotty)
+  # answers no useful question. Used as the map's default selection; the user can
+  # override it per view.
+  indicator_species:
+    - "Pagrus auratus"      # snapper — the classic NZ reserve-effect indicator
+    - "Parapercis colias"   # blue cod — the southern equivalent
+    - "Jasus edwardsii"     # rock lobster — heavily fished, strong reserve response
+
+  # ProtectionStatus values that count as "protected" for inside/outside reserve
+  # comparisons. Everything else is treated as unprotected. Partial regimes
+  # (Mataitai, Taiapure, seafloor-only) are deliberately NOT here — they restrict
+  # some fishing but not the take of these indicator species, so counting them as
+  # protected would blunt the very contrast the comparison exists to show.
+  protected_statuses:
+    - "Type I MPA (Marine Reserve)"
+    - "High Protection Area"
+    - "Type II MPA"
+
 # Centralized path and storage configuration
 paths:
   # Base directory for all project data
   base_dir: "process_files"
   deployment_targets_csv: process_files/deployment_targets.csv
-  test_deployment_csv: tests/fixtures/test_deployment_metadata.csv
   # Legacy directories (at project root, synced to S3)
   legacy:
     zooniverse: "process_files/zooniverse/legacy_classifications"
@@ -43,7 +128,7 @@ paths:
   extra_files_filename: "extra_files_in_aws.txt"
   # Metadata paths (relative to bucket root)
   metadata:
-    root: "metadata"
+    root: "spyfish_metadata"
     sharepoint_dir: "sharepoint_lists"
     status_dir: "status"
     files:
@@ -80,6 +165,14 @@ ml_inference:
   imgsz: 640  #1920
   confidence_threshold: 0.15      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
   maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
+  max_boxes_per_frame: 80          # Sanity ceiling: if a drop's inference averages more detections/frame than this, treat it as degenerate (model saturating max_det on out-of-distribution footage, or confidence_threshold mis-set to ~0) and fail the drop instead of building a giant COCO. No real BUV frame has 80 fish; the flood case hits YOLO's max_det=300.
+  batch_size: 32                   # Frames per YOLO predict() call during video inference. Batching amortises per-call overhead and keeps the GPU fed (single-frame calls leave an A100 at ~0% util). 32 fits comfortably at imgsz=640 on a 40GB A100; lower to 8–16 for larger imgsz or smaller GPUs.
+  # YOLO NMS, applied at inference (passed to model.predict). Cleans overlapping/stacked
+  # boxes at the source, so the raw CSV — and therefore MaxN counts, frame selection AND
+  # the BIIGLE COCO — are all consistent. Tuning these requires re-running --ml (fast now
+  # that inference is batched).
+  nms_iou: 0.45                    # Boxes overlapping more than this IoU are suppressed. Lower = more aggressive merging of duplicate boxes on one fish (YOLO default 0.7). Tuned to 0.45 by eyeballing real frames across SLI_117_02 (2026-06-04): 0.4 cleaned duplicates dramatically but deleted one real fish; 0.45 keeps the dedup win while preserving that fish. Raise toward 0.5 if distinct overlapping fish (schooling/eels) get merged.
+  nms_agnostic: true               # Cross-class NMS: when true, an overlapping species box + generic 'fish' box on the same animal collapse to one (highest confidence wins) instead of both surviving. YOLO default is false (per-class).
   remote_host: "mahuika"
   remote_user: "kalindi"
   extraction:
@@ -89,14 +182,54 @@ ml_inference:
 extraction:
   clip_length: 10.0        # Length of each extracted clip in seconds
   clip_cap: 180            # Maximum number of clips to extract per video
-  video_start_threshold_seconds: 120 # Seconds from video start used for start-of-video health check clips
+  video_start_threshold_seconds: 120 # Health-check window, measured FROM sampling_start (not from frame 0). Measuring from frame 0 silently produced no start frame at all on the 390 of 1820 deployments whose sampling_start is already past 120s.
   force_binary_strategy: false       # If true, use binary strategy regardless of species count
   sample_all_clips: false            # If true, bypass ML strategy and select every non-overlapping clip in the sampling window (subject to clip_cap)
+  # Frame floor per deployment, shared across every bucket below. Set by expert
+  # capacity, not by anything about the model — so the design question is never
+  # "how many" but "which ones".
+  #
+  # A FLOOR on the total, never a ceiling. One peak frame per species is
+  # mandatory (without it that species has no MaxN at all), so a species-rich
+  # drop runs over and should. Discretionary buckets fill whatever the peaks
+  # leave; where they can't — a single-class drop, or one whose boxes are all
+  # the same size — blind frames take up the slack, so the floor always holds.
+  #
+  # No need to raise this while the model is young: a weak model emits mostly
+  # the `fish` catch-all, which widens the unidentified bucket and lifts those
+  # drops on its own. The extra frames land where the uncertainty is rather than
+  # on every deployment alike.
+  min_frames_per_drop: 10
+  # FRAME selection buckets. Clips keep binary_strategy/multiclass_strategy below;
+  # frames use this single per-species set, because one class is just the N=1 case
+  # and the old binary/multiclass fork was pure complication.
+  #
+  # Allocation is by marginal information — what an expert label tells us that we
+  # don't already know. See claude_docs/todo.md "Frame selection: one budget,
+  # several buckets" for the measurements behind these numbers.
+  frame_strategy:
+    per_species_maxn: 2        # Mandatory for counting: no peak frame for a species = no MaxN for it at all
+    per_species_confusing: 1   # High count, low confidence — resolves detection uncertainty
+    fish_bands: 3      # Frames spanning the catch-all's box-size range. Measured diagonal spread was 4.1x for `fish` vs 1.8-2.7x for named species — it holds several different animals, so band by size rather than take the N largest counts. Self-limiting: a drop whose boxes are all one size yields one frame.
+    blind_export: 3            # ALWAYS taken, never mere filler: every other bucket is chosen by the model, so these are the only frames that can reveal a fish it never detected. A dense drop is precisely where that check matters, so this must not be squeezed out by a full budget.
+    start_export: 1            # Health check on the opening of the deployment
+    # ONE knob for review effort. Quotas are multiplied by it and spacing is
+    # DIVIDED by it, because the two are not independent: on a real deployment
+    # spacing is what binds, not the quotas. Tripling quotas alone yielded 21
+    # frames instead of the ~57 the arithmetic suggests, because an 886-second
+    # detection span has nowhere to put 24 frames 30s apart. So asking for 3x the
+    # review means accepting 10s spacing, which the autocorrelation says still
+    # samples the same moment twice (0.15 at 10s, 0.00 by 60s). That redundancy
+    # is the real price of more frames — not the quota numbers.
+    spacing_divisor: 2       # Divides temporal_spacing_seconds ONLY; quotas are untouched. Raising it does not request more frames, it lets quotas that spacing was blocking actually fill — the count rises toward what the quotas already asked for, not past it.
+    peak_merge_seconds: 5.0  # Window in which two species' peaks may SHARE one frame. Wider than same_frame_seconds because merging is count-checked: a merge only happens when the surviving frame actually shows the other species at its full peak count, so a generous window cannot silently undercount. Six species peaking within 26s is one aggregation event, not six.
+    same_frame_seconds: 1.0    # ACROSS classes (within-class uses temporal_spacing_seconds below). Two picks closer than this are one moment: the second is a duplicate, AND a frame picked for one species is credited as showing whatever else was on screen. At ml_fps=3 the sampled frames are 0.33s apart, so this spans ~3 of them. Raise it and genuinely distinct moments start being treated as one; lower it and near-simultaneous detections each cost a frame.
+    temporal_spacing_seconds: 30 # Raised from 10 once collapse_peaks became count-checked. Detection-count autocorrelation measured 0.15 at 10s and 0.00 by 60s, so 10s frames still sample the same moment twice.
   binary_strategy:
     maxn_export: 30          # Clips at highest fish-count moments
     confusing_export: 60     # Clips with high count but low confidence (uncertain detections)
     empty_export: 10         # Clips with zero detections (false negative check)
-    start_export: 3          # Clips from the start of the video (health check)
+    start_export: 1          # Clips from the start of the video (health check)
     temporal_spacing_seconds: 10  # Minimum seconds between selected clips
   multiclass_strategy:
     per_species_maxn_export: 5       # MaxN clips per species
@@ -118,7 +251,6 @@ zooniverse:
   min_clips_per_video: 30  # Minimum clips per video — if ML strategy selects fewer, top up with evenly-spaced health checks
   min_agreement_pct: 50.0 # Aggregator filter: drop (subject, species) rows where vote_count / total_classifiers < this. Handles the full retirement-1 (expert) → retirement-30 (broad public) range without per-workflow tuning.
   consensus_something_here_pct: 50.0 # Consensus-fish rule: when no single species clears min_agreement_pct but at least this % of voters saw SOMETHING (votes - nothing_here_votes), emit one row with species="fish".
-  max_frames_per_run: 3  # Max frames extracted per run of identical MaxN count
 
 deployment_validation:
   buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
@@ -136,21 +268,21 @@ ffmpeg:
 biigle:
   # Named projects. Workflow: pipeline uploads to `in_progress`; annotator moves
   # the volume to `done` when finished, which is where --biigle-sync reads from.
-  # `playground` is the testing sandbox — point uploads there by setting
-  # BIIGLE_PROJECT_ID=4081 in the environment.
   projects:
     in_progress: 4942        # upload target — pipeline pushes new volumes here
     done: 3711               # Spyfish Aotearoa — annotator-finished volumes
+    # Reference (no code reads these): 4081 is the testing sandbox — point
+    # uploads there by temporarily setting project_id above. 4626 is the
+    # legacy backup-of-record where old training-data uploads live (exports on
+    # S3 at biigle_obb_backup_2026-05-26/ — read those, don't re-export).
     playground: 4081         # sandbox for testing / try-things-out
-    training: 4626           # legacy backup-of-record for training-data uploads
+    archive: 4626            # legacy backup-of-record for training-data uploads
   # Default project for generic handler methods (used when no role is specified).
   # Points at in_progress so plain `config.biigle_project_id` = upload target.
   project_id: 4942
   disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
-  volume_report_type_video: 10                   # TODO Volume overview report
-  volume_report_type_image: 10                   # TODO Volume overview report
   # Done labels — whole-file labels that signal a volume is ready for ingestion.
   # All listed labels must be present. Gated on "Done Volume" only for now;
   # re-add "Done QA Review" once the QA pass is part of the workflow (see todo).
@@ -167,16 +299,36 @@ biigle:
   default_bait_label_id: 537309   # tree 3375 → "Bait" — used when an ML annotation's class resolves to 'bait'
   default_label_tree_id: 3511 # 3375
 
-  # Map species scientific/common names (from COCO JSON) to specific Biigle label IDs.
-  # The upload script will check this dictionary first, then fall back to default_fish_label_id.
-  # Empty dict = no species-specific mappings; everything goes to default_fish_label_id.
+  # Label tree that holds the CMECS substrate / cover labels ("Spyfish CMECS
+  # Substrate"). Any annotation whose label belongs to this tree is measured for
+  # percent-cover, regardless of shape (magic-wand Polygon or traced LineString).
+  # Tree membership — not a label-name prefix — is the discriminator: CMECS
+  # hierarchy paths start at generic roots ("Biotic Component", "Substrate
+  # Component", ...) with no Spyfish marker, so only the tree ID identifies them
+  # reliably. This is also what separates a substrate LineString from a fish-SIZE
+  # LineString: size lines carry a species label (tree 3511) or "Scale bar", so
+  # they route to process_sizes() instead.
+  substrate_label_tree_id: 3994
 
+  # OVERRIDE map only: species scientific/common name (from COCO JSON) → Biigle label ID.
+  # This is the FIRST routing source in upload_frames.py and exists to force a model
+  # class to a DIFFERENT label than its natural one — e.g. send an uncertain species to
+  # "Fish: review required" for expert confirmation. It is NOT the species list.
+  # Normal routing is handled downstream without any entry here:
+  #   1. label_mapping (this dict)          ← overrides only
+  #   2. species_labels.csv (~175 species)  ← full BIIGLE label tree, keyed by scientific name
+  #   3. 'bait'  → default_bait_label_id
+  #   4. 'fish' / unknown → default_fish_label_id
+  # Most of the 16-class model (13 species + bait + fish) resolves via sources 2–4
+  # with no entry here. The one exception below is a deliberate override.
   label_mapping:
-    'Jasus edwardsii': 477401
-    'Notolabrus celidotus': 477425
-    'Pagrus auratus': 477416
-    'Parapercis colias': 477318
-    'Pseudolabrus miles': 477406
+    # Family-level "Gurnards - Triglidae" (was 477460) was deleted from BIIGLE tree 3511,
+    # so the model's `Triglidae` class has no natural label in species_labels.csv. Route it
+    # to the red-gurnard SPECIES label (Chelidonichthys kumu, 477395) — decision 2026-06-03.
+    # NOTE: this merges family-level detections into the species label, so in BIIGLE a
+    # `Triglidae` call is indistinguishable from a `Chelidonichthys kumu` call. Remove this
+    # entry if the "Gurnards - Triglidae" family label is restored in the tree.
+    'Triglidae': 477395
   # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
   # on slow or unreachable endpoints.
   request_timeout_secs: 30
@@ -195,19 +347,27 @@ training:
   optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
   lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
   dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
-  train_pct: 0.85
-  val_pct: 0.15
+  train_pct: 1.0
+  val_pct: 0.0                  # 0 = no per-survey val donation (used only when auto_balance_val is false). With auto_balance_val on, val comes from the species-balanced selector instead.
   test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
+  # Species-balanced val selection (the suggester, folded into the pipeline).
+  # When true, the split picks whole drops into val so each multi-source species
+  # reaches ~val_balance_pct of its boxes (greedy, stops within tolerance), honouring
+  # force_val_drops (seeded) / force_train_drops (excluded). Replaces per-survey donation.
+  auto_balance_val: true
+  val_balance_pct: 0.08         # target val fraction per multi-source species
+  val_balance_tolerance: 0.2    # stop when the worst-covered species is within this of target (lower = more drops, tighter coverage)
   class_floor_min_images: 50    # merge species appearing in fewer than this many distinct frames into "fish"
   local_training_dir: "process_files/training"
   excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
   force_val_drops_file: "process_files/training_lists/force_val_drops.txt" # drops to force into val (overrides survey-aware donation)
+  force_train_drops_file: "process_files/training_lists/force_train_drops.txt" # drops to force into train (overrides survey-aware donation; force_val wins on overlap)
   retrain_min_improvement_pct: 2.0
   # Per-drop frame filter (applied in assemble_yolo_dataset)
-  cap_frames_per_drop: 120               # max frames per drop in the assembled YOLO dataset (extras bypass this cap)
+  cap_frames_per_drop: 100               # max frames per drop in the assembled YOLO dataset (extras bypass this cap). BUV is a fixed camera, so frames within a drop share one background + repeat individuals — beyond ~100 they're largely redundant. dominant_species frames are dropped first, so blue-cod-only frames go before multi-species ones.
   dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
-    # - "Pagrus auratus"                   # snapper — overrepresented in current corpus
-    # - "Parapercis colias"                # blue cod — overrepresented in current corpus
+    - "Parapercis colias"                # blue cod — overrepresented (~59% of all boxes); drop blue-cod-only frames first so the cap keeps frames with rarer species
+    # - "Pagrus auratus"                   # snapper — enable if it starts dominating too
   split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
   background_ratio: 0.1                  # target share of background (empty-label) frames in the TRAIN split; 0 disables. Ultralytics rec 0–10%, COCO ≈ 1%. Backgrounds (mostly from training-frame volumes) are pooled across train drops and subsampled to hit this ratio.
 
@@ -217,17 +377,20 @@ training_extraction:
   # runs the configured model, uploads to a survey-level Biigle volume.
   # See `python -m spyfish.ml.training.extract_training_frames --help`.
   n_frames: 10                # frames per drop; back-loaded toward sampling_end (more fish later)
-  annotation_type: binary     # "binary" or "species" — picks `{kind}_*.pt` from pipeline_model/
+  annotation_type: species    # "binary" or "species" — picks `{kind}_*.pt` from pipeline_model/
 
 
 validation_patterns:
-  drop_id:   "^[A-Z]{3}_\\d{8}_BUV_[A-Z]{3}_\\d{3}_\\d{2}$"
-  survey_id: "^[A-Z]{3}_\\d{8}_BUV$"
+  # The date segment is YYYYMMDD constrained to a real calendar date in 20xx, not
+  # a bare \d{8}. A loose \d{8} accepts DDMMYYYY entered by hand (e.g. 23042026),
+  # which then parses as year 2304 and stretches every year axis in the dashboard.
+  drop_id:   "^[A-Z]{3}_20\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])_BUV_[A-Z]{3}_\\d{3}_\\d{2}$"
+  survey_id: "^[A-Z]{3}_20\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])_BUV$"
   site_id:   "^[A-Z]{3}_\\d{3}$"
 
 validation_rules:
   deployments:
-    file_name: "metadata/sharepoint_lists/BUV Deployment.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Deployment.csv"
     required: ["DropID", "SurveyID", "SiteID","SamplingStart", "SamplingEnd"]
     unique: ["DropID"]
     formats: ["DropID"]
@@ -259,7 +422,7 @@ validation_rules:
         range: [170, 178.5]
         allowed_values: [0]
   surveys:
-    file_name: "metadata/sharepoint_lists/BUV Survey Metadata.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Metadata.csv"
     required: ["SurveyID"]
     unique: ["SurveyID"]
     info_columns: ["SurveyName"]
@@ -267,7 +430,7 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   sites:
-    file_name: "metadata/sharepoint_lists/BUV Survey Sites.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Survey Sites.csv"
     required: ["SiteID", "LinkToMarineReserve"]
     unique: ["SiteID"]
     info_columns: ["SiteName", "LinkToMarineReserve"]
@@ -275,14 +438,14 @@ validation_rules:
     foreign_keys: {}
     relationships: []
   species:
-    file_name: "metadata/sharepoint_lists/BUV Species.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/BUV Species.csv"
     required: ["AphiaID", "CommonName", "ScientificName"]
     unique: ["AphiaID", "ScientificName", "CommonName"]
     info_columns: ["AphiaID", "CommonName", "ScientificName"]
     foreign_keys: {}
     relationships: []
   reserves:
-    file_name: "metadata/sharepoint_lists/Marine Reserves.csv"
+    file_name: "spyfish_metadata/sharepoint_lists/Marine Reserves.csv"
     required: []
     unique: []
     info_columns: []

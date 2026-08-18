@@ -121,7 +121,7 @@ class AnnotationDatabaseManager:
         """Clear existing annotations for a given drop + source.
 
         When ``external_id`` is provided, only rows matching that exact
-        external_id are deleted — useful for ML ingestion where each model
+        external_id are deleted, useful for ML ingestion where each model
         writes rows tagged with its own name, and we want a re-run of one
         model to leave other models' rows intact. Without it, every row
         for the (drop_id, annotated_by) pair is cleared.
@@ -229,7 +229,7 @@ class AnnotationDatabaseManager:
         self, drop_id: Optional[str] = None, annotated_by: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Returns the canonical MaxN per drop × species × source — i.e. the peak
+        Returns the canonical MaxN per drop × species × source, i.e. the peak
         max_interval across all time intervals for each combination.
 
         This is the scientific result; contrast with deployments.ml_annotations
@@ -264,7 +264,10 @@ class AnnotationDatabaseManager:
             WHERE {extra_clause}a.id = (
                 SELECT id FROM annotations
                 WHERE drop_id = a.drop_id
-                  AND scientific_name = a.scientific_name
+                  -- IS, not =: null-species rows record "reviewed, nothing
+                  -- seen" and NULL = NULL is never true, so = silently drops
+                  -- every absence record from the summary.
+                  AND scientific_name IS a.scientific_name
                   AND annotated_by = a.annotated_by
                 ORDER BY max_interval DESC, id ASC
                 LIMIT 1

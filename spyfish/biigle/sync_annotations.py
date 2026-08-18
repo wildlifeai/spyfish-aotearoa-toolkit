@@ -8,10 +8,27 @@ from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.biigle.biigle_parser import BiigleParser
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo
 from spyfish.config.base import ExpertStatus
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
 from spyfish.utils import seconds_to_time, time_to_seconds
+
+
+def _drop_substrate_rows(df: pd.DataFrame, substrate_label_ids: set) -> pd.DataFrame:
+    """Remove CMECS substrate annotations from a report DataFrame.
+
+    Substrate is measured as percent-cover (process_substrate), not counted as
+    a species, so its rows must be excluded before MaxN aggregation, or each
+    substrate polygon would inflate a bogus "species" count. Identified by the
+    same label-tree membership used in process_substrate.
+    """
+    if not substrate_label_ids or "label_id" not in df.columns:
+        return df
+    is_substrate = pd.to_numeric(df["label_id"], errors="coerce").isin(
+        substrate_label_ids
+    )
+    return df[~is_substrate].copy()
 
 
 def _extract_timestamp_from_filename(row: pd.Series, fname_col: str) -> Optional[str]:
@@ -50,18 +67,51 @@ def _map_biigle_to_spyfish_schema(
     drop_id: str,
     timestamp: Optional[str],
     frame_key: str,
-) -> Tuple[Tuple[str, str], Dict[str, Any]]:
+) -> Optional[Tuple[Tuple[str, str], Dict[str, Any]]]:
     """Maps a Biigle annotation row to the Spyfish schema. Returns (aggregation_key, mapped_dict).
 
-    `frame_key` is used as the per-frame identifier when `timestamp` is None —
+    Returns None for rows whose label is not a species: label-tree species are
+    named "Common - Scientific", so a bare label the species registry doesn't
+    know is a workflow label ("Done Volume", "Review"), letting it through
+    would write it into the annotations DB as a scientific name.
+
+    Names the registry DOES know are resolved to their canonical scientific
+    name, not kept as written. The registry treats "Fish: final" as an alias of
+    the `fish` bucket; recognising it and then storing the alias put a second
+    spelling of one class into the database, where every reader has to know
+    both.
+
+    `frame_key` is used as the per-frame identifier when `timestamp` is None,
     e.g. for image volumes (like UUID-named uploads) where no clip/frame-seconds
     pattern is in the filename. Preserves per-frame uniqueness for MaxN aggregation.
     """
-    species = str(row.get(label_col, "unknown_species")).strip()
-    if " - " in species:
-        parts = species.split(" - ", 1)
-        if len(parts) == 2:
-            species = parts[1]
+    label = str(row.get(label_col, "unknown_species")).strip()
+
+    # The registry first, on the WHOLE label. It knows the label-tree strings
+    # as aliases, so "Fish - Final" resolves to `fish` and "Snapper - Pagrus
+    # auratus" to `Pagrus auratus`. Splitting on " - " first would take the
+    # second half blindly and turn "Fish - Final" into a species called
+    # "Final".
+    registry = species_registry()
+    known = registry.get(label) or registry.get(label.lower())
+    if known is not None:
+        species = known.scientific_name
+    elif " - " in label:
+        # Not in the registry, but it carries the label tree's
+        # "Common - Scientific" shape, so the half after the separator is the
+        # scientific name. This is how a species new to the tree arrives before
+        # anyone adds it to the registry.
+        species = label.split(" - ", 1)[1]
+    else:
+        # A bare label the registry does not know is a workflow label
+        # ("Done Volume", "Interesting Sighting"); letting it through would
+        # write it into the annotations database as a scientific name.
+        logging.warning(
+            f"{drop_id}: skipping BIIGLE annotation with non-species label "
+            f"{label!r} (no 'Common - Scientific' form, unknown to the "
+            "species registry)."
+        )
+        return None
 
     sortable_time = timestamp or frame_key
     key = (sortable_time, species)
@@ -102,9 +152,12 @@ def aggregate_raw_to_maxn_rows(
     for _, row in fish_annotations_df.iterrows():
         fname = str(row.get(fname_col, ""))
         timestamp = _extract_timestamp_from_filename(row, fname_col)
-        key, mapped_item = _map_biigle_to_spyfish_schema(
+        mapped = _map_biigle_to_spyfish_schema(
             row, label_col, drop_id, timestamp, fname
         )
+        if mapped is None:
+            continue
+        key, mapped_item = mapped
 
         if key not in aggregated_annotations:
             aggregated_annotations[key] = mapped_item
@@ -167,6 +220,26 @@ def sync_biigle_annotations():
     done_volumes = {v["id"]: v for v in handler.get_volumes(done_project_id)}
     logging.info(f"Project {done_project_id} (done) has {len(done_volumes)} volume(s)")
 
+    # Substrate (CMECS) label-id set, fetched once for the whole run, these are
+    # the labels whose annotations are measured as percent-cover instead of being
+    # counted as a species. Empty set (e.g. API hiccup) cleanly disables substrate
+    # processing without aborting the species sync.
+    substrate_tree_id = config.biigle_substrate_label_tree_id
+    try:
+        substrate_label_ids = {
+            int(lbl["id"]) for lbl in handler.get_label_tree_labels(substrate_tree_id)
+        }
+        logging.info(
+            f"Substrate tree {substrate_tree_id} has "
+            f"{len(substrate_label_ids)} label(s)"
+        )
+    except Exception as e:
+        logging.warning(
+            f"Could not fetch substrate label tree {substrate_tree_id}: {e}. "
+            "Substrate percent-cover will be skipped this run."
+        )
+        substrate_label_ids = set()
+
     processed_drops = []
     for dep in deployments:
         drop_id = dep["drop_id"]
@@ -194,7 +267,7 @@ def sync_biigle_annotations():
                     f"  Volume {volume_id} for {drop_id} is DONE ({media_type}). Downloading report..."
                 )
             else:
-                # Reuse cached metadata — saves a get_volume_info() round-trip per volume
+                # Reuse cached metadata, saves a get_volume_info() round-trip per volume
                 media_type = done_volumes[volume_id].get("media_type", "image")
                 logging.info(
                     f"  Volume {volume_id} for {drop_id} in done project "
@@ -222,6 +295,22 @@ def sync_biigle_annotations():
             raw_path = config.get_biigle_expert_raw_csv_path(drop_id)
             fish_annotations_df.to_csv(raw_path, index=False)
             logging.info(f"  Raw expert annotations → {raw_path}")
+
+            # Substrate (CMECS) is an area-cover statistic, computed separately
+            # from species MaxN. Export per-drop percentages, then drop substrate
+            # rows so they never count as a "species" in the fish aggregation.
+            substrate_df = parser.process_substrate(
+                fish_annotations_df, substrate_label_ids
+            )
+            if not substrate_df.empty:
+                substrate_path = config.get_biigle_expert_substrate_csv_path(drop_id)
+                substrate_df.to_csv(substrate_path, index=False)
+                logging.info(
+                    f"  Expert substrate ({len(substrate_df)} rows) → {substrate_path}"
+                )
+            fish_annotations_df = _drop_substrate_rows(
+                fish_annotations_df, substrate_label_ids
+            )
 
             # Aggregate into MaxN counts
             annotations_to_add = aggregate_raw_to_maxn_rows(

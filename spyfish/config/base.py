@@ -9,7 +9,7 @@ def get_required(config_dict, key: str, section: str = ""):
     """Fetch a required config value, raising if missing or None.
 
     Works with both Python dicts and objects (e.g. `ConfigWrapper`). A value
-    of `None` is treated as missing — config.yaml keys that resolve to None
+    of `None` is treated as missing, config.yaml keys that resolve to None
     are almost always a sign of a bad edit or placeholder. Use a falsy sentinel
     like `""` or `0` instead if you genuinely want an absent-but-set value.
 
@@ -80,19 +80,19 @@ class VideoPresence:
     """Tracks whether a deployment's video is present in S3.
 
     Stored in the video_presence column. Updated on every ingest run to reflect
-    current S3 state — if the video disappears from S3, it reverts to ABSENT.
+    current S3 state, if the video disappears from S3, it reverts to ABSENT.
     """
 
     PRESENT = "present"  # Video in S3 with a directly-downloadable storage class
-    ARCHIVED = "archived"  # Video in S3 but in DEEP_ARCHIVE — needs restore
+    ARCHIVED = "archived"  # Video in S3 but in DEEP_ARCHIVE, needs restore
     ABSENT = "absent"  # Video not found in S3
-    NO_VIDEO_BAD_DEP = "no_video_bad_dep"  # Bad deployment — no video expected
+    NO_VIDEO_BAD_DEP = "no_video_bad_dep"  # Bad deployment, no video expected
 
 
 class IngestStatus:
     """Data-quality gate for a deployment.
 
-    Set only at ingestion — never advanced. Not in the `SECTIONS` registry
+    Set only at ingestion, never advanced. Not in the `SECTIONS` registry
     because it has no `advance_*_status` method. All `get_deployments_eligible()`
     queries filter `ingest_status = 'ok'`, so anything else is invisible to stages.
     """
@@ -133,7 +133,7 @@ class CitSciStatus:
     ERROR = "citsci_error"
 
     # Happy path: pending → clips_uploaded → complete (zooniverse-sync checks retirement).
-    # Frame subjects intentionally not modelled — see git history if reintroducing.
+    # Frame subjects intentionally not modelled, see git history if reintroducing.
     VALID_TRANSITIONS: dict = {
         PENDING: {CLIPS_UPLOADED, SKIPPED},
         CLIPS_UPLOADED: {COMPLETE, ERROR},
@@ -184,16 +184,45 @@ class ReportingStatus:
 # Single source of truth for everything that needs to iterate over sections
 # or look one up by its DB column name. To add a new section, define a new
 # status class with COLUMN, ERROR, and VALID_TRANSITIONS, then add it to
-# SECTION_STATUSES — no other lookup tables need updating.
+# SECTION_STATUSES, no other lookup tables need updating.
 #
 # `ERROR` is used in two places: the section status column value, AND the
 # `validation_errors.ErrorType` discriminator. Same string, one concept.
 #
 # Consumers:
-#   - DatabaseManager.advance_status()   — uses VALID_TRANSITIONS for checks
+#   - DatabaseManager.advance_status()  , uses VALID_TRANSITIONS for checks
 #                                          and ERROR for clearing validation_errors
-#   - StageRunner._run_drop_stage()      — sets section to ERROR on exception
+#   - StageRunner._run_drop_stage()     , sets section to ERROR on exception
 
 SECTION_STATUSES: tuple = (MlStatus, CitSciStatus, ExpertStatus, ReportingStatus)
 
 SECTIONS: dict[str, type] = {s.COLUMN: s for s in SECTION_STATUSES}
+
+# Every status column, including ingest_status, which is absent from SECTIONS
+# because it is never advanced, but still needs its values policed at the edges.
+STATUS_CLASSES: dict[str, type] = {IngestStatus.COLUMN: IngestStatus, **SECTIONS}
+
+# column name → the values that column is allowed to hold. Any path that accepts
+# a status from outside the code (the --set-targets CSV, the set_status CLI) must
+# check against this: advance_status() validates transitions, not vocabulary, and
+# update_section_status() deliberately validates neither.
+SECTION_VALUES: dict[str, list] = {
+    col: sorted(
+        value
+        for name, value in vars(cls).items()
+        if not name.startswith("_") and name != "COLUMN" and isinstance(value, str)
+    )
+    for col, cls in STATUS_CLASSES.items()
+}
+
+# `scientific_name` on a row that records "this deployment was reviewed and
+# nothing was seen". Every annotation source writes one, so a null deployment is
+# an explicit statement rather than an absence of rows, which is indistinguishable
+# from "this source never looked".
+#
+# A named value rather than SQL NULL: a null vanishes from a GROUP BY, does not
+# match an `IN` filter and reads as missing data on a dashboard, so the one row
+# that says "we checked" is exactly the row most likely to be dropped in
+# aggregation. In code, not config, for the same reason as the status values,
+# readers match on the exact string.
+NULL_DEPLOYMENT = "NULL DEPLOYMENT"

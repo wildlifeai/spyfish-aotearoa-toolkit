@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -187,15 +186,11 @@ def generate_frame_filename(drop_id: str, time_seconds: float) -> str:
 
 
 # ── Species labels (shared Biigle label-tree export) ────────────────────────
-
-
-def normalise_zoo_choice(choice: str) -> str:
-    """Normalise a Zooniverse ALL_CAPS choice key for lookup against
-    ``SpeciesLabels.zoo_choice_to_scientific``: lowercase, strip whitespace,
-    hyphens, underscores. Must stay aligned with how the dict's keys are
-    built in ``load_species_labels`` or lookups silently miss.
-    """
-    return re.sub(r"[\s\-_]", "", choice.lower())
+#
+# NOTE: superseded by ``spyfish.config.species.species_registry``, the only
+# remaining consumer is ``spyfish/biigle/upload_frames.py`` (name_to_label_id).
+# Delete this loader once that call site migrates. New code should use the
+# registry, not this.
 
 
 @dataclass(frozen=True)
@@ -220,18 +215,20 @@ class SpeciesLabels:
 def load_species_labels() -> SpeciesLabels:
     """Load and cache the BIIGLE species label tree.
 
-    Returns empty mappings (and warns) when the file is absent — the pipeline
+    Returns empty mappings (and warns) when the file is absent, the pipeline
     degrades gracefully rather than crashing on environments that haven't
     synced the labels CSV.
     """
     labels_path = config.species_labels_csv_path
     if not labels_path.exists():
         logging.warning(
-            f"species_labels.csv not found at {labels_path} — BIIGLE annotations "
+            f"species_labels.csv not found at {labels_path}. BIIGLE annotations "
             "will fall back to default_fish_label_id and Zooniverse choice keys "
             "will not be normalised to scientific names."
         )
         return SpeciesLabels({}, {})
+
+    from spyfish.config.species import normalise_zoo_choice
 
     df = pd.read_csv(labels_path)
     zoo: dict[str, str] = {}
