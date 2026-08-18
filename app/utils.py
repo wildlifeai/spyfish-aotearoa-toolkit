@@ -37,6 +37,21 @@ def sync_db_if_needed() -> bool:
 from cache_controls import render_sidebar_refresh  # noqa: E402,F401
 
 
+def render_contact_note():
+    """Sidebar fallback contact note, shown on every page.
+
+    Single source of truth for the "something broke, tell Kalindi" message — keep
+    the wording here so it only changes in one place. Best-effort: it renders only
+    if the page got far enough to call it. The guaranteed fallback when a page
+    fails to load at all is the dependency-free
+    ``pages/0_🆘_Error_-_Inform_Kalindi.py`` page.
+    """
+    st.sidebar.error(
+        "⚠️ **If this tool doesn't work**, contact Kalindi immediately on "
+        "Slack, or email [kalindi@wildlife.ai](mailto:kalindi@wildlife.ai)."
+    )
+
+
 # --- Password protection ---
 def check_password(secret_key: str = "APP_PASSWORD", *, label: str = "Password"):
     """Returns True once the user has entered the password held in `secret_key`.
