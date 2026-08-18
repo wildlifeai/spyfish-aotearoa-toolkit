@@ -724,7 +724,7 @@ def render_home(ctx: dict) -> None:
     if not ann.empty:
         from ecology_data import load_common_names
 
-        from .charts._map import gate_notice, site_scatter, site_skeleton
+        from .charts.mpa import render_mpa_populations
         from .charts.species import (
             render_reserve_effect,
             render_species_by_site,
@@ -747,53 +747,31 @@ def render_home(ctx: dict) -> None:
                 "frequency vs abundance and co-occurrence",
             )
 
-        # 2. The site map, behind the same lock as every view of coordinates.
-        # Bubble size is species richness — not summed MaxN, which adds
-        # snapper to sweep; the per-species abundance bubbles live on the MPA
-        # view the link points to.
+        # 2. The MPA populations panel, straight from the MPA view: the
+        # species/diversity picker, the over-time trend and the gated site
+        # map whose bubbles follow the picker. Ported whole rather than
+        # rebuilt — the panel's own docstring is right that splitting the
+        # picker from the map it controls separates a control from the thing
+        # it controls, and a hand-rolled home map immediately drifted (nan
+        # site names, a picker it ignored).
         st.divider()
-        st.subheader("Site map")
-        show_coords = render_map_gate()
+        render_map_gate()
         site = filtered_site_frames(ctx)
-        if gate_notice(site["effort_view"], show_coords):
-            rich = (
-                report_data.real_species(site["df_context"])
-                .groupby("site_id")["scientific_name"]
-                .nunique()
-                .reset_index(name="species")
+        if not site["df_context"].empty:
+            render_mpa_populations(
+                site["df_context"],
+                site["effort_view"],
+                site["show_coords"],
+                year_range=site["years"],
+                reserves=site["reserves"],
+                regions=site["regions"],
+                protections=site["protections"],
             )
-            sites_geo = site_skeleton(site["effort_view"], rich)
-            if sites_geo.empty:
-                st.info("No sites in this selection carry coordinates.")
-            else:
-                # A floor, so a surveyed site where nothing was identified
-                # stays a visible dot instead of vanishing at size zero.
-                sites_geo["size"] = sites_geo["species"].clip(lower=0.4)
-                fig = site_scatter(
-                    sites_geo,
-                    size="size",
-                    hover_name="site_name",
-                    hover_data={
-                        "site_id": True,
-                        "species": True,
-                        "region": True,
-                        "size": False,
-                        "latitude": False,
-                        "longitude": False,
-                    },
-                )
-                st.plotly_chart(fig, use_container_width=True, key="home_site_map")
-                st.caption(
-                    f"{len(sites_geo):,} surveyed sites in the current "
-                    "selection, bubble size = species richness (distinct real "
-                    "species recorded). A small dot is a site surveyed with "
-                    "nothing identified yet."
-                )
         if mpa_page is not None:
             st.page_link(
                 mpa_page,
-                label="MPA view: the same map with per-species abundance "
-                "bubbles and diversity metrics",
+                label="MPA view: this panel in context, with the per-reserve "
+                "tables, diversity and trends around it",
             )
 
         # 3. Where each species is seen, and how much.
