@@ -1,5 +1,5 @@
 """
-MaxN timeline visualisation — produces a PNG saved to the data_quality folder.
+MaxN timeline visualisation, produces a PNG saved to the data_quality folder.
 
 Usage (standalone):
     python spyfish/visualisations/maxn_visualisation.py
@@ -47,27 +47,29 @@ def plot_maxn_timeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Aggregate fish counts at both thresholds
-    base_fish = (
+    # Total fish (all classes) at base confidence, kept as a faint context line.
+    base_total = (
         raw_df[raw_df["confidence"] >= base_conf]
         .groupby("time_seconds")
         .size()
         .reset_index(name="count")
     )
-    maxn_fish = (
-        raw_df[raw_df["confidence"] >= maxn_conf]
-        .groupby("time_seconds")
-        .size()
-        .reset_index(name="count")
-    )
 
-    if base_fish.empty:
+    if base_total.empty:
         logging.warning(
             f"No detections above base_conf={base_conf} for {drop_id}. Skipping plot."
         )
         return None  # type: ignore
 
-    max_time = base_fish["time_seconds"].max()
+    max_time = base_total["time_seconds"].max()
+
+    # Per-species detections at the MaxN counting threshold. Only species that
+    # actually appear in this deployment get a line, so the plot scales with
+    # what's present (typically a handful) rather than the full class list.
+    counted = raw_df[raw_df["confidence"] >= maxn_conf]
+    species_list = sorted(counted["class"].astype(str).unique())
+    cmap = plt.get_cmap("tab10" if len(species_list) <= 10 else "tab20")
+    species_colors = {sp: cmap(i % cmap.N) for i, sp in enumerate(species_list)}
 
     fig, ax = plt.subplots(figsize=(16, 6))
 
@@ -89,101 +91,104 @@ def plot_maxn_timeline(
             zorder=1,
         )
 
-    # 3. Base confidence line (light grey)
+    # 3. Faint total-fish line (all species, base conf) for context.
     ax.fill_between(
-        base_fish["time_seconds"],
-        base_fish["count"],
-        alpha=0.15,
+        base_total["time_seconds"],
+        base_total["count"],
+        alpha=0.08,
         color="#95a5a6",
         zorder=2,
     )
     ax.plot(
-        base_fish["time_seconds"],
-        base_fish["count"],
-        color="#95a5a6",
+        base_total["time_seconds"],
+        base_total["count"],
+        color="#bdc3c7",
         linewidth=1,
-        alpha=0.6,
-        zorder=3,
-        label=f"Fish (conf ≥ {base_conf})",
+        alpha=0.5,
+        zorder=2,
+        label=f"All fish (conf ≥ {base_conf})",
     )
 
-    # 4. MaxN confidence line (solid blue)
-    if not maxn_fish.empty:
-        ax.fill_between(
-            maxn_fish["time_seconds"],
-            maxn_fish["count"],
-            alpha=0.25,
-            color="#3498db",
-            zorder=4,
+    # 4. One coloured line per species (counts at the MaxN threshold).
+    for sp in species_list:
+        per_sp = (
+            counted[counted["class"].astype(str) == sp]
+            .groupby("time_seconds")
+            .size()
+            .reset_index(name="count")
         )
+        if per_sp.empty:
+            continue
         ax.plot(
-            maxn_fish["time_seconds"],
-            maxn_fish["count"],
-            color="#2980b9",
-            linewidth=2,
+            per_sp["time_seconds"],
+            per_sp["count"],
+            color=species_colors[sp],
+            linewidth=1.8,
             zorder=5,
-            label=f"Fish (conf ≥ {maxn_conf}) — used for MaxN",
+            label=sp,
         )
 
-    # 5. Red dots: MaxN peaks with annotation
+    # 5. MaxN peak dots, coloured to match the species' line.
     for _, row in maxn_df.iterrows():
         t = row[config.csv_maxn_time_seconds_column]
         count = row[config.csv_max_interval_column]
+        species = str(row[config.csv_scientific_name_column])
+        dot_color = species_colors.get(species, "#e74c3c")
         ax.scatter(
             t,
             count,
-            color="#e74c3c",
+            color=dot_color,
             s=120,
             zorder=6,
             edgecolors="white",
             linewidth=1.5,
         )
         ax.annotate(
-            f"MaxN={count}\n({row[config.csv_confidence_agreement_column]:.2f})",
+            f"{species}\nMaxN={count} ({row[config.csv_confidence_agreement_column]:.2f})",
             xy=(t, count),
             xytext=(5, 10),
             textcoords="offset points",
             fontsize=8,
-            color="#c0392b",
+            color=dot_color,
             fontweight="bold",
             bbox=dict(
                 boxstyle="round,pad=0.3",
                 facecolor="white",
-                edgecolor="#e74c3c",
-                alpha=0.8,
+                edgecolor=dot_color,
+                alpha=0.85,
             ),
         )
 
     # Styling
     ax.set_xlabel("Time (seconds from video start)", fontsize=12)
     ax.set_ylabel("Fish Count per Frame", fontsize=12)
-    ax.set_title(f"MaxN Timeline — {drop_id}", fontsize=14, fontweight="bold")
+    ax.set_title(f"MaxN Timeline, {drop_id}", fontsize=14, fontweight="bold")
     ax.set_xlim(0, max_time + 1)
     ax.set_ylim(0, ax.get_ylim()[1] * 1.15)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.grid(axis="y", alpha=0.3)
 
-    legend_elements = [
-        plt.Line2D(
-            [0], [0], color="#95a5a6", linewidth=1, label=f"Fish (conf ≥ {base_conf})"
-        ),
-        plt.Line2D(
-            [0],
-            [0],
-            color="#2980b9",
-            linewidth=2,
-            label=f"Fish (conf ≥ {maxn_conf}) — MaxN",
-        ),
+    # Collect the auto-labelled total + per-species lines, then append the
+    # fixed marker/patch entries. ncol grows with the species count so a
+    # species-rich drop doesn't produce a single tall column.
+    handles, _ = ax.get_legend_handles_labels()
+    handles += [
         plt.scatter(
-            [], [], color="#e74c3c", s=80, edgecolors="white", label="MaxN peak"
+            [],
+            [],
+            color="#333333",
+            s=80,
+            edgecolors="white",
+            label="MaxN peak (species colour)",
         ),
         mpatches.Patch(facecolor="#2ecc71", alpha=0.15, label="Selected clip window"),
         mpatches.Patch(
             facecolor="#ebebeb", alpha=0.6, label=f"{interval_seconds}s intervals"
         ),
     ]
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=9, framealpha=0.9)
+    ncol = 2 if len(species_list) > 6 else 1
+    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9, ncol=ncol)
 
     plt.tight_layout()
     out_path = output_dir / f"{drop_id}_maxn_timeline.png"
@@ -199,7 +204,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     drop_id = args.drop_id
-    model_name = config.pipeline_model_path
+    # CSV filenames embed the model *name* (stem), not the full .pt path,
+    # matches how the live pipeline builds them (Path(model).stem), e.g.
+    # "species_20260603" → SLI_..._ml_species_20260603_maxn.csv.
+    model_name = Path(config.pipeline_model_path).stem
     base_conf = float(config.confidence_threshold)
     maxn_conf = float(config.maxn_confidence_threshold)
     interval_seconds = config.interval_seconds

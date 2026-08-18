@@ -15,7 +15,6 @@ import logging
 from pathlib import Path
 
 import pandas as pd
-
 from sftk.common import (
     DEPLOYMENT_STATUS_FILENAME,
     EXPORT_LOCAL,

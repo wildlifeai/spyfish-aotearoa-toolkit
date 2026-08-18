@@ -191,3 +191,12 @@ hold*
 .streamlit/
 data/
 slurm_logs/
+
+# SQLite artifact created if ":memory:" is ever passed as a file path
+:memory:
+
+# Claude Code local session files
+.claude/
+
+# Local BIIGLE export backups (backup-of-record lives on S3)
+biigle_obb_backup_*/

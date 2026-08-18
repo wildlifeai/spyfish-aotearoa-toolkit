@@ -115,10 +115,17 @@ def _run_biigle_sync() -> None:
 
 
 def _run_retrain(
-    data_prep: bool = True, binary: bool = True, species: bool = True
+    data_prep: bool = True,
+    binary: bool = True,
+    species: bool = True,
+    dry_run: bool = False,
 ) -> None:
     run_retraining(
-        data_prep=data_prep, binary=binary, species=species, auto_promote=True
+        data_prep=data_prep,
+        binary=binary,
+        species=species,
+        auto_promote=True,
+        dry_run=dry_run,
     )
 
 
@@ -402,6 +409,13 @@ def main() -> None:
         help="On --retrain, include the species training step.",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="On --retrain --data-prep, run the fast part (flatten + maps + "
+        "split summary) and stop before the slow assembly. Produces the maps "
+        "scripts/wip/suggest_val_drops.py needs to plan the val split.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="On --zooniverse-sync: re-fetch from API even if raw CSV already exists on disk",
@@ -446,6 +460,7 @@ def main() -> None:
                     data_prep=do_data_prep,
                     binary=do_binary,
                     species=do_species,
+                    dry_run=args.dry_run,
                 ),
             )
         return s

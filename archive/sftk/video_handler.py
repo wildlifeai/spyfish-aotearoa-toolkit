@@ -13,7 +13,6 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 from IPython.display import HTML
-
 from sftk.s3_handler import ProgressTracker, S3Handler
 
 logger = logging.getLogger(__name__)
@@ -52,14 +51,14 @@ def _extract_gopro_sequence_id(
         # Return the base name without the part number
         # e.g., "S2-2 14012022_1.MP4" -> "S2-2 14012022"
         return match.group(1)
-    
+
     # Fallback to standard GoPro format if underscore pattern not found
     # Match GoPro pattern: GOPR or G[A-Z][0-9][0-9] followed by 4 digits
     gopro_pattern = rf"^(GOPR|G[A-Z]\d{{2}})(\d{{4}})\.MP4$"
     gopro_match = re.match(gopro_pattern, filename, re.IGNORECASE)
     if gopro_match:
         return gopro_match.group(2)  # Return the 4-digit sequence ID
-    
+
     return None
 
 

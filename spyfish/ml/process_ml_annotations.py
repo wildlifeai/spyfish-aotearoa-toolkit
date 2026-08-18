@@ -11,7 +11,10 @@ import numpy as np
 import pandas as pd
 
 from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.database.annotation_manager import (
+    AnnotationDatabaseManager,
+    null_deployment_row,
+)
 from spyfish.database.manager import DatabaseManager
 from spyfish.ml.draw_frames import draw_boxes_on_video_frames
 from spyfish.utils import seconds_to_time
@@ -146,17 +149,24 @@ def _ingest_ml_annotations(
         )
     # Clear only this model's prior rows before re-writing. Scoping by
     # external_id (the model name) means re-running one model leaves any
-    # other model's outputs intact in the DB — supports running both
+    # other model's outputs intact in the DB, supports running both
     # binary and species pipelines on the same drop and comparing them
     # side-by-side via the dashboard's Provenance column.
     # The clear must still run when annotations_to_add is empty so a zero-
     # detection re-run wipes stale rows from a prior run of THIS model.
     ann_db.clear_annotations(drop_id, "ml", external_id=model_name)
-    if annotations_to_add:
-        ann_db.add_annotations(annotations_to_add)
-        logging.debug(
-            f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}"
+    if not annotations_to_add:
+        # Zero detections is still a result. The null-deployment row records
+        # "reviewed, nothing seen" — the same convention the other sources use
+        # — so downstream consumers can tell it apart from "ML never ran" and
+        # detection-rate denominators include this deployment as a real zero.
+        annotations_to_add.append(
+            null_deployment_row(drop_id, "ml", external_id=model_name)
         )
+    ann_db.add_annotations(annotations_to_add)
+    logging.debug(
+        f"Ingested {len(annotations_to_add)} ML annotations into detailed database for {drop_id}"
+    )
 
 
 def _run_qa_visualizations(
@@ -209,11 +219,7 @@ def _run_qa_visualizations(
             ]
             if not band.empty:
                 frame_indices.append(int(band.sample(1)["frame"].iloc[0]))
-    # First and last detected frames — quick visual check on detection coverage
-    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))
-    frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))
-
-    # First and last detected frames — quick visual check on detection coverage
+    # First and last detected frames, quick visual check on detection coverage
     frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmin(), "frame"]))
     frame_indices.append(int(raw_df.loc[raw_df["time_seconds"].idxmax(), "frame"]))
 
@@ -246,7 +252,7 @@ def process_one_drop(
 ) -> None:
     """Post-inference processing for a single drop: MaxN + annotation ingest + QA viz.
 
-    QA viz failures are swallowed and logged — they're diagnostic only and must
+    QA viz failures are swallowed and logged, they're diagnostic only and must
     not block the caller from marking the drop complete. MaxN extraction and
     annotation ingest failures propagate so the caller can mark the drop as
     errored.
@@ -260,6 +266,25 @@ def process_one_drop(
         raise FileNotFoundError(f"Raw CSV not found for {drop_id} at {raw_csv}")
 
     raw_df = pd.read_csv(raw_csv)
+
+    # Circuit-breaker: refuse degenerate inference before it propagates downstream.
+    # A healthy BUV frame has a handful of detections; hundreds/frame means the model
+    # is saturating its max_det cap (out-of-distribution footage, or a mis-set
+    # confidence_threshold). Fail loudly here so the drop lands in ml_error rather
+    # than building a multi-million-box COCO that later crashes the BIIGLE upload.
+    if not raw_df.empty:
+        n_frames = max(1, raw_df["time_seconds"].nunique())
+        boxes_per_frame = len(raw_df) / n_frames
+        if boxes_per_frame > config.ml_max_boxes_per_frame:
+            raise ValueError(
+                f"{drop_id}: degenerate ML inference, {boxes_per_frame:.0f} "
+                f"detections/frame across {n_frames} frames ({len(raw_df):,} total), "
+                f"exceeding max_boxes_per_frame={config.ml_max_boxes_per_frame}. The "
+                "model is saturating its max_det cap; check confidence_threshold "
+                "(0 disables filtering) and whether the footage is out-of-distribution "
+                "(turbid/low-visibility). Review the video or exclude this drop."
+            )
+
     maxn_df = process_maxn(
         raw_df,
         maxn_csv,
@@ -314,7 +339,7 @@ def run_post_ml(
     draw_images: bool = True,
 ):
     """
-    Batch entry point — kept for REPL/notebook use. The pipeline now runs the
+    Batch entry point, kept for REPL/notebook use. The pipeline now runs the
     per-drop work inline inside MLRunner.run_inference_loop so that artifacts
     are written before the drop is marked complete.
 

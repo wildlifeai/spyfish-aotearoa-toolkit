@@ -1,8 +1,8 @@
 """
 Upload extracted Zooniverse clips or frames to a Zooniverse project as a new subject set.
 
-The two public entry points — upload_clips_to_zooniverse and
-upload_frames_to_zooniverse — share the same credential check, subject-set
+The two public entry points, upload_clips_to_zooniverse and
+upload_frames_to_zooniverse, share the same credential check, subject-set
 existence check, and per-row upload loop. The per-type differences (path
 column, mimetype, subject set name prefix, upload-time computation) are
 captured in a small SubjectKind dataclass and consumed by the internal
@@ -34,7 +34,7 @@ def _get_site_reserve_meta(site_id: str) -> dict:
     site = DatabaseManager().get_site(site_id)
     if not site:
         logging.warning(
-            f"No site found for SiteID '{site_id}' in DB — reserve metadata omitted. Run ingest first."
+            f"No site found for SiteID '{site_id}' in DB, reserve metadata omitted. Run ingest first."
         )
         return {}
     return {
@@ -53,7 +53,7 @@ def _build_base_subject_meta(
 ) -> dict:
     """Common Zooniverse subject metadata shared between clips and frames uploads.
 
-    `subject_type` must be "clip" or "frame" — written to #SubjectType on each
+    `subject_type` must be "clip" or "frame", written to #SubjectType on each
     subject so parse_classifications and any future retirement-gate check can
     tell them apart without relying on subject set display names.
     """
@@ -89,12 +89,12 @@ class SubjectKind:
     single new SubjectKind instance, not another 100-line copy-paste.
     """
 
-    noun_singular: str  # "clip" / "frame" — for logs and #SubjectType
-    noun_plural: str  # "clips" / "frames" — for logs
+    noun_singular: str  # "clip" / "frame", for logs and #SubjectType
+    noun_plural: str  # "clips" / "frames", for logs
     path_column: str  # DataFrame column holding the local file path
     set_name_prefix: str  # "clips_" / "frames_"
     mimetype: str  # Passed to Subject.add_location
-    upl_seconds_fn: Callable  # (row) -> int | float — UplAbsSeconds value
+    upl_seconds_fn: Callable  # (row) -> int | float. UplAbsSeconds value
 
 
 def _compute_clip_upl_seconds(row) -> int:
@@ -154,7 +154,7 @@ def _upload_subjects_to_zooniverse(
 
     if test_upload:
         uploadable = uploadable.iloc[:1]
-        logging.info("test_upload=True — limiting to 1 subject.")
+        logging.info("test_upload=True, limiting to 1 subject.")
 
     drop_id = uploadable["DropID"].iloc[0]
     n = len(uploadable)
@@ -180,13 +180,13 @@ def _upload_subjects_to_zooniverse(
         if existing_count == n:
             logging.info(
                 f"Subject set '{set_name}' already exists with {existing_count} "
-                f"{kind.noun_plural} (matches expected). Skipping upload — drop "
+                f"{kind.noun_plural} (matches expected). Skipping upload, drop "
                 f"already on Zooniverse."
             )
             return
         raise RuntimeError(
             f"Subject set '{set_name}' already exists with {existing_count} subjects "
-            f"but {n} {kind.noun_plural} were expected. State is inconsistent — "
+            f"but {n} {kind.noun_plural} were expected. State is inconsistent, "
             f"investigate in Zooniverse Lab before re-running."
         )
 
@@ -248,8 +248,8 @@ def upload_clips_to_zooniverse(
     DataFrame directly.
 
     Metadata attached to each subject:
-        '#' prefix — hidden from volunteers, used for traceability and QA.
-        '!' prefix — visible to volunteers in Talk (discussion) only.
+        '#' prefix, hidden from volunteers, used for traceability and QA.
+        '!' prefix, visible to volunteers in Talk (discussion) only.
 
         #DropID, #VideoFilename, #siteName, #SubjectType,
         #SelectionReason, #TargetSpecies, #MaxInterval, #ConfidenceAgreement,

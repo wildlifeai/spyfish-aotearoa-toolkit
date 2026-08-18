@@ -2,15 +2,15 @@
 DB refresh: reconcile pipeline status columns and spyfish_annotations.db
 with on-disk artifacts and live API state.
 
-Run when the DB is out of sync with reality — e.g. after a fresh clone,
+Run when the DB is out of sync with reality, e.g. after a fresh clone,
 a DB nuke, or work done outside the pipeline. Safe to re-run: only sets
 status forward on drops that have artifacts, never resets pipeline progress.
 
 Three passes, cheapest first:
 
-  1. ml          — scan local maxn CSV → ml_complete + re-ingest ML annotations
-  2. zooniverse  — local MaxN CSV first; Panoptes API batch call if absent
-  3. biigle      — local raw/maxn CSV first; Biigle API batch call if absent
+  1. ml         , scan local maxn CSV → ml_complete + re-ingest ML annotations
+  2. zooniverse , local MaxN CSV first; Panoptes API batch call if absent
+  3. biigle     , local raw/maxn CSV first; Biigle API batch call if absent
 
 Each pass is independent. Wire flags in run_pipeline.py to scope the run.
 """
@@ -68,13 +68,16 @@ def _ingest_ml_from_csv(
         }
         for _, row in maxn_df.iterrows()
     ]
-    ann_db.clear_annotations(drop_id, "ml")
+    # Scope the clear to THIS model's rows (external_id = model name), matching
+    # the normal-run behaviour in process_ml_annotations, an unscoped clear
+    # would wipe other models' annotations that a normal run preserves.
+    ann_db.clear_annotations(drop_id, "ml", external_id=model_name)
     if rows:
         ann_db.add_annotations(rows)
     return len(rows)
 
 
-# ── Pass 1 — ML ───────────────────────────────────────────────────────────────
+# ── Pass 1. ML ───────────────────────────────────────────────────────────────
 
 
 def refresh_ml(db: DatabaseManager, model_name: str) -> int:
@@ -89,7 +92,11 @@ def refresh_ml(db: DatabaseManager, model_name: str) -> int:
 
     for drop in drops:
         drop_id = drop["drop_id"]
-        maxn_path = config.get_maxn_csv_path(drop_id, model_name)
+        try:
+            maxn_path = config.get_maxn_csv_path(drop_id, model_name)
+        except ValueError as e:
+            logging.warning(f"  ml: skipping {drop_id}, {e}")
+            continue
         if not maxn_path.exists():
             continue
         n = _ingest_ml_from_csv(ann_db, drop_id, maxn_path, model_name)
@@ -102,7 +109,7 @@ def refresh_ml(db: DatabaseManager, model_name: str) -> int:
     return updated
 
 
-# ── Pass 2 — Zooniverse ───────────────────────────────────────────────────────
+# ── Pass 2. Zooniverse ───────────────────────────────────────────────────────
 
 
 def refresh_zooniverse(db: DatabaseManager) -> int:
@@ -128,7 +135,11 @@ def refresh_zooniverse(db: DatabaseManager) -> int:
 
     for drop in drops:
         drop_id = drop["drop_id"]
-        maxn_path = config.get_zooniverse_maxn_csv_path(drop_id)
+        try:
+            maxn_path = config.get_zooniverse_maxn_csv_path(drop_id)
+        except ValueError as e:
+            logging.warning(f"  zoo: skipping {drop_id}, {e}")
+            continue
         if maxn_path.exists():
             ingest_zooniverse_annotations(drop_id)
             db.update_section_status(drop_id, "citsci_status", CitSciStatus.COMPLETE)
@@ -143,13 +154,13 @@ def refresh_zooniverse(db: DatabaseManager) -> int:
         return updated
 
     logging.info(
-        f"  zoo: {len(needs_api)} drop(s) have no local MaxN CSV — checking Panoptes API..."
+        f"  zoo: {len(needs_api)} drop(s) have no local MaxN CSV, checking Panoptes API..."
     )
     connect_to_zooniverse()
     completion = subject_completion_from_api()
 
     if completion is None or completion.empty:
-        logging.warning("  zoo: Panoptes returned no subject sets — skipping API pass.")
+        logging.warning("  zoo: Panoptes returned no subject sets, skipping API pass.")
         return updated
 
     for drop_id in needs_api:
@@ -166,28 +177,51 @@ def refresh_zooniverse(db: DatabaseManager) -> int:
             )
             logging.info(
                 f"  zoo: {drop_id} → {CitSciStatus.CLIPS_UPLOADED} "
-                "(clips retired — run --zooniverse-sync to fetch classifications)"
+                "(clips retired, run --zooniverse-sync to fetch classifications)"
             )
             updated += 1
         else:
             logging.info(
                 f"  zoo: {drop_id}: {int(row['retired'])}/{int(row['total'])} subjects "
-                f"retired ({row['pct_retired']:.0f}%) — not yet complete"
+                f"retired ({row['pct_retired']:.0f}%), not yet complete"
             )
 
     return updated
 
 
-# ── Pass 3 — Biigle ───────────────────────────────────────────────────────────
+# ── Pass 3. Biigle ───────────────────────────────────────────────────────────
+
+
+def _volume_name_matches(volume_name: str, drop_id: str) -> bool:
+    """
+    True when a Biigle volume name refers to this exact drop.
+
+    Names follow "{drop_id}. ML frames", but a bare substring test false-matches
+    across replicate/site numbers: "..._085_01" is a substring of "..._085_010".
+    Require the drop_id to sit at a token boundary.
+    """
+    if drop_id not in volume_name:
+        return False
+    idx = volume_name.index(drop_id)
+    before_ok = idx == 0 or not volume_name[idx - 1].isalnum()
+    after = idx + len(drop_id)
+    after_ok = after == len(volume_name) or not volume_name[after].isalnum()
+    return before_ok and after_ok
 
 
 def refresh_biigle(db: DatabaseManager) -> int:
     """
-    For ok drops at expert_pending:
-      - Biigle expert raw/maxn CSV on disk → mark expert_uploaded so
-        --biigle-sync re-ingests annotations and advances to expert_complete.
-      - No local CSV → one batch Biigle API call; find volumes by name
-        ("{drop_id} — ML frames"); mark expert_uploaded for drops with a match.
+    For ok drops not yet expert_uploaded/complete/skipped:
+      - Resolve the Biigle volume id from the API (one batch call per project,
+        covering both in-progress and done), for EVERY candidate drop.
+      - Mark expert_uploaded when the drop has either a matching volume or a
+        local expert raw/maxn CSV, so --biigle-sync ingests annotations and
+        advances to expert_complete.
+
+    The volume id is recorded whether or not a local CSV exists.
+    get_biigle_volumes_awaiting_sync requires BOTH expert_status='expert_uploaded'
+    AND a non-null biigle_volume_id, setting the status alone leaves the drop in
+    a dead state that --biigle-sync silently skips forever.
 
     Returns count of drops updated.
     """
@@ -198,31 +232,12 @@ def refresh_biigle(db: DatabaseManager) -> int:
         "expert_status",
         [ExpertStatus.UPLOADED, ExpertStatus.COMPLETE, ExpertStatus.SKIPPED],
     )
-    updated = 0
-    needs_api: list[str] = []
+    if not drops:
+        return 0
 
-    for drop in drops:
-        drop_id = drop["drop_id"]
-        has_local = (
-            config.get_biigle_expert_raw_csv_path(drop_id).exists()
-            or config.get_biigle_expert_maxn_csv_path(drop_id).exists()
-        )
-        if has_local:
-            db.update_section_status(drop_id, "expert_status", ExpertStatus.UPLOADED)
-            logging.info(
-                f"  biigle: {drop_id} → {ExpertStatus.UPLOADED} "
-                "(CSV on disk — run --biigle-sync to ingest annotations)"
-            )
-            updated += 1
-        else:
-            needs_api.append(drop_id)
+    candidates = [d["drop_id"] for d in drops]
+    logging.info(f"  biigle: resolving volumes for {len(candidates)} drop(s)...")
 
-    if not needs_api:
-        return updated
-
-    logging.info(
-        f"  biigle: {len(needs_api)} drop(s) have no local CSV — checking Biigle API..."
-    )
     handler = BiigleHandler()
     # Volumes may live in either the in-progress project or the done project,
     # so reconcile against both.
@@ -230,24 +245,44 @@ def refresh_biigle(db: DatabaseManager) -> int:
         config.biigle_upload_project_id
     ) + handler.get_volumes(config.biigle_done_project_id)
 
-    # Build lookup: drop_id → first matching volume. Names follow "{drop_id} — ML frames".
-    needs_api_set = set(needs_api)
+    candidate_set = set(candidates)
     volume_by_drop: dict[str, dict] = {}
     for v in all_volumes:
         name = v.get("name", "")
-        for drop_id in needs_api_set:
-            if drop_id in name and drop_id not in volume_by_drop:
+        for drop_id in candidate_set:
+            if drop_id not in volume_by_drop and _volume_name_matches(name, drop_id):
                 volume_by_drop[drop_id] = v
 
-    for drop_id in needs_api:
+    updated = 0
+    for drop_id in candidates:
         v = volume_by_drop.get(drop_id)
-        if v:
-            db.update_section_status(drop_id, "expert_status", ExpertStatus.UPLOADED)
-            logging.info(
-                f"  biigle: {drop_id} → {ExpertStatus.UPLOADED} "
-                f"(volume '{v['name']}' found — run --biigle-sync to ingest annotations)"
+        try:
+            has_local = (
+                config.get_biigle_expert_raw_csv_path(drop_id).exists()
+                or config.get_biigle_expert_maxn_csv_path(drop_id).exists()
             )
-            updated += 1
+        except ValueError as e:
+            # A malformed drop_id that reached the deployments table with
+            # ingest_status='ok', ingest should have caught it. Refresh is a
+            # reconciliation pass, so report and carry on rather than aborting.
+            logging.warning(f"  biigle: skipping {drop_id}, {e}")
+            continue
+        if not v and not has_local:
+            continue
+
+        if v:
+            db.update_biigle_volume_id(drop_id, str(v["id"]))
+            source = f"volume {v['id']} '{v['name']}'"
+            if has_local:
+                source += " + CSV on disk"
+        else:
+            # No volume found, the drop still has expert artifacts on disk, but
+            # without a volume id --biigle-sync cannot pull it. Say so plainly.
+            source = "CSV on disk, NO Biigle volume matched, sync will skip it"
+
+        db.update_section_status(drop_id, "expert_status", ExpertStatus.UPLOADED)
+        logging.info(f"  biigle: {drop_id} → {ExpertStatus.UPLOADED} ({source})")
+        updated += 1
 
     return updated
 
@@ -272,19 +307,19 @@ def run_db_refresh(
     total = 0
 
     if ml:
-        log_header("DB Refresh — ML")
+        log_header("DB Refresh. ML")
         n = refresh_ml(db, model_name)
         logging.info(f"ML pass: {n} drop(s) updated.")
         total += n
 
     if zooniverse:
-        log_header("DB Refresh — Zooniverse")
+        log_header("DB Refresh. Zooniverse")
         n = refresh_zooniverse(db)
         logging.info(f"Zooniverse pass: {n} drop(s) updated.")
         total += n
 
     if biigle:
-        log_header("DB Refresh — Biigle")
+        log_header("DB Refresh. Biigle")
         n = refresh_biigle(db)
         logging.info(f"Biigle pass: {n} drop(s) updated.")
         total += n

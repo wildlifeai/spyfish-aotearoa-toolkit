@@ -7,9 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=genoa
 #SBATCH --gpus-per-node=1
-#SBATCH --output=/nesi/project/wildlife03546/spyfish-play-new/slurm_logs/run_pipeline_%j.out
-#SBATCH --error=/nesi/project/wildlife03546/spyfish-play-new/slurm_logs/run_pipeline_%j.err
-
+#SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/run_pipeline_%j.out
+#SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/run_pipeline_%j.err
 
 # Load modules
 module purge
@@ -22,7 +21,7 @@ module load CUDA/11.8.0
 source /nesi/project/wildlife03546/kso_venv_0627/bin/activate
 
 # Change to script directory
-cd /nesi/project/wildlife03546/spyfish-play-new
+cd /nesi/project/wildlife03546/spyfish-aotearoa-toolkit
 
 # Run video preprocessing with YOLO detection and frame selection
 python run_pipeline.py --set-targets --ml

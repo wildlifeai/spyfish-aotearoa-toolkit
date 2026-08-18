@@ -1,6 +1,5 @@
 import pandas as pd
 import streamlit as st
-
 from sftk.biigle_parser import BiigleParser
 from sftk.common import BIIGLE_PROJECT_ID
 
@@ -103,7 +102,9 @@ if submitted:
             )
             with tab1:
                 _render_df_section(
-                    max_n_df, "Max N of whole video", f"annotations_{volume_id_str}_max_n.csv"
+                    max_n_df,
+                    "Max N of whole video",
+                    f"annotations_{volume_id_str}_max_n.csv",
                 )
             with tab2:
                 _render_df_section(
@@ -113,7 +114,9 @@ if submitted:
                 )
             with tab3:
                 _render_df_section(
-                    sizes_df, "Sizes (if annotated)", f"annotations_{volume_id_str}_sizes.csv"
+                    sizes_df,
+                    "Sizes (if annotated)",
+                    f"annotations_{volume_id_str}_sizes.csv",
                 )
         except Exception as e:
             st.error(f"An error occurred while fetching annotations: {e}")

@@ -1,5 +1,5 @@
 """
-split_data.py — Survey-distributed, drop-ID-aware train/val/test split.
+split_data.py. Survey-distributed, drop-ID-aware train/val/test split.
 
 Rules:
   - Each DropID is assigned to exactly one split (no leakage).
@@ -16,8 +16,9 @@ import argparse
 import logging
 import math
 import random
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -34,6 +35,7 @@ def split_drops_by_survey(
     val_pct: float = 0.10,
     test_pct: float = 0.10,
     force_val_drops: Optional[set] = None,
+    force_train_drops: Optional[set] = None,
     seed: int = 42,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
@@ -48,19 +50,19 @@ def split_drops_by_survey(
     The min-1 floor means any survey large enough to qualify contributes at
     least one drop to val (and to test, when enabled), so small surveys
     aren't silently dropped from evaluation. Singleton surveys go entirely
-    to train — losing the only drop to val would mean a species seen there
+    to train, losing the only drop to val would mean a species seen there
     would never be in train.
 
     Stratification (not leakage) is the reason for grouping by survey: drops
     within one survey can be at very different locations/times, so they're
-    independent samples — leakage is per-DropID, not per-survey. Grouping
+    independent samples, leakage is per-DropID, not per-survey. Grouping
     by survey just ensures val sees a representative spread of survey
     conditions instead of (by random chance) all val drops landing in one
     survey.
 
     Args:
         drop_ids: List of all drop IDs.
-        train_pct: Target fraction (summary printout only — derived from
+        train_pct: Target fraction (summary printout only, derived from
             val_pct/test_pct in the actual algorithm).
         val_pct: Per-survey fraction donated to val.
         test_pct: Per-survey fraction donated to test (0 disables test).
@@ -72,32 +74,54 @@ def split_drops_by_survey(
     rng = random.Random(seed)
     include_test = test_pct > 0
     force_val = set(force_val_drops or set())
+    force_train = set(force_train_drops or set())
 
-    # Pull forced-val drops out of the survey-grouped pool first; they bypass
-    # the donation rule. Useful when a rare-species drop sits in a singleton
-    # survey that would otherwise never reach val.
-    forced_in_data = [d for d in drop_ids if d in force_val]
-    missing_forced = force_val - set(forced_in_data)
-    if missing_forced:
+    # Overlap is ambiguous, force_val wins (val is the more deliberate choice).
+    overlap = force_val & force_train
+    if overlap:
         logging.warning(
-            f"force_val_drops contains {len(missing_forced)} ID(s) not present in "
-            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_forced)}"
+            f"{len(overlap)} drop(s) appear in BOTH force_val and force_train, "
+            f"force_val wins: {sorted(overlap)}"
         )
-    if forced_in_data:
+        force_train -= overlap
+
+    # Pull forced drops out of the survey-grouped pool first; they bypass the
+    # donation rule. Useful when a rare-species drop sits in a singleton
+    # survey that would otherwise never reach val, or when bulk-import extras
+    # should default to train regardless of the survey-aware shuffle.
+    forced_val_in_data = [d for d in drop_ids if d in force_val]
+    forced_train_in_data = [d for d in drop_ids if d in force_train]
+    missing_val = force_val - set(forced_val_in_data)
+    missing_train = force_train - set(forced_train_in_data)
+    if missing_val:
+        logging.warning(
+            f"force_val_drops contains {len(missing_val)} ID(s) not present in "
+            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_val)}"
+        )
+    if missing_train:
+        logging.warning(
+            f"force_train_drops contains {len(missing_train)} ID(s) not present in "
+            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_train)}"
+        )
+    if forced_val_in_data:
         logging.info(
-            f"Forcing {len(forced_in_data)} drop(s) into val: {sorted(forced_in_data)}"
+            f"Forcing {len(forced_val_in_data)} drop(s) into val: {sorted(forced_val_in_data)}"
+        )
+    if forced_train_in_data:
+        logging.info(
+            f"Forcing {len(forced_train_in_data)} drop(s) into train: {sorted(forced_train_in_data)}"
         )
 
-    # Group by survey, excluding forced drops
+    # Group by survey, excluding forced drops (they're already assigned)
     survey_to_drops: Dict[str, List[str]] = {}
     for drop_id in drop_ids:
-        if drop_id in force_val:
+        if drop_id in force_val or drop_id in force_train:
             continue
         survey_id = config.get_survey_id_from_drop(drop_id)
         survey_to_drops.setdefault(survey_id, []).append(drop_id)
 
-    train_drops: List[str] = []
-    val_drops: List[str] = list(forced_in_data)
+    train_drops: List[str] = list(forced_train_in_data)
+    val_drops: List[str] = list(forced_val_in_data)
     test_drops: List[str] = []
 
     # Shuffle survey order for reproducibility
@@ -129,9 +153,9 @@ def split_drops_by_survey(
     logging.info(
         f"\n=== Split summary ===\n"
         f"  Total drops: {total}\n"
-        f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}) — target {train_pct:.0%}\n"
-        f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}) — target {val_pct:.0%}\n"
-        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {test_pct:.0%}\n"
+        f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}), target {train_pct:.0%}\n"
+        f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}), target {val_pct:.0%}\n"
+        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}), target {test_pct:.0%}\n"
         f"====================\n"
     )
 
@@ -174,6 +198,133 @@ def write_split_txt(
 
 
 # ---------------------------------------------------------------------------
+# Species-balanced val selection (the suggester, folded into the pipeline)
+# ---------------------------------------------------------------------------
+
+
+def _per_drop_species_counts(
+    labels_staged_dir: Path, species_names: List[str], drops: Set[str]
+) -> Dict[str, Counter]:
+    """``{drop: Counter(species -> box_count)}`` for the given drops.
+
+    Decodes staged-label class IDs straight through ``species_names`` (index ==
+    ID, the same unified ordering ``flatten_and_remap_labels`` wrote), no
+    class_map.json / data.yaml needed, so it can't drift out of sync the way the
+    standalone suggester could.
+    """
+    id_to_name = {i: n for i, n in enumerate(species_names)}
+    out: Dict[str, Counter] = {}
+    for drop in drops:
+        d = labels_staged_dir / drop
+        if not d.is_dir():
+            continue
+        c: Counter = Counter()
+        for txt in d.glob("*.txt"):
+            for line in txt.read_text().splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    cid = int(parts[0])
+                except ValueError:
+                    continue
+                name = id_to_name.get(cid)
+                if name:
+                    c[name] += 1
+        if c:
+            out[drop] = c
+    return out
+
+
+def balance_val_drops(
+    labels_staged_dir: Path,
+    species_names: List[str],
+    candidate_drops: List[str],
+    val_pct: float,
+    tolerance: float = 0.05,
+    force_val: Optional[Set[str]] = None,
+    force_train: Optional[Set[str]] = None,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Greedy species-balanced val selection (the in-pipeline suggester).
+
+     Picks whole drops into val so each multi-source species reaches ~``val_pct``
+     of its boxes, stopping when even the worst-covered species is within
+     ``tolerance`` of its target. Single-source species (one drop) are train-only
+    , you can't validate a species the model can't also train on. ``force_val``
+     drops are seeded into val; ``force_train`` (and anything they overlap) are
+     never picked. Returns (train, val, []), no test split.
+    """
+    force_val = set(force_val or set())
+    force_train = set(force_train or set())
+    per_drop = _per_drop_species_counts(
+        labels_staged_dir, species_names, set(candidate_drops)
+    )
+
+    total: Counter = Counter()
+    drops_per_species: Counter = Counter()
+    for c in per_drop.values():
+        total.update(c)
+        for s in c:
+            drops_per_species[s] += 1
+    single_source = {s for s, n in drops_per_species.items() if n <= 1}
+    target = Counter(
+        {
+            s: max(1, round(n * val_pct))
+            for s, n in total.items()
+            if s not in single_source
+        }
+    )
+
+    current: Counter = Counter()
+    val: List[str] = []
+    for d in candidate_drops:
+        if d in force_val:
+            # Honor the operator's explicit choice even when no staged labels
+            # were found, falling through would place the drop in train
+            # (train = candidates − val), silently inverting the instruction
+            # and turning it into a background-negative training image.
+            if d not in per_drop:
+                logging.warning(
+                    f"force_val drop {d} has no staged labels, kept in val, "
+                    "but it contributes no boxes; check the staging step."
+                )
+                val.append(d)
+                continue
+            val.append(d)
+            current.update(per_drop[d])
+
+    remaining = {
+        d: c for d, c in per_drop.items() if d not in force_val and d not in force_train
+    }
+    while remaining and target:
+        worst = max((target[s] - current[s]) / target[s] for s in target)
+        if worst <= tolerance:
+            break
+        best, best_score = None, 0
+        for d, counts in remaining.items():
+            score = sum(
+                min(n, target[s] - current[s])
+                for s, n in counts.items()
+                if target.get(s, 0) - current[s] > 0
+            )
+            if score > best_score:
+                best, best_score = d, score
+        if best is None or best_score == 0:
+            break
+        val.append(best)
+        current.update(remaining.pop(best))
+
+    val_set = set(val)
+    train = [d for d in candidate_drops if d not in val_set]
+    logging.info(
+        f"balance_val_drops: {len(val)} val / {len(train)} train drop(s); "
+        f"val_pct={val_pct:.0%}, tolerance={tolerance:.0%}, "
+        f"{len(single_source)} single-source species kept train-only"
+    )
+    return train, val, []
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -183,15 +334,21 @@ def split_data(
     images_dir: Path,
     output_dir: Path,
     seed: int = 42,
+    extra_drop_ids: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     Run the survey-distributed split and write train/val/test .txt files.
 
     Args:
-        balanced_df: Output of prepare_training_data() — balanced annotations DataFrame.
+        balanced_df: Output of prepare_training_data(), balanced annotations DataFrame.
         images_dir: Directory containing all training JPEG images.
         output_dir: Root output directory.
         seed: Random seed.
+        extra_drop_ids: Extras (drops with labels but no MaxN). When provided,
+            they participate in the survey-aware split alongside MaxN drops,
+            so force_val_drops / force_train_drops + the per-survey val_pct
+            apply to extras too. Volume_<id> extras group under
+            UNKNOWN_SURVEY; canonical-ID extras group with their real survey.
 
     Returns:
         (train_drops, val_drops, test_drops)
@@ -200,9 +357,10 @@ def split_data(
     val_pct = config.training_val_pct
     test_pct = config.training_test_pct
 
-    all_drop_ids = balanced_df["DropID"].unique().tolist()
-    if len(all_drop_ids) == 0:
-        raise ValueError("No drop IDs found in balanced_df — aborting split.")
+    maxn_drops = balanced_df["DropID"].unique().tolist()
+    if len(maxn_drops) == 0 and not extra_drop_ids:
+        raise ValueError("No drop IDs found to split, aborting.")
+    all_drop_ids = sorted(set(maxn_drops) | set(extra_drop_ids or []))
 
     train_drops, val_drops, test_drops = split_drops_by_survey(
         all_drop_ids,
@@ -210,6 +368,7 @@ def split_data(
         val_pct=val_pct,
         test_pct=test_pct,
         force_val_drops=config.training_force_val_drops,
+        force_train_drops=config.training_force_train_drops,
         seed=seed,
     )
 

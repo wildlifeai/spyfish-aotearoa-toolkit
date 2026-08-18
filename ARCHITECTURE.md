@@ -154,17 +154,60 @@ Publish insights and data back to the wider community:
 
 The Streamlit app (`app/`) is the **single reporting and operations interface** for all stakeholders.
 
-| Page | Audience | Purpose |
-|---|---|---|
-| 🐟 **Home** | Everyone | Navigation and quick links |
-| 🗺️ **Maps & Reports** | DOC Scientists + Rangers + Everyone | Map with deployments/MaxN per reserve, time-series of species counts (year × MaxN, filter by species) |
-| ⚙️ **Management** | Core Team + Scientists | Error review, deployment/survey/annotations overview, shortcuts to management actions (status updates, data export, etc.) |
-| 📺 **View Deployment Videos** | Core Team | Browse and play deployment videos |
-| 🔧 **Development Tools** | Core Team | AI model overview (metrics, confusion matrix, promotion), annotation conflict review, shortcuts to development actions (retrain, cross-check, BIIGLE export) |
+Its core is the DOC report (`app/doc_report/`): **two sections carrying the same
+view names**, each asking a different question of the same data. Reporting
+answers *"what is out there"*; Operations answers *"what state is the data in"*.
+Both share one filter band (survey year, MPA, annotation source) and one context
+dict, so no two views can disagree about how many deployments exist.
 
-> **Access control**: Different pages will have different access levels.
-> Rangers can view survey status but cannot trigger pipeline actions.
-> Scientists can access Maps & Reports. Core Team has full access.
+| Section | Views | Audience |
+|---|---|---|
+| 📊 **Reporting** | Report home, MPA, Sites, Annotations, Species, Species search (Surveys and Deployments not built yet) | DOC Scientists, Rangers, external researchers |
+| 🔄 **Operations** | Operations home, MPA, Surveys, Deployments, Annotations, Model Metrics, Metadata error review (Sites and Species not built yet) | Core Team |
+| 🧪 **Tools** | Dashboard test (unreleased concepts), Deployment Videos, Substrate Cover | Core Team |
+
+A view that is not built says so, rather than rendering an empty chart that
+looks like a view reporting nothing.
+
+Notable views, for orientation:
+
+* **Reporting · MPA** — per-reserve rollup beside the protection-class
+  breakdown, MPA populations, the gated site map, and reserve trends drawn as
+  one line per reserve *per side of the boundary*.
+* **Reporting · Species** — protected against unprotected (box plots, one dot
+  per deployment), detection rate, frequency vs abundance, co-occurrence,
+  accumulation.
+* **Operations · Annotations** — coverage by source, source disagreement, ML
+  against expert, and the calibration scatter.
+* **Operations · Metadata error review** — validation errors from the ingest
+  step, grouped by type, file and survey.
+
+Two conventions worth knowing before reading any chart:
+
+* **Protection is three groups.** Exactly one status counts as protected
+  (Type I MPA) and one as unprotected (No protection); every partial or unclear
+  regime is **Other**, and inside/outside comparisons leave it out and say how
+  many deployments that was. Charts that show the class rather than a
+  comparison keep every status.
+* **Coordinates are gated.** Site positions joined to abundance read as a
+  fishing map, and for rare species as a poaching aid, so every map sits behind
+  its own password, separate from the app password.
+
+Architecture, layer by layer, is in
+**[design_doc.md](design_doc.md)** under *Report architecture*: a data layer
+(loading, filtering, aggregation), a chart layer (one function per chart), and a
+view layer (which questions, in what order) — so a change to what a page says
+and a change to how a chart looks are never the same edit.
+
+> **Access control today**: three shared passwords, not roles. `APP_PASSWORD`
+> gates the whole app, `MAP_PASSWORD` gates site coordinates wherever a map
+> appears, and `TEST_DASHBOARD_PASSWORD` gates unreleased dashboards. Anyone
+> past the app password sees every page.
+>
+> **Intended**: per-role access, so Rangers can view survey status without being
+> able to trigger pipeline actions, Scientists get the Reporting section, and the
+> Core Team has full access. Not built — the section split (Reporting /
+> Operations) is the natural seam to hang it on when it is.
 
 ---
 

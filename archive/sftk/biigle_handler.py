@@ -37,7 +37,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 from requests.exceptions import HTTPError
-
 from sftk.common import BIIGLE_ANNOTATION_REPORT_TYPE, BIIGLE_DISK_ID, BIIGLE_PROJECT_ID
 from sftk.external.biigle_api import Api
 

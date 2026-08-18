@@ -1,10 +1,11 @@
-import os
 import logging
-from typing import Dict, List
-import boto3
-from dotenv import load_dotenv
-import pandas as pd
+import os
 import re
+from typing import Dict, List
+
+import boto3
+import pandas as pd
+from dotenv import load_dotenv
 
 
 # S3 configuration
@@ -65,19 +66,19 @@ def list_csv_files_in_prefix(client, bucket, prefix):
     """
     try:
         csv_files = []
-        paginator = client.get_paginator('list_objects_v2')
+        paginator = client.get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
-        
+
         for page in pages:
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    key = obj['Key']
-                    if key.endswith('.csv'):
+            if "Contents" in page:
+                for obj in page["Contents"]:
+                    key = obj["Key"]
+                    if key.endswith(".csv"):
                         csv_files.append(key)
-        
+
         logging.info(f"Found {len(csv_files)} CSV files in prefix '{prefix}'")
         return csv_files
-    
+
     except Exception as e:
         logging.error(f"Failed to list CSV files in prefix '{prefix}': {e}")
         raise
@@ -86,27 +87,27 @@ def list_csv_files_in_prefix(client, bucket, prefix):
 def sanitize_dataframe_name(file_key):
     """
     Convert S3 file key to a PowerBI-friendly dataframe name.
-    
+
     Args:
         file_key (str): S3 file key (e.g., 'spyfish_metadata/status/file_name.csv')
-    
+
     Returns:
         str: Sanitized name suitable for PowerBI (e.g., 'status_file_name')
     """
     # Get the filename without extension
     filename = os.path.splitext(os.path.basename(file_key))[0]
-    
+
     # Get the parent directory name
     parent_dir = os.path.basename(os.path.dirname(file_key))
-    
+
     # Combine parent directory and filename
     # Replace any non-alphanumeric characters with underscores
     combined_name = f"{parent_dir}_{filename}"
-    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', combined_name)
-    
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", combined_name)
+
     # Remove consecutive underscores and trailing/leading underscores
-    sanitized = re.sub(r'_+', '_', sanitized).strip('_')
-    
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+
     return sanitized
 
 
@@ -135,7 +136,7 @@ def main(env_path=None):
     """
     Main function to orchestrate S3 file download and processing.
     Dynamically loads all CSV files from specified S3 prefixes.
-    
+
     Returns:
         Dict[str, pd.DataFrame]: Dictionary of dataframes keyed by sanitized names
     """
@@ -180,7 +181,9 @@ def main(env_path=None):
             df_name = sanitize_dataframe_name(csv_key)
             logging.info(f"Reading '{csv_key}' as '{df_name}'")
             dataframes[df_name] = read_csv_from_s3(s3_client, bucket_name, csv_key)
-            logging.info(f"Successfully read '{df_name}'. Shape: {dataframes[df_name].shape}")
+            logging.info(
+                f"Successfully read '{df_name}'. Shape: {dataframes[df_name].shape}"
+            )
         except Exception as read_error:
             logging.error(f"Failed to read {csv_key}: {read_error}")
             # Continue with other files even if one fails

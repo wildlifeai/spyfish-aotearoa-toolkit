@@ -283,25 +283,6 @@ class DataValidator:
         # Filter to clean rows only
         return original_df.loc[list(clean_indices)].copy()
 
-    def get_all_clean_dataframes(self) -> Dict[str, pd.DataFrame]:
-        """
-        Get all clean dataframes.
-
-        Returns:
-            Dictionary mapping dataset names to clean DataFrames,
-            empty dict if no tracker is initialized
-        """
-        if not self.clean_row_tracker:
-            return {}
-
-        clean_dataframes = {}
-        for dataset_name in self.clean_row_tracker.clean_row_indices.keys():
-            clean_df = self.get_clean_dataframe(dataset_name)
-            if not clean_df.empty:
-                clean_dataframes[dataset_name] = clean_df
-
-        return clean_dataframes
-
     def get_clean_summary(self) -> Dict[str, Any]:
         """
         Get summary of clean vs error rows.

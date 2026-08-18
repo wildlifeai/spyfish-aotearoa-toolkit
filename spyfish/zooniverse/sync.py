@@ -11,7 +11,7 @@ Idempotent: if the per-drop raw CSV already exists, the Panoptes fetch is
 skipped and classification rows are re-read from disk. Pass ``force=True``
 to bypass the cache and re-fetch from the API.
 
-Entry point is ``sync_zooniverse_drops`` — wired into ``run_pipeline.py``
+Entry point is ``sync_zooniverse_drops``, wired into ``run_pipeline.py``
 behind the ``--zooniverse-sync`` flag.
 """
 
@@ -47,7 +47,7 @@ def _sync_one_drop(drop_id: str, completion: pd.DataFrame, force: bool) -> bool:
     if clips_rows.empty:
         logging.info(
             f"  {drop_id}: no clips subject set found in Zooniverse "
-            "(may not have been uploaded yet) — skipping."
+            "(may not have been uploaded yet), skipping."
         )
         return False
 
@@ -55,7 +55,7 @@ def _sync_one_drop(drop_id: str, completion: pd.DataFrame, force: bool) -> bool:
     if not row["fully_complete"]:
         logging.info(
             f"  {drop_id}: {int(row['retired'])}/{int(row['total'])} subjects retired "
-            f"({row['pct_retired']:.0f}%) — not ready yet."
+            f"({row['pct_retired']:.0f}%), not ready yet."
         )
         return False
 
@@ -64,17 +64,17 @@ def _sync_one_drop(drop_id: str, completion: pd.DataFrame, force: bool) -> bool:
 
     if not force and raw_csv.exists():
         logging.info(
-            f"  {drop_id}: raw CSV found — re-aggregating from disk "
+            f"  {drop_id}: raw CSV found, re-aggregating from disk "
             "(pass --force to re-fetch from API)."
         )
         parsed_df = pd.read_csv(raw_csv)
     else:
         if force:
-            logging.info(f"  {drop_id}: --force — re-fetching from API.")
+            logging.info(f"  {drop_id}: --force, re-fetching from API.")
         raw = fetch_classifications_for_set(subject_set_id)
         if not raw:
             logging.info(
-                f"  {drop_id}: no classifications returned — "
+                f"  {drop_id}: no classifications returned, "
                 "writing empty MaxN CSV (all-NOTHINGHERE)."
             )
             write_empty_zooniverse_maxn_csv(drop_id)
@@ -122,7 +122,7 @@ def sync_zooniverse_drops(force: bool = False) -> None:
     completion = subject_completion_from_api()
 
     if completion is None or completion.empty:
-        logging.info("Completion data unavailable from Panoptes — nothing to do.")
+        logging.info("Completion data unavailable from Panoptes, nothing to do.")
         return
 
     for drop_id in drop_ids:

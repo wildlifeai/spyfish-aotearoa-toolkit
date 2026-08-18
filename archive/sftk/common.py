@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
-
 from sftk.utils import str_to_bool
 
 

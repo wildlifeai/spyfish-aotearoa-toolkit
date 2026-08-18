@@ -11,10 +11,11 @@ Changes: sftk imports replaced by spyfish equivalents; cache directory uses conf
 """
 
 import io
+import json
 import logging
 import math
 import zipfile
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -242,10 +243,194 @@ class BiigleParser:
             .reset_index(drop=True)
         )
 
+    def process_substrate(
+        self, annotations_df: pd.DataFrame, substrate_label_ids: set
+    ) -> pd.DataFrame:
+        """Compute substrate percent-cover per image from CMECS annotations.
+
+        Substrate is identified by label-tree membership, a row's ``label_id``
+        is in ``substrate_label_ids`` (the labels of
+        ``config.biigle_substrate_label_tree_id``). NOT by shape. A magic-wand
+        ``Polygon`` and a traced ``LineString`` are both valid substrate
+        outlines, while a fish-SIZE LineString carries a species / Scale bar
+        label (a different tree) and is excluded here (it routes to
+        ``process_sizes`` instead). Tree membership is used rather than a
+        label-name prefix because CMECS hierarchy paths start at generic roots
+        ("Substrate Component", ...) with no Spyfish marker.
+
+        Both shapes are treated as a closed polygon ring and measured with the
+        shoelace formula. Two percentages are produced per (image, substrate):
+
+          - ``pct_of_annotated`` (primary): area ÷ total annotated substrate
+            area on that image. Categories sum to 100%. CMECS composition.
+          - ``pct_of_image``: area ÷ full image area (from Biigle's per-row
+            ``attributes`` width×height). Can sum to <100% (unannotated
+            seafloor) or >100% (overlapping outlines).
+
+        ``substrate_label_ids`` is supplied by the caller (one API fetch via
+        ``BiigleHandler.get_label_tree_labels``) to keep this a pure transform.
+
+        Returns an empty DataFrame if no substrate annotations are present.
+        Columns: DropID, image, substrate, pct_of_annotated, pct_of_image,
+        area_px, image_area_px.
+        """
+        if (
+            annotations_df.empty
+            or "shape_name" not in annotations_df.columns
+            or "label_id" not in annotations_df.columns
+            or not substrate_label_ids
+        ):
+            return pd.DataFrame()
+
+        # Image annotation reports use `filename`; video reports `video_filename`.
+        image_col = (
+            "filename" if "filename" in annotations_df.columns else "video_filename"
+        )
+
+        is_substrate = pd.to_numeric(annotations_df["label_id"], errors="coerce").isin(
+            substrate_label_ids
+        )
+        substrate_df = annotations_df[is_substrate].copy()
+        if substrate_df.empty:
+            logging.info(
+                f"No substrate annotations found "
+                f"(tree {config.biigle_substrate_label_tree_id})."
+            )
+            return pd.DataFrame()
+
+        substrate_df["area_px"] = substrate_df["points"].apply(self.get_polygon_area)
+        substrate_df["image_area_px"] = substrate_df.get(
+            "attributes", pd.Series(index=substrate_df.index, dtype=object)
+        ).apply(self._image_area_from_attributes)
+        # Leaf label is the substrate category (e.g. "Sand").
+        substrate_df["substrate"] = substrate_df["label_name"].astype(str)
+
+        # The raw Biigle report has no DropID column, derive it from the image
+        # filename ("{drop_id}__frame_<t>s.jpg" or "{drop_id}_clip_<t>..."), the
+        # same convention biigle_to_yolo uses. Prefer an existing DropID column
+        # if a caller (e.g. process_video_annotations) already added one. This
+        # also lets one volume span multiple drops without mislabelling.
+        if config.drop_id_column in substrate_df.columns:
+            substrate_df[config.drop_id_column] = substrate_df[
+                config.drop_id_column
+            ].astype(str)
+        else:
+            substrate_df[config.drop_id_column] = (
+                substrate_df[image_col]
+                .astype(str)
+                .str.split("__frame_")
+                .str[0]
+                .str.split("_clip_")
+                .str[0]
+                .str.replace(r"\.(mp4|jpg|jpeg|png).*$", "", regex=True)
+            )
+
+        # Sum the area of all patches of the same substrate on the same image.
+        grouped = (
+            substrate_df.groupby(
+                [config.drop_id_column, image_col, "substrate"], as_index=False
+            )
+            .agg(area_px=("area_px", "sum"), image_area_px=("image_area_px", "first"))
+            .rename(columns={image_col: "image"})
+        )
+
+        # Normalised cover (primary): share of the total annotated area per image.
+        total_per_image = grouped.groupby([config.drop_id_column, "image"])[
+            "area_px"
+        ].transform("sum")
+        grouped["pct_of_annotated"] = (
+            grouped["area_px"] / total_per_image * 100
+        ).round(2)
+        grouped["pct_of_image"] = (
+            grouped["area_px"] / grouped["image_area_px"] * 100
+        ).round(2)
+
+        return (
+            grouped[
+                [
+                    config.drop_id_column,
+                    "image",
+                    "substrate",
+                    "pct_of_annotated",
+                    "pct_of_image",
+                    "area_px",
+                    "image_area_px",
+                ]
+            ]
+            .sort_values(
+                [config.drop_id_column, "image", "pct_of_annotated"],
+                ascending=[True, True, False],
+            )
+            .reset_index(drop=True)
+        )
+
     # ── Geometry helpers ─────────────────────────────────────────────────────
 
     def get_size(self, coordinates) -> float:
         return self.sum_distances(self.parse_points(coordinates))
+
+    def get_polygon_area(self, coordinates) -> float:
+        """Pixel area enclosed by a Biigle Polygon/LineString, via the shoelace
+        formula. The ring is auto-closed (last point → first), so an unclosed
+        traced LineString measures the same area as the equivalent Polygon.
+        Degenerate shapes (<3 distinct vertices) return 0.0."""
+        return self.shoelace_area(self.parse_geometry_points(coordinates))
+
+    def parse_geometry_points(self, points_raw) -> List[Tuple[float, float]]:
+        """Parse a Biigle ``points`` field into (x, y) pairs.
+
+        Handles both report shapes: flat ``[x1,y1,x2,y2,...]`` (image
+        annotations) and nested ``[[x1,y1,...]]`` (a single video keyframe,
+        which is unwrapped). Multi-keyframe video shapes, points that move
+        over time, can't be reduced to one ring and return ``[]``.
+        """
+        if isinstance(points_raw, str):
+            try:
+                points_raw = json.loads(points_raw)
+            except (json.JSONDecodeError, TypeError):
+                # Fall back to the bracket-strip parser for bare "[1,2,3,4]".
+                return self.parse_points(points_raw)
+        if not isinstance(points_raw, (list, tuple)) or not points_raw:
+            return []
+        # Unwrap a single video keyframe: [[...]] -> [...]; skip multi-keyframe.
+        if isinstance(points_raw[0], (list, tuple)):
+            if len(points_raw) != 1:
+                return []
+            points_raw = points_raw[0]
+        nums = [float(x) for x in points_raw]
+        return list(zip(nums[0::2], nums[1::2]))
+
+    def shoelace_area(self, points: List[Tuple[float, float]]) -> float:
+        """Absolute polygon area via the shoelace formula. The ring is closed
+        implicitly by iterating modulo len. Returns 0.0 for <3 vertices."""
+        n = len(points)
+        if n < 3:
+            return 0.0
+        s = sum(
+            points[i][0] * points[(i + 1) % n][1]
+            - points[(i + 1) % n][0] * points[i][1]
+            for i in range(n)
+        )
+        return abs(s) / 2.0
+
+    def _image_area_from_attributes(self, attributes_raw) -> Optional[float]:
+        """Pixel area (width×height) from Biigle's per-row ``attributes`` JSON,
+        or None if the column is absent/unparseable. This is the resolution the
+        expert drew on, the authoritative denominator for percent-of-image."""
+        if attributes_raw is None or (
+            isinstance(attributes_raw, float) and math.isnan(attributes_raw)
+        ):
+            return None
+        try:
+            meta = (
+                json.loads(attributes_raw)
+                if isinstance(attributes_raw, str)
+                else attributes_raw
+            )
+            w, h = meta.get("width"), meta.get("height")
+            return float(w) * float(h) if w and h else None
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return None
 
     def parse_points(self, points_str: str) -> list:
         nums = [float(x) for x in str(points_str).strip("[]").split(",")]
@@ -292,16 +477,17 @@ class BiigleParser:
 
         Resolves label_name → scientific_name via class_map. Unknown workflow
         labels (e.g. 'Final', 'Interesting Sighting', 'Done Video') route to the
-        'fish' bucket — same fallback discipline as biigle_to_yolo.py and
+        'fish' bucket, same fallback discipline as biigle_to_yolo.py and
         discover_extra_drops, so workflow markers can never leak into the
         unified species list.
         """
-        from spyfish.biigle.class_map import load_class_map, load_class_map_by_id
+        from spyfish.config.species import species_registry
 
         annotations_df = annotations_df.copy()
 
-        name_to_id = load_class_map(config.class_map_path)
-        id_to_name = load_class_map_by_id(config.class_map_path)
+        registry = species_registry()
+        name_to_id = registry.name_to_class_id()
+        id_to_name = registry.class_id_to_scientific()
 
         def _resolve(label_name: str) -> str:
             if " - " in label_name:

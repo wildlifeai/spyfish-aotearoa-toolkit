@@ -33,7 +33,44 @@ class MLConfig(BaseConfig):
 
     @property
     def confidence_threshold(self):
-        return get_required(self.ml_inference, "confidence_threshold", "ml_inference")
+        value = float(
+            get_required(self.ml_inference, "confidence_threshold", "ml_inference")
+        )
+        if not 0.0 < value <= 1.0:
+            raise ValueError(
+                f"ml_inference.confidence_threshold must be in (0, 1]; got {value}. "
+                "A value of 0 disables YOLO's confidence filter, so inference returns "
+                "its full max_det boxes per frame (e.g. 300), flooding the pipeline "
+                "with near-zero-confidence detections. Set a real threshold (e.g. 0.15)."
+            )
+        return value
+
+    @property
+    def ml_max_boxes_per_frame(self) -> int:
+        """Per-frame detection ceiling above which a drop's inference is treated as
+        degenerate (model saturating max_det, or confidence_threshold set to ~0)."""
+        return int(
+            get_required(self.ml_inference, "max_boxes_per_frame", "ml_inference")
+        )
+
+    @property
+    def ml_batch_size(self) -> int:
+        """Frames per YOLO predict() call during video inference (GPU batching)."""
+        return int(get_required(self.ml_inference, "batch_size", "ml_inference"))
+
+    @property
+    def ml_nms_iou(self) -> float:
+        """IoU threshold passed to YOLO's NMS at inference (``model.predict(iou=...)``).
+        Boxes overlapping more than this collapse to the highest-conf one."""
+        return float(get_required(self.ml_inference, "nms_iou", "ml_inference"))
+
+    @property
+    def ml_nms_agnostic(self) -> bool:
+        """Passed to YOLO's NMS at inference (``model.predict(agnostic_nms=...)``).
+        When True, overlapping boxes merge across classes (a species box and a
+        generic 'fish' box on one animal); False = same-class only.
+        """
+        return bool(get_required(self.ml_inference, "nms_agnostic", "ml_inference"))
 
     @property
     def maxn_confidence_threshold(self):
@@ -54,6 +91,17 @@ class MLConfig(BaseConfig):
     @property
     def training_config(self) -> dict:
         return get_required(self._yaml_config, "training", "")
+
+    @property
+    def retrain_min_improvement_pct(self) -> float:
+        """Minimum mAP@0.5 gain (in percentage points) a retrained model must
+        show over production to be promoted. Shared by the evaluate step and
+        the Model Metrics page so the two cannot disagree on the threshold."""
+        return float(
+            get_required(
+                self.training_config, "retrain_min_improvement_pct", "training"
+            )
+        )
 
     @property
     def image_extensions(self) -> tuple:
@@ -90,7 +138,7 @@ class MLConfig(BaseConfig):
 
     @property
     def training_floor_min_images(self) -> int:
-        """Image-count floor — species appearing in fewer distinct frames get merged into 'fish'."""
+        """Image-count floor, species appearing in fewer distinct frames get merged into 'fish'."""
         return int(
             get_required(self.training_config, "class_floor_min_images", "training")
         )
@@ -100,7 +148,7 @@ class MLConfig(BaseConfig):
         """Random seed for reproducible train/val/test splits and per-drop frame filtering.
 
         Set to an integer (default 42) for deterministic, reproducible results
-        across retrain runs — same drops + same labels always produce the same
+        across retrain runs, same drops + same labels always produce the same
         splits and the same frame selections.
 
         Set to `null` in config.yaml for fresh randomness each run (Python uses
@@ -120,7 +168,7 @@ class MLConfig(BaseConfig):
         first (see `training_dominant_species`). Default 60 fits ~20 drops at
         small scale; raise as the dataset grows.
 
-        **Extras (drops under `extra_no_survey_id/`) bypass this cap entirely** —
+        **Extras (drops under `extra_no_survey_id/`) bypass this cap entirely**,
         they're externally curated bulk imports (BIIGLE volume uploads) where
         every annotated frame is high-signal training data; capping them throws
         away expensive expert annotation work.
@@ -148,7 +196,7 @@ class MLConfig(BaseConfig):
         it teaches the detector to suppress false positives. Ultralytics
         recommends ~0–10% of the training set (COCO ≈ 1%). Assembly pools every
         background frame across train drops and subsamples them to hit this
-        ratio — `B = r/(1-r) * P` backgrounds for `P` positive train frames.
+        ratio, `B = r/(1-r) * P` backgrounds for `P` positive train frames.
         0 disables (no backgrounds). The main supplier is the training-frame
         volumes downloaded via `download_training_volume_labels`, where empty
         frames are real no-fish reviews; without this they'd be dropped at
@@ -167,6 +215,24 @@ class MLConfig(BaseConfig):
     @property
     def training_test_pct(self) -> float:
         return float(get_required(self.training_config, "test_pct", "training"))
+
+    @property
+    def training_auto_balance_val(self) -> bool:
+        """When True, val is chosen by the species-balanced selector instead of
+        per-survey donation."""
+        return bool(get_required(self.training_config, "auto_balance_val", "training"))
+
+    @property
+    def training_val_balance_pct(self) -> float:
+        """Target val fraction per multi-source species for the balanced selector."""
+        return float(get_required(self.training_config, "val_balance_pct", "training"))
+
+    @property
+    def training_val_balance_tolerance(self) -> float:
+        """Greedy stops when the worst-covered species is within this of target."""
+        return float(
+            get_required(self.training_config, "val_balance_tolerance", "training")
+        )
 
     @property
     def local_training_dir(self) -> Path:
@@ -208,6 +274,22 @@ class MLConfig(BaseConfig):
         return self._parse_drop_ids_from_file(self.training_force_val_drops_file)
 
     @property
+    def training_force_train_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "force_train_drops_file", "training"
+        )
+
+    @property
+    def training_force_train_drops(self) -> set:
+        """DropIDs to force into the train split (overrides survey-aware donation).
+
+        Useful for bulk-import extras whose box totals would otherwise dominate
+        a small val pool. Force-val wins over force-train when a drop appears in
+        both files.
+        """
+        return self._parse_drop_ids_from_file(self.training_force_train_drops_file)
+
+    @property
     def training_results_dir(self) -> Path:
         return self.local_training_dir / "results"
 
@@ -238,7 +320,7 @@ class MLConfig(BaseConfig):
 
     @property
     def training_extraction_annotation_type(self) -> str:
-        """Which model to run on extracted frames — 'binary' or 'species'.
+        """Which model to run on extracted frames, 'binary' or 'species'.
 
         Resolves to `config.get_pipeline_model(annotation_type)` at runtime.
         """

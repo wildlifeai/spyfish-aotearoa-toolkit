@@ -135,7 +135,7 @@ def select_clips_with_strategy(
         n_start = strategy_params.get("start_export")
         spacing = strategy_params.get("temporal_spacing_seconds")
 
-        # 1. Absolute MaxN — oversample to account for spacing/dedup rejects
+        # 1. Absolute MaxN, oversample to account for spacing/dedup rejects
         top_maxn = df.nlargest(n_maxn * 3, config.csv_max_interval_column)
         added_maxn = 0
         for _, row in top_maxn.iterrows():

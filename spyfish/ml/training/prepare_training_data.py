@@ -1,16 +1,16 @@
 """
-prepare_training_data.py — Prepare expert annotations + assemble YOLO datasets.
+prepare_training_data.py. Prepare expert annotations + assemble YOLO datasets.
 
 Composable functions:
 
-  prepare_from_annotations()         — Load expert MaxN annotations into a DataFrame.
-  flatten_and_remap_labels()         — Walk source labels, remap class IDs to unified ordering.
-  discover_extra_drops()             — Find drops with labels but no MaxN data.
-  copy_split_files()                 — Copy images + labels into YOLO train/val/test layout.
-  make_binary_labels()               — Convert species labels → binary (all → class 0).
-  generate_data_yaml()               — Write a YOLO data.yaml for a given split.
-  assemble_yolo_dataset()            — Top-level: builds species + binary datasets from drop lists.
-  apply_post_assembly_floor()        — Merge classes below class_floor_min_images train images into 'fish'.
+  prepare_from_annotations()        . Load expert MaxN annotations into a DataFrame.
+  flatten_and_remap_labels()        . Walk source labels, remap class IDs to unified ordering.
+  discover_extra_drops()            . Find drops with labels but no MaxN data.
+  copy_split_files()                . Copy images + labels into YOLO train/val/test layout.
+  make_binary_labels()              . Convert species labels → binary (all → class 0).
+  generate_data_yaml()              . Write a YOLO data.yaml for a given split.
+  assemble_yolo_dataset()           . Top-level: builds species + binary datasets from drop lists.
+  apply_post_assembly_floor()       . Merge classes below class_floor_min_images train images into 'fish'.
 
 Typical orchestration order (see retrain_runner.py):
   1. biigle_to_yolo.py                → writes per-drop label files
@@ -32,7 +32,7 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 import pandas as pd
 import yaml
 
-from spyfish.biigle.class_map import load_class_map, load_class_map_by_id
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ def prepare_from_annotations(
     """Load expert MaxN annotations and return (df, species_names).
 
     Globs for *_biigle_expert_maxn.csv under deployment_data_dir. Drops
-    listed in `training_excluded_drops_file` are filtered out. No balancing —
+    listed in `training_excluded_drops_file` are filtered out. No balancing,
     the orchestrator applies the floor by trimming `unified_names` before
     `flatten_and_remap_labels` so floored species fall back to 'fish'.
     """
@@ -68,9 +68,9 @@ def prepare_from_annotations(
 
     logging.info(f"Loading expert MaxN annotations from {deployment_data_dir}...")
     maxn_glob = f"**/annotations/*{config.biigle_expert_maxn_suffix}"
-    # Skip frozen video-era exports — they retain stale label vocabulary
+    # Skip frozen video-era exports, they retain stale label vocabulary
     # (e.g. 'Interesting Sighting') that's no longer in the current Biigle tree.
-    # Same filter as biigle_to_yolo.py — keep the two readers consistent.
+    # Same filter as biigle_to_yolo.py, keep the two readers consistent.
     all_dfs = [
         pd.read_csv(csv_path)
         for csv_path in deployment_data_dir.glob(maxn_glob)
@@ -123,7 +123,9 @@ def _build_id_remap(
     looking each up in `unified_names`. Species missing from `unified_names`
     redirect to `fallback_species` if present, otherwise map to None (dropped).
     """
-    src_map = load_class_map_by_id(src_class_map_path)
+    src_map = species_registry(
+        class_map_path=src_class_map_path
+    ).class_id_to_scientific()
     unified_ids = {name: idx for idx, name in enumerate(unified_names)}
     fallback_id = unified_ids.get(fallback_species)
     return {
@@ -173,13 +175,13 @@ def discover_extra_drops(
     by design; their species are unioned into the unified class list so they get
     their own class IDs rather than falling back to "fish".
 
-    Drops in `excluded_drops` are skipped — their species don't enter the
+    Drops in `excluded_drops` are skipped, their species don't enter the
     unified class list.
 
     Species detection order:
       1. Read the raw Biigle CSV if present (authoritative label names).
       2. Fall back to decoding YOLO class IDs via a class_map.json sidecar in
-         annotations/ — required for Route B (manually-authored labels, no CSV).
+         annotations/, required for Route B (manually-authored labels, no CSV).
 
     Drops without either are skipped with a warning.
     """
@@ -194,7 +196,7 @@ def discover_extra_drops(
             continue
         annotations_dir = drop_dir / "annotations"
 
-        # Skip if MaxN is present — normal pipeline handles this drop.
+        # Skip if MaxN is present, normal pipeline handles this drop.
         maxn_suffix = config.biigle_expert_maxn_suffix
         if annotations_dir.is_dir() and any(annotations_dir.glob(f"*{maxn_suffix}")):
             continue
@@ -202,7 +204,7 @@ def discover_extra_drops(
         label_files = list(labels_dir.glob("*.txt"))
         if not label_files:
             continue
-        # Need a non-empty image source dir (frames/ or training_frames/) —
+        # Need a non-empty image source dir (frames/ or training_frames/),
         # training-frame extras keep their JPEGs in training_frames/.
         has_images = any(
             (drop_dir / src).is_dir() and any((drop_dir / src).iterdir())
@@ -217,7 +219,7 @@ def discover_extra_drops(
         #     Step 1 of retrain (biigle_to_yolo) already rewrote .txt files against
         #     the global, so no historical-ID concern here.
         #   - .txt-only path: decode pre-existing YOLO IDs that were written at some
-        #     prior point — prefer a per-drop sidecar if present, else fall back to
+        #     prior point, prefer a per-drop sidecar if present, else fall back to
         #     the global. Sidecar preserves the original ID→species mapping.
         if not config.class_map_path.exists():
             logging.warning(
@@ -237,8 +239,9 @@ def discover_extra_drops(
             else []
         )
         if raw_csvs:
-            name_to_id = load_class_map(config.class_map_path)
-            id_to_name = load_class_map_by_id(config.class_map_path)
+            registry = species_registry()
+            name_to_id = registry.name_to_class_id()
+            id_to_name = registry.class_id_to_scientific()
             # _MANUAL_OVERRIDES guarantees the fish bucket exists in the global map.
             fish_cid = name_to_id["fish"]
             df = pd.read_csv(raw_csvs[0])
@@ -248,7 +251,7 @@ def discover_extra_drops(
                 cid = name_to_id.get(label) or name_to_id.get(label.strip())
                 if cid is None:
                     logging.warning(
-                        f"  {drop_id}: label {label!r} not in class_map — "
+                        f"  {drop_id}: label {label!r} not in class_map, "
                         "routed to 'fish' bucket. Consider adding to _MANUAL_OVERRIDES."
                     )
                     cid = fish_cid
@@ -256,7 +259,9 @@ def discover_extra_drops(
         else:
             sidecar = annotations_dir / "class_map.json"
             decode_path = sidecar if sidecar.exists() else config.class_map_path
-            id_to_name = load_class_map_by_id(decode_path)
+            id_to_name = species_registry(
+                class_map_path=decode_path
+            ).class_id_to_scientific()
             for lf in label_files:
                 for line in lf.read_text().splitlines():
                     parts = line.strip().split()
@@ -291,7 +296,7 @@ def flatten_and_remap_labels(
     (index in `unified_names`), write into `dst_dir/<drop_id>/`. Returns file count.
 
     Per-drop subdir layout decouples the downstream lookup from filename
-    prefixes — works for UUID-stemmed labels (e.g. Biigle web-UI uploads)
+    prefixes, works for UUID-stemmed labels (e.g. Biigle web-UI uploads)
     that don't naturally start with their drop_id.
 
     Drops in `excluded_drops` are skipped so their labels never enter the
@@ -299,6 +304,35 @@ def flatten_and_remap_labels(
     """
     excluded = excluded_drops or set()
     id_remap = _build_id_remap(src_class_map_path, unified_names, fallback_species)
+    # Wipe any prior staged tree first, per-drop dirs from earlier runs (which
+    # may have used a DIFFERENT unified ordering) would otherwise survive and
+    # mix incompatible class-ID spaces into one labels_staged. That stale mix is
+    # exactly what corrupts the suggester and the assembled labels.
+    #
+    # Guard the delete: only ever wipe a dir literally named "labels_staged"
+    # that lives under the training workspace, and that contains nothing but
+    # per-drop subdirs of .txt files. Anything else → refuse and fail loudly,
+    # so a mis-passed dst_dir can never rmtree unintended files.
+    if dst_dir.exists():
+        training_root = config.local_training_dir.resolve()
+        resolved = dst_dir.resolve()
+        if dst_dir.name != "labels_staged" or training_root not in resolved.parents:
+            raise ValueError(
+                f"Refusing to wipe {resolved}: expected a 'labels_staged' dir "
+                f"under {training_root}. Aborting to avoid deleting unintended files."
+            )
+        stray = [p for p in dst_dir.iterdir() if not (p.is_dir() or p.suffix == ".txt")]
+        if stray:
+            raise ValueError(
+                f"Refusing to wipe {resolved}: it holds {len(stray)} unexpected "
+                f"non-label entr(ies) (e.g. {stray[0].name}). A real labels_staged "
+                f"dir contains only per-drop subdirs. Inspect it before deleting."
+            )
+        n_drop_dirs = sum(1 for p in dst_dir.iterdir() if p.is_dir())
+        logging.info(
+            f"Wiping stale staged labels: {n_drop_dirs} per-drop dir(s) in {resolved}"
+        )
+        shutil.rmtree(dst_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     n = 0
@@ -394,21 +428,52 @@ def make_binary_labels(
 # ---------------------------------------------------------------------------
 
 
-def _build_image_index(images_dir: Path) -> Dict[str, Dict[str, Path]]:
+def _drop_source_dirs(images_dir: Path, drop_id: str) -> List[Path]:
+    """Candidate `frames/` + `training_frames/` dirs for one drop, both layouts:
+    canonical `images_dir/<survey>/<drop>/` and extras
+    `images_dir/extra_no_survey_id/<drop>/`. Only existing dirs are returned."""
+    parents = []
+    try:
+        survey = config.get_survey_id_from_drop(drop_id)
+        parents.append(images_dir / survey / drop_id)
+    except Exception:
+        pass
+    parents.append(images_dir / "extra_no_survey_id" / drop_id)
+    return [
+        d / src for d in parents for src in _IMAGE_SOURCE_DIRS if (d / src).is_dir()
+    ]
+
+
+def _build_image_index(
+    images_dir: Path, drop_ids: Optional[Set[str]] = None
+) -> Dict[str, Dict[str, Path]]:
     """Map drop_id → {frame-image stem → path}, restricted to canonical image
-    source dirs (`frames/` and `training_frames/` — see `_IMAGE_SOURCE_DIRS`).
+    source dirs (`frames/` and `training_frames/`, see `_IMAGE_SOURCE_DIRS`).
 
     Scoping by drop_id prevents stem collisions across deployments from silently
     pairing a label with the wrong drop's image.
 
-    One walk of `images_dir`; downstream lookups are O(1). Excludes derivative
-    dirs (qa_frames, zooniverse_frames, biigle_frames, …) by checking the
-    immediate parent. A drop may legitimately have both source dirs (different
-    frames); stems don't collide across them, and `copy_split_files` only ever
-    copies images that have a matching label, so indexing both is safe.
+    When `drop_ids` is given, only those drops' source dirs are walked, a big
+    speedup on shared filesystems (Lustre/NeSI), where a full `rglob` over the
+    whole deployment tree (videos + every drop) dominates assembly time. When
+    omitted, falls back to one recursive walk of `images_dir`.
+
+    Excludes derivative dirs (qa_frames, zooniverse_frames, …) by only looking
+    at `_IMAGE_SOURCE_DIRS`. A drop may have both source dirs; stems don't
+    collide across them, and `copy_split_files` only copies images with a
+    matching label, so indexing both is safe.
     """
     exts = {e.lower() for e in config.image_extensions}
     index: Dict[str, Dict[str, Path]] = {}
+
+    if drop_ids is not None:
+        for drop_id in drop_ids:
+            for src_dir in _drop_source_dirs(images_dir, drop_id):
+                for p in src_dir.iterdir():
+                    if p.is_file() and p.suffix.lower() in exts:
+                        index.setdefault(drop_id, {}).setdefault(p.stem, p)
+        return index
+
     for p in images_dir.rglob("*"):
         if (
             p.is_file()
@@ -439,7 +504,7 @@ def copy_split_files(
           labels/{split_name}/   ← YOLO .txt label files
 
     Looks up each label's matching image via `image_index` (drop_id → stem →
-    Path). If not provided, the index is built from `images_dir` on entry —
+    Path). If not provided, the index is built from `images_dir` on entry,
     pass a pre-built index when calling this multiple times against the same
     `images_dir` to avoid redundant tree walks.
 
@@ -453,7 +518,7 @@ def copy_split_files(
         image_index: Optional pre-built `{drop_id: {stem: Path}}` map; built
             locally if None.
         frame_filter: Optional `{drop_id: {allowed_stems}}`. When provided,
-            only frames whose stem is in the drop's allowed set are copied —
+            only frames whose stem is in the drop's allowed set are copied,
             implements per-drop subsampling (see assemble_yolo_dataset).
 
     Returns:
@@ -477,7 +542,7 @@ def copy_split_files(
         )
         if not drop_labels:
             logging.warning(
-                f"No label files found for {drop_id} in {labels_dir} — skipping."
+                f"No label files found for {drop_id} in {labels_dir}, skipping."
             )
             continue
 
@@ -489,7 +554,7 @@ def copy_split_files(
             img_path = image_index.get(drop_id, {}).get(lbl_path.stem)
             if img_path is None:
                 logging.warning(
-                    f"No image found for label {drop_id}/{lbl_path.stem} — skipping."
+                    f"No image found for label {drop_id}/{lbl_path.stem}, skipping."
                 )
                 continue
 
@@ -514,7 +579,7 @@ def copy_split_files(
     )
     if n_images == 0 and drop_ids:
         logging.warning(
-            f"  No labelled images found for {split_name} split — "
+            f"  No labelled images found for {split_name} split, "
             "check that expert frames exist under images_dir and labels_dir is populated."
         )
     return n_images, n_labels
@@ -616,7 +681,7 @@ def print_per_drop_species_inventory(
 ) -> None:
     """Per-drop bounding-box counts in each species, one row per drop.
 
-    Reads from labels_staged_dir (post-floor, post-remap state — what the model
+    Reads from labels_staged_dir (post-floor, post-remap state, what the model
     will actually see). Format: ``DropID  Species1=N  Species2=M  ...``.
     """
     if not labels_staged_dir.exists():
@@ -639,7 +704,7 @@ def print_per_drop_species_inventory(
         return
 
     # Build the whole inventory as one multi-line string and emit a single log
-    # record — keeps the block contiguous in console/file output and trivial to
+    # record, keeps the block contiguous in console/file output and trivial to
     # copy-paste, instead of N separate timestamped lines.
     lines = ["=== Pre-split species inventory (from labels_staged) ==="]
     for drop in sorted(counts):
@@ -689,7 +754,7 @@ def print_assembled_summary(
 ) -> None:
     """Comprehensive post-assembly summary: drops per split + bounding-box counts.
 
-    Reflects the FINAL composition the model trains on — includes extras
+    Reflects the FINAL composition the model trains on, includes extras
     (drops without MaxN data). Two sections:
 
       1. Drops per split, grouped by survey, with extras tagged separately.
@@ -741,10 +806,14 @@ def print_assembled_summary(
 
     if df.empty:
         logging.warning(
-            "Assembled YOLO dataset contains no annotations — "
+            "Assembled YOLO dataset contains no annotations, "
             f"check {species_dir / 'labels'}."
         )
         return
+
+    # val% = share of each species' boxes held out for validation, quick read
+    # on whether a class is over- or under-represented in val.
+    df["val%"] = (100 * df["val"] / df["total"]).round(0).astype(int)
 
     logging.info(
         "\n=== Per-species bounding-box counts (post-balance, includes extras) ==="
@@ -764,7 +833,7 @@ def _sample_background_frames(
     split so backgrounds make up ~``background_ratio`` of it.
 
     Backgrounds are pooled across ``train_drops`` and subsampled *globally*
-    (not per-drop) — the ratio is a dataset-level property (Ultralytics rec
+    (not per-drop), the ratio is a dataset-level property (Ultralytics rec
     0–10%, COCO ≈ 1%). For ``P`` positive train frames and ratio ``r`` the
     target count is ``B = r/(1-r) * P`` so that ``B/(P+B) == r``. Returns
     ``{drop_id: {stems}}`` to merge into the frame_filter; empty when disabled
@@ -783,7 +852,7 @@ def _sample_background_frames(
     if not pool:
         return {}
     if background_ratio >= 1:
-        target = len(pool)  # degenerate config — take every background
+        target = len(pool)  # degenerate config, take every background
     else:
         target = round(background_ratio / (1.0 - background_ratio) * n_positives_train)
     if target <= 0:
@@ -816,7 +885,7 @@ def assemble_yolo_dataset(
         output_dir/binary/{images,labels}/{train,val,test}/    + data.yaml  (if build_binary=True)
 
     Extras (drops discovered via `discover_extra_drops`) should be appended to
-    `train_drops` before calling this function — they flow through the normal
+    `train_drops` before calling this function, they flow through the normal
     per-drop copy loop since they live under `deployment_data/extra_no_survey_id/`.
 
     Args:
@@ -827,7 +896,7 @@ def assemble_yolo_dataset(
         class_names: Ordered species class names (unified ID space).
         build_binary: Also build a binary (fish/no-fish) dataset.
         symlink: When True (default), images/labels are symlinked instead of
-            copied — saves ~30 GB on each retrain since species + binary splits
+            copied, saves ~30 GB on each retrain since species + binary splits
             no longer duplicate the same JPEGs. Source dirs (images_dir,
             species_labels_dir, binary_labels_staging) must remain in place
             during training. Set False if you need a portable, self-contained
@@ -835,7 +904,7 @@ def assemble_yolo_dataset(
         source_class_map_path: Canonical class_map used as metadata source for the sidecar.
 
     Returns:
-        (species_data_yaml_path, binary_data_yaml_path) — binary path is None if not built.
+        (species_data_yaml_path, binary_data_yaml_path), binary path is None if not built.
     """
     species_dir = output_dir / "species"
     binary_dir = output_dir / "binary"
@@ -847,23 +916,25 @@ def assemble_yolo_dataset(
     if build_binary:
         _clean_yolo_split_dirs(binary_dir)
 
-    # Walk images_dir once; reused across all 6 copy_split_files calls below.
-    image_index = _build_image_index(images_dir)
+    # Index only the drops in this split (not the whole deployment tree), the
+    # full rglob over videos + every drop is the slowest step on Lustre/NeSI.
+    split_drops = set(train_drops) | set(val_drops) | set(test_drops)
+    image_index = _build_image_index(images_dir, drop_ids=split_drops)
     n_frames = sum(len(stems) for stems in image_index.values())
     logging.info(
         f"assemble_yolo_dataset: indexed {n_frames} frame image(s) "
         f"across {len(image_index)} drop(s) under {images_dir}"
     )
 
-    # MVP per-drop frame filter — see claude_docs/todo.md "Per-drop training-frame
+    # MVP per-drop frame filter, see claude_docs/todo.md "Per-drop training-frame
     # selection" entry for the smarter design that's still pending.
     # Rules:
     #   1. Empty .txt files (no surviving labels post workflow-skip) are
-    #      BACKGROUND candidates — pooled per drop and admitted to the TRAIN
+    #      BACKGROUND candidates, pooled per drop and admitted to the TRAIN
     #      split up to config.training_background_ratio (handled globally after
     #      this loop, not here). They never count toward the per-drop cap.
     #   2. Frames whose only labels are in `dominant_species` (e.g. Pagrus
-    #      auratus, Parapercis colias — overrepresented in the corpus) →
+    #      auratus, Parapercis colias, overrepresented in the corpus) →
     #      deprioritized: kept if there's spare budget, dropped first when
     #      over the per-drop cap.
     #   3. Cap positive frames at config.training_cap_frames_per_drop per drop.
@@ -896,7 +967,7 @@ def assemble_yolo_dataset(
         for txt in drop_lbl_dir.glob("*.txt"):
             cls_ids = set(_iter_class_ids(txt))
             if not cls_ids:
-                background.append(txt.stem)  # empty .txt — background candidate
+                background.append(txt.stem)  # empty .txt, background candidate
             elif cls_ids <= dominant_class_ids:
                 dominant_only.append(txt.stem)
             else:
@@ -934,7 +1005,7 @@ def assemble_yolo_dataset(
 
     # Background (empty-label) frames: admit a subsample into the TRAIN split so
     # they're ~training_background_ratio of it. Pooled globally across train
-    # drops — the ratio is a dataset-level property, not per-drop.
+    # drops, the ratio is a dataset-level property, not per-drop.
     train_set = set(train_drops)
     n_positives_train = sum(len(frame_filter.get(d, set())) for d in train_set)
     n_background_avail = sum(len(background_by_drop.get(d, [])) for d in train_set)
@@ -948,7 +1019,7 @@ def assemble_yolo_dataset(
         n_background_kept += len(stems)
     denom = n_positives_train + n_background_kept
     logging.info(
-        f"assemble_yolo_dataset: background frames — target ratio={bg_ratio:.0%}, "
+        f"assemble_yolo_dataset: background frames, target ratio={bg_ratio:.0%}, "
         f"{n_background_avail} available across {len(train_set)} train drop(s), "
         f"{n_background_kept} admitted "
         f"({(n_background_kept / denom if denom else 0):.0%} of {denom} train frames)."
@@ -1021,14 +1092,14 @@ def apply_post_assembly_floor(
          remaining class IDs are renumbered to be contiguous.
 
     Image count (not box count) is the metric because variety of visual contexts
-    is what makes a class learnable — a school of 50 fish in 5 frames gives the
+    is what makes a class learnable, a school of 50 fish in 5 frames gives the
     model 5 contexts; 1 fish in 200 frames gives it 200. This runs *after* the
     per-drop cap and train/val/test split, so the count reflects exactly what
     the model will actually train on.
 
     Hardcoded exemptions (never merged, even when below threshold):
       - `fallback_species` itself (we'd have nowhere to redirect to)
-      - "bait" — domain-critical: the bait box is visible in every frame and
+      - "bait", domain-critical: the bait box is visible in every frame and
         must stay a separate class so MaxN inference can exclude it from fish
         counts. Merging into fish would inflate every drop's MaxN by ~1.
 
@@ -1047,7 +1118,7 @@ def apply_post_assembly_floor(
     if fallback_species not in class_names:
         logging.warning(
             f"apply_post_assembly_floor: '{fallback_species}' not in {data_yaml_path} "
-            f"names — skipping post-assembly floor"
+            f"names, skipping post-assembly floor"
         )
         return set(), class_names
     fish_id = class_names.index(fallback_species)

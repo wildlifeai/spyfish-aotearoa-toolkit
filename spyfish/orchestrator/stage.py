@@ -2,9 +2,9 @@
 Declarative pipeline stage infrastructure.
 
 Two stage types:
-  GlobalStage — runs once, manages its own drop iteration internally
+  GlobalStage, runs once, manages its own drop iteration internally
                 (ingest, ML inference, Biigle sync, retrain)
-  DropStage   — StageRunner iterates over drops eligible for this section,
+  DropStage  . StageRunner iterates over drops eligible for this section,
                 calls fn(drop_id) -> target_status, then advances each drop.
 
 Adding a new pipeline stage
@@ -13,7 +13,7 @@ Adding a new pipeline stage
    - GlobalStage fn:  () -> None
    - DropStage fn:    (drop_id: str) -> str | None   (None = not ready, leave unchanged)
 2. Add one entry to STAGES in run_pipeline.py.
-That's it — argparse, eligibility, status transitions, and logging are automatic.
+That's it, argparse, eligibility, status transitions, and logging are automatic.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ class StageRunner:
     """Builds argparse and orchestrates stage execution from a declarative stage list.
 
     After `run()` completes, `failed_stages` lists any stages whose top-level
-    exception was caught — drop-stage per-drop failures still just mark the
+    exception was caught, drop-stage per-drop failures still just mark the
     failed drop as errored and don't appear here. Callers can check
     `runner.failed_stages` to decide whether to exit non-zero.
     """
@@ -101,8 +101,8 @@ class StageRunner:
     def _is_run_all(self, args: argparse.Namespace) -> bool:
         """True when no stage flag was explicitly set.
 
-        Any explicit flag — including off-happy-path ones like --legacy or
-        --check-arrivals — scopes the run to just the chosen stages.
+        Any explicit flag, including off-happy-path ones like --legacy or
+        --check-arrivals, scopes the run to just the chosen stages.
         """
         return not any(
             getattr(args, s.flag.replace("-", "_"), False) for s in self.stages
@@ -145,7 +145,7 @@ class StageRunner:
 
     def _run_global(self, stage: GlobalStage) -> None:
         """Runs a global stage. On exception, logs and records the failure
-        but does NOT re-raise — a transient error in one global stage (e.g.
+        but does NOT re-raise, a transient error in one global stage (e.g.
         a network blip during ingest) should not abort unrelated downstream
         stages. The runner surfaces failures via `self.failed_stages` so
         `main()` can still exit non-zero at the end if anything broke.

@@ -1,14 +1,28 @@
-from typing import Optional
+from .charting import style
+
+"""The metadata error review: validation errors from the pipeline database.
+
+This was the standalone Error Review page (``pages/🔍_Error_Review.py``) until
+2026-08-12; the page is gone and this module is the only copy, rendered by the
+Operations → Metadata view (``metadata.py``). Moving it here replaced the
+load-the-emoji-file-by-path machinery with a normal import.
+"""
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from utils import render_contact_note, render_sidebar_refresh, sync_db_if_needed
+from utils import CACHE_TTL_SECONDS, sync_db_if_needed
 
 from spyfish.database.manager import DatabaseManager
 
+# Every `ColumnName` that means "the sampling window". The validator writes
+# `sampling_window`; the two older names stay because rows already in the
+# database carry them, and a name this filter does not match is an error that
+# cannot be dismissed from the screen. Add to this list, never replace it.
+SAMPLING_COLUMNS = ["sampling_window", "SamplingStart", "SamplingEnd"]
 
-@st.cache_data(ttl=1)  # Cache for 1 second instead of 5 minutes to feel native
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_error_data():
     """Load validation errors from native SQLite DB, syncing from S3 if needed."""
     try:
@@ -69,7 +83,8 @@ def display_error_type_breakdown(errors_df: pd.DataFrame):
             height=320,
         )
         fig_et.update_traces(textposition="outside")
-        fig_et.update_layout(
+        style(
+            fig_et,
             yaxis_title=None,
             margin={"l": 0, "r": 0, "t": 10, "b": 0},
             coloraxis_showscale=False,
@@ -107,7 +122,8 @@ def display_error_type_breakdown(errors_df: pd.DataFrame):
             height=320,
         )
         fig_cc.update_traces(textposition="outside")
-        fig_cc.update_layout(
+        style(
+            fig_cc,
             yaxis_title=None,
             margin={"l": 0, "r": 0, "t": 10, "b": 0},
             coloraxis_showscale=False,
@@ -124,20 +140,15 @@ def display_file_breakdown(errors_df: pd.DataFrame):
     st.dataframe(file_counts, width="stretch", hide_index=True, height=300)
 
 
-def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None):
+def display_error_table(errors_df: pd.DataFrame):
+    """Render an error table. Callers filter the frame before passing it."""
     if errors_df.empty:
         st.info("No errors match the current filters")
         return
 
-    filtered_df = errors_df.copy()
-    if filters:
-        for col, values in filters.items():
-            if values and col in filtered_df.columns:
-                filtered_df = filtered_df[filtered_df[col].isin(values)]
-
-    st.caption(f"{len(filtered_df)} errors")
+    st.caption(f"{len(errors_df)} errors")
     st.dataframe(
-        filtered_df,
+        errors_df,
         width="stretch",
         hide_index=True,
         column_config={
@@ -146,19 +157,8 @@ def display_error_table(errors_df: pd.DataFrame, filters: Optional[dict] = None)
     )
 
 
-def main():
-    st.set_page_config(page_title="Error Review", page_icon="🔍", layout="wide")
-
-    # --- Sidebar ---
-    render_contact_note()
-    render_sidebar_refresh()
-
-    st.title("🔍 Data Validation & Error Review")
-    st.caption(
-        "Review pipeline errors directly pulled and parsed from spyfish_pipeline.db"
-    )
-
-    st.divider()
+def render_body():
+    """The whole review, below whatever title/filters the caller owns."""
     raw_errors_df = load_error_data()
 
     if raw_errors_df.empty:
@@ -169,19 +169,22 @@ def main():
     # Move filters up so they affect all subsequent charts
     st.header("📈 Overview")
 
+    sampling_rows = 0
+    if "ColumnName" in raw_errors_df.columns:
+        sampling_rows = int(raw_errors_df["ColumnName"].isin(SAMPLING_COLUMNS).sum())
+
     include_sampling_errors = st.checkbox(
-        "Include sampling errors",
+        f"Include sampling errors ({sampling_rows:,})",
         value=False,
-        help="Include errors on the SamplingStart / SamplingEnd columns. "
-        "Off by default — these are common ranger-entry omissions and "
+        key="error_review_include_sampling",
+        help="Errors on the sampling window, the SamplingStart / SamplingEnd "
+        "times a ranger enters. Off by default: they are common omissions and "
         "tend to flood the view.",
     )
 
     errors_df = raw_errors_df.copy()
     if not include_sampling_errors and "ColumnName" in errors_df.columns:
-        errors_df = errors_df[
-            ~errors_df["ColumnName"].isin(["SamplingStart", "SamplingEnd"])
-        ]
+        errors_df = errors_df[~errors_df["ColumnName"].isin(SAMPLING_COLUMNS)]
 
     display_error_summary(errors_df)
     st.divider()
@@ -198,8 +201,11 @@ def main():
 
     with tab1:
         st.subheader("Filter by Error Type")
+        # dropna before sorted(): file-level errors can carry null ErrorType /
+        # SurveyID, and sorted() raises TypeError on a None among strings.
         selected_error_types = st.multiselect(
-            "Select error types", options=sorted(errors_df["ErrorType"].unique())
+            "Select error types",
+            options=sorted(errors_df["ErrorType"].dropna().unique()),
         )
         if selected_error_types:
             display_error_table(
@@ -209,7 +215,8 @@ def main():
     with tab2:
         st.subheader("Filter by Survey")
         selected_surveys = st.multiselect(
-            "Select surveys to view", options=sorted(errors_df["SurveyID"].unique())
+            "Select surveys to view",
+            options=sorted(errors_df["SurveyID"].dropna().unique()),
         )
         if selected_surveys:
             display_error_table(errors_df[errors_df["SurveyID"].isin(selected_surveys)])
@@ -219,7 +226,7 @@ def main():
         st.subheader("Filter by File")
         selected_files = st.multiselect(
             "Select specific files to view",
-            options=sorted(errors_df["FileName"].unique()),
+            options=sorted(errors_df["FileName"].dropna().unique()),
         )
         if selected_files:
             display_error_table(errors_df[errors_df["FileName"].isin(selected_files)])
@@ -227,7 +234,3 @@ def main():
     with tab4:
         st.subheader("All Validation Errors")
         display_error_table(errors_df)
-
-
-if __name__ == "__main__":
-    main()

@@ -13,9 +13,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
-from spyfish.utils import seconds_to_time
 from spyfish.zooniverse.parse_classifications import (
     aggregate_by_subject_species,
     connect_to_zooniverse,
@@ -23,6 +21,7 @@ from spyfish.zooniverse.parse_classifications import (
     parse_classifications,
     sample_nothing_here_clips,
     subject_completion_from_api,
+    write_zooniverse_maxn_csv,
 )
 
 _LAST_RUN_KEY = "zooniverse_last_run_at"
@@ -39,15 +38,14 @@ def _resolve_since(since_arg: str | None, db: DatabaseManager) -> str | None:
         if ts:
             logging.info(f"--since auto: using {_LAST_RUN_KEY}={ts} from DB")
             return ts
-        logging.info("No last run recorded in DB — full backfill.")
+        logging.info("No last run recorded in DB, full backfill.")
         return None
 
     return since_arg
 
 
-# Mirrors of helpers in legacy_extract.py — duplicated so live and legacy
-# are each self-contained. Update both copies together if the MaxN format
-# changes.
+# Mirror of the helper in legacy_extract.py, duplicated so live and legacy
+# are each self-contained. Update both copies together.
 
 
 def _filter_to_complete_drops(
@@ -62,7 +60,7 @@ def _filter_to_complete_drops(
     )
     for _, row in partial.iterrows():
         logging.info(
-            f"  Skipping {row['drop_id']} — {row['retired']}/{row['total']} subjects retired "
+            f"  Skipping {row['drop_id']}, {row['retired']}/{row['total']} subjects retired "
             f"({row['pct_retired']:.0f}%)"
         )
 
@@ -73,41 +71,6 @@ def _filter_to_complete_drops(
         f"Completion gate: {n_after}/{n_before} drop_ids fully complete and ready for export."
     )
     return df[mask].copy()
-
-
-def _export_maxn_csvs(aggregated_df: pd.DataFrame) -> None:
-    """Write one MaxN CSV per drop_id to ``config.get_zooniverse_maxn_csv_path(drop_id)``."""
-    matched = aggregated_df[aggregated_df["drop_id"].notna()].copy()
-    if matched.empty:
-        logging.warning("No matched subjects to export as MaxN CSVs.")
-        return
-
-    for drop_id, grp in matched.groupby("drop_id"):
-        rows = []
-        for _, row in grp.iterrows():
-            rows.append(
-                {
-                    config.drop_id_column: drop_id,
-                    config.csv_scientific_name_column: row["species"],
-                    config.csv_maxn_time_column: seconds_to_time(row["mode_seconds"]),
-                    config.csv_max_interval_column: row.get("mode_count", 0),
-                    config.csv_annotated_by_column: "citsci",
-                    config.csv_interval_annotation_column: config.clip_length,
-                    config.csv_confidence_agreement_column: round(
-                        row["agreement_pct"] / 100, 4
-                    ),
-                    config.csv_maxn_time_seconds_column: row["mode_seconds"],
-                }
-            )
-
-        out_path = config.get_zooniverse_maxn_csv_path(drop_id)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        (
-            pd.DataFrame(rows)
-            .sort_values(config.csv_maxn_time_column)
-            .to_csv(out_path, index=False)
-        )
-        logging.info(f"MaxN CSV → {out_path} ({len(rows)} rows)")
 
 
 def run_live_zooniverse_sync(
@@ -166,7 +129,7 @@ def run_live_zooniverse_sync(
         )
 
     export_df = aggregated_df[~aggregated_df["suspicious_minority_find"]].copy()
-    _export_maxn_csvs(export_df)
+    write_zooniverse_maxn_csv(export_df)
 
     db.set_metadata(_LAST_RUN_KEY, run_started_at)
     logging.info("Done. Run frame extraction independently on the resulting MaxN CSVs.")

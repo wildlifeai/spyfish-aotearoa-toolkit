@@ -1,5 +1,5 @@
 """
-biigle_to_yolo.py — Convert local Biigle expert CSV exports → YOLO label .txt files.
+biigle_to_yolo.py. Convert local Biigle expert CSV exports → YOLO label .txt files.
 
 This tool is strictly offline; it consumes CSVs previously exported by sync_biigle_annotations
 into process_files/deployment_data/{drop_id}/annotations/.
@@ -9,12 +9,13 @@ import argparse
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from spyfish.biigle.class_map import load_class_map
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ def biigle_rect_to_yolo(
     each AABB edge. Those midpoints are the visible fish features
     (head/tail tips and back/belly midpoints), so shrinking by half their
     margin recovers background pixels without clipping anatomy. For
-    axis-aligned rectangles the shrink is zero — midpoints sit on the AABB
+    axis-aligned rectangles the shrink is zero, midpoints sit on the AABB
     edges and the formula self-disables.
 
     Returns:
@@ -56,7 +57,7 @@ def biigle_rect_to_yolo(
         )
     xs = points[0::2]
     ys = points[1::2]
-    # Clamp raw corners to image bounds — rotated rectangles can have
+    # Clamp raw corners to image bounds, rotated rectangles can have
     # corners outside the frame, and YOLO rejects labels whose edges fall
     # outside [0, 1].
     x_min = max(0.0, min(float(img_w), min(xs)))
@@ -74,7 +75,7 @@ def biigle_rect_to_yolo(
             )
             for i in range(4)
         ]
-        # max(0, ...) handles midpoints outside the clamped AABB — they
+        # max(0, ...) handles midpoints outside the clamped AABB, they
         # contribute zero margin, so shrink on that axis self-disables.
         min_x_margin = min(
             min(max(0.0, mx - x_min), max(0.0, x_max - mx)) for mx, _ in midpoints
@@ -99,7 +100,7 @@ def biigle_rect_to_yolo(
 def _read_image_dimensions(img_path: Path) -> Optional[Tuple[int, int]]:
     """Return (width, height) from a JPEG/PNG header, or None if unreadable.
 
-    PIL's `Image.open` only parses the header for these formats — no full decode.
+    PIL's `Image.open` only parses the header for these formats, no full decode.
     """
     try:
         from PIL import Image
@@ -113,13 +114,13 @@ def _read_image_dimensions(img_path: Path) -> Optional[Tuple[int, int]]:
 
 def _canvas_from_attributes(group: pd.DataFrame) -> Optional[Tuple[int, int]]:
     """Return the (width, height) the annotations were *drawn on*, from Biigle's
-    ``attributes`` JSON column — or None if absent/unparseable.
+    ``attributes`` JSON column, or None if absent/unparseable.
 
     Biigle image-annotation reports store per-image metadata as a JSON string,
     e.g. ``{"size":..., "mimetype":"image/jpeg", "width":1920, "height":1080}``.
     This is the **authoritative** normalisation canvas: the resolution the
     expert saw when drawing the box, which is the only correct YOLO denominator.
-    It is NOT necessarily the resolution of whatever frame sits on disk — those
+    It is NOT necessarily the resolution of whatever frame sits on disk, those
     can diverge (e.g. a 1920-wide annotation against a 1440-wide re-extracted
     frame), and trusting the on-disk file then mis-normalises every box.
 
@@ -149,11 +150,11 @@ def _rectangle_corners(points_raw) -> Optional[List[float]]:
       - video annotations: a list of per-keyframe coordinate lists
         ``[[x1,y1,...,x4,y4], ...]``. A single keyframe is unwrapped; multiple
         keyframes mean the box moves over time and must be projected to a frame
-        upstream (``process_video_annotations``) — we can't place it here.
+        upstream (``process_video_annotations``), we can't place it here.
 
     Without the unwrap, a nested ``[[...]]`` fails the old ``len == 8`` check, so
     every video box (the bulk of the oriented ones) is silently dropped.
-    Rotation itself is fine — the caller takes the AABB envelope, which collapses
+    Rotation itself is fine, the caller takes the AABB envelope, which collapses
     any rotated rectangle to a correct horizontal box, invariant under resize.
     """
     if isinstance(points_raw, str):
@@ -183,7 +184,7 @@ def _rectangle_tilt_deg(pts: List[float]) -> float:
 
 
 # Workflow / admin labels (Biigle tree 3375) that should NEVER train as fish.
-# These are state markers, not detections — annotators apply them to mark
+# These are state markers, not detections, annotators apply them to mark
 # images as "in progress", "scale bar visible", "couldn't annotate", etc.
 # Rows with these labels are dropped from the YOLO export entirely.
 _WORKFLOW_LABEL_SKIP = {
@@ -205,12 +206,29 @@ def _is_workflow_label(name: str) -> bool:
     return False
 
 
+def drop_id_from_frame_filename(filename: str) -> str:
+    """Parse the drop_id out of a Biigle frame filename.
+
+    Handles BOTH volume filename conventions:
+      - flat   ``{drop_id}__frame_<secs>s.jpg``, legacy survey volumes, whose
+        ``url`` already points at ``{survey}/training_frames``.
+      - nested ``{drop_id}/training_frames/{drop_id}__frame_<secs>s.jpg``, the
+        current convention, where the volume ``url`` is the survey dir and the
+        per-drop segment lives in the filename so S3 and local layouts match.
+
+    Taking the basename first is what makes both work: a bare
+    ``split("__frame_")[0]`` on a nested name returns the whole leading path.
+    """
+    return Path(str(filename)).name.split("__frame_")[0]
+
+
 def convert_annotations_to_yolo(
     df: pd.DataFrame,
     class_map: Dict[str, int],
     labels_dir: Path,
     images_dir: Path,
     default_img_size: Tuple[int, int] = (1920, 1080),
+    context: str = "",
 ) -> Dict[str, int]:
     """
     Write one YOLO .txt label file per image.
@@ -220,19 +238,19 @@ def convert_annotations_to_yolo(
         class_map: label_name → YOLO class_id.
         labels_dir: Output directory for .txt files.
         images_dir: Source directory of the actual frame images. Only consulted
-            as a *fallback* denominator — see below.
+            as a *fallback* denominator, see below.
         default_img_size: Last-resort (width, height) when neither the Biigle
             `attributes` canvas nor an on-disk frame is available.
 
     Normalisation canvas (the denominator boxes are divided by), in priority:
-        1. Biigle `attributes` width/height for the image (authoritative — the
+        1. Biigle `attributes` width/height for the image (authoritative, the
            resolution the expert drew the box on).
         2. The on-disk frame's pixel dimensions (correct only if the frame was
            extracted at the same resolution it was annotated at).
         3. `default_img_size`.
     When (1) and (2) are both known and disagree, the box is normalised to the
-    canvas (1) — the on-disk frame is a different resolution than what was
-    annotated — and a warning is logged so the divergence is visible at
+    canvas (1), the on-disk frame is a different resolution than what was
+    annotated, and a warning is logged so the divergence is visible at
     conversion time rather than surfacing later as misaligned spot-checks.
 
     Returns:
@@ -244,17 +262,18 @@ def convert_annotations_to_yolo(
     if skip_mask.any():
         skipped_labels = sorted(df.loc[skip_mask, "label_name"].astype(str).unique())
         logging.info(
-            f"Skipping {int(skip_mask.sum())} workflow/admin annotation(s) — "
+            f"Skipping {int(skip_mask.sum())} workflow/admin annotation(s), "
             f"these are status markers, not detections. Labels: {skipped_labels}"
         )
         df = df.loc[~skip_mask].copy()
     if df.empty:
         logging.warning(
-            f"All {n_pre} annotations were workflow/admin labels — nothing to write."
+            f"All {n_pre} annotations were workflow/admin labels, nothing to write."
         )
         labels_dir.mkdir(parents=True, exist_ok=True)
         return {}
 
+    ctx = f"{context}: " if context else ""
     incoming_labels = set(df["label_name"].dropna().astype(str).unique())
     unknown = sorted(incoming_labels - set(class_map.keys()))
     fish_class_id = class_map.get("fish")  # generic-fish fallback bucket
@@ -262,15 +281,15 @@ def convert_annotations_to_yolo(
         affected = int(df["label_name"].isin(unknown).sum())
         if fish_class_id is None:
             raise ValueError(
-                f"class_map is missing {len(unknown)} label(s) and has no "
-                f"'fish' fallback bucket — {affected} of {len(df)} rows "
+                f"{ctx}class_map is missing {len(unknown)} label(s) and has no "
+                f"'fish' fallback bucket, {affected} of {len(df)} rows "
                 f"({affected / len(df):.1%}) would be dropped silently.\n"
                 f"  Missing labels: {unknown}\n"
                 f"  Fix: reseed class_map.json with "
                 f"`python -m spyfish.biigle.class_map`, or add a fish bucket."
             )
         logging.warning(
-            f"{len(unknown)} label(s) not in class_map — routing {affected} of "
+            f"{ctx}{len(unknown)} label(s) not in class_map, routing {affected} of "
             f"{len(df)} rows ({affected / len(df):.1%}) to the 'fish' bucket "
             f"(class_id {fish_class_id}). Unknown labels: {unknown}"
         )
@@ -342,22 +361,22 @@ def convert_annotations_to_yolo(
             f"  {n_canvas_mismatch}/{len(summary)} image(s) have a Biigle "
             f"`attributes` canvas that differs from the on-disk frame. Boxes "
             f"were normalised to the CANVAS (the resolution the expert drew on), "
-            f"which is correct — but the on-disk frame is a different resolution, "
+            f"which is correct, but the on-disk frame is a different resolution, "
             f"so confirm it's the same scene (anamorphic / re-extracted at a "
             f"different size). Examples: {mismatch_examples}"
         )
     if n_disk_fallback:
         logging.info(
             f"  {n_disk_fallback}/{len(summary)} image(s) had NO `attributes` "
-            f"canvas in the report — normalised by the on-disk frame size. "
+            f"canvas in the report, normalised by the on-disk frame size. "
             f"Correct only if the frame was extracted at the resolution it was "
             f"annotated at (e.g. TON video-era frames are 1440-wide on disk but "
-            f"were annotated on a 1920-wide canvas — re-download with `attributes`)."
+            f"were annotated on a 1920-wide canvas, re-download with `attributes`)."
         )
     if n_default_fallback:
         logging.warning(
             f"  {n_default_fallback}/{len(summary)} image(s) had NO `attributes` "
-            f"canvas AND were not on disk — used default {default_img_size}. "
+            f"canvas AND were not on disk, used default {default_img_size}. "
             f"Boxes may be misaligned if the true resolution differs; re-download "
             f"the report with `attributes`, or place the frames on disk, to fix."
         )
@@ -369,7 +388,7 @@ def convert_annotations_to_yolo(
     if n_rotated:
         logging.info(
             f"  {n_rotated} oriented (rotated >3deg) box(es) collapsed to "
-            f"axis-aligned HBB — usually annotator slips. Boxes are correct; "
+            f"axis-aligned HBB, usually annotator slips. Boxes are correct; "
             f"flag if a volume has many (size/OBB work needs the source frame)."
         )
     return summary
@@ -395,7 +414,7 @@ def draw_frames_on_images(
 
         import cv2
     except ImportError:
-        logging.warning("opencv-python not installed — skipping spot-check drawing.")
+        logging.warning("opencv-python not installed, skipping spot-check drawing.")
         return
 
     id_to_name = {v: k for k, v in class_map.items()}
@@ -454,7 +473,7 @@ def draw_frames_on_images(
         cv2.imwrite(str(out_path), img)
         logging.info(f"Spot-check image saved: {out_path}")
 
-    logging.info(f"Spot-check complete — {len(samples)} images saved to {output_dir}")
+    logging.info(f"Spot-check complete, {len(samples)} images saved to {output_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -472,36 +491,81 @@ def biigle_to_yolo(
     Labels are written into each drop's labels/ folder (sibling of frames/).
     prepare_training_data then walks these to assemble the unified training dataset.
     """
-    logging.info(f"Searching for expert CSVs in {deployment_data_dir}...")
-    csv_paths = []
-    all_dfs = []
+    logging.info(f"Searching for expert/training CSVs in {deployment_data_dir}...")
+    expert_suffix = config.biigle_expert_raw_suffix
+    training_suffix = config.biigle_training_raw_suffix
 
-    # Strictly use the per-drop expert raw CSVs (skip frozen video-era exports)
-    raw_glob = f"**/annotations/*{config.biigle_expert_raw_suffix}"
-    for csv_path in sorted(deployment_data_dir.glob(raw_glob)):
-        if csv_path.name.startswith("legacy_video_"):
+    # One authoritative source per drop. A drop can carry both a
+    # `_biigle_expert_raw.csv` (from --biigle-sync) and a
+    # `_biigle_training_raw.csv` (from download-project of a "video labels"
+    # volume). The training_raw export is the fuller, more recent set for the
+    # video-era drops, so it WINS. Frozen `legacy_video_*` exports are ignored.
+    # See claude_docs/todo.md "Two annotation sources per drop" for the open
+    # questions behind this preference.
+    candidates: Dict[Path, Dict[str, Path]] = {}
+    for csv_path in sorted(deployment_data_dir.glob("**/annotations/*.csv")):
+        name = csv_path.name
+        if name.startswith("legacy_video_"):
             continue
-        logging.debug(f"  Found expert CSV: {csv_path}")
-        csv_paths.append(csv_path)
-        all_dfs.append(pd.read_csv(csv_path))
+        drop_dir = csv_path.parent.parent
+        if name.endswith(training_suffix):
+            candidates.setdefault(drop_dir, {})["training"] = csv_path
+        elif name.endswith(expert_suffix):
+            candidates.setdefault(drop_dir, {})["expert"] = csv_path
 
-    if not all_dfs:
-        logging.warning("No expert CSV files found. Retraining cannot proceed.")
+    if not candidates:
+        logging.warning(
+            "No expert/training CSV files found. Retraining cannot proceed."
+        )
         return {}
 
-    class_map = load_class_map(class_map_path)
+    class_map = species_registry(class_map_path=class_map_path).name_to_class_id()
     n_classes = len(set(class_map.values()))
     logging.info(
         f"Loaded class map with {len(class_map)} label aliases "
         f"({n_classes} classes) from {class_map_path}"
     )
 
-    for csv_path, drop_df in zip(csv_paths, all_dfs):
-        drop_dir = csv_path.parent.parent
+    n_expert = sum(1 for s in candidates.values() if "expert" in s)
+    logging.info(
+        f"{len(candidates)} drop(s) with annotations, "
+        f"{n_expert} via expert_raw (preferred), "
+        f"{len(candidates) - n_expert} via training_raw."
+    )
+
+    both = sorted(d.name for d, s in candidates.items() if len(s) > 1)
+    if both:
+        logging.warning(
+            f"{len(both)} drop(s) have BOTH expert_raw and training_raw. "
+            f"expert_raw wins — a focused per-drop review beats bulk survey "
+            f"labelling — and the training_raw file is NOT converted to labels "
+            f"for these drops. If the training volume holds annotations the "
+            f"review does not, they are lost from this training run; see "
+            f"claude_docs/annotation_source_consolidation_brief.md. "
+            f"Affected: {', '.join(both[:10])}"
+            + (f" (+{len(both) - 10} more)" if len(both) > 10 else "")
+        )
+
+    for drop_dir, srcs in sorted(candidates.items()):
+        # Provenance beats vintage: the drop's own expert review wins over the
+        # survey-pooled training volume (decided 2026-08-22, replacing the
+        # June 2026 "training wins" stopgap).
+        chosen = srcs.get("expert") or srcs["training"]
+        which = "expert_raw" if "expert" in srcs else "training_raw"
         labels_dir = drop_dir / "labels"
         images_dir = drop_dir / "frames"
-        convert_annotations_to_yolo(drop_df, class_map, labels_dir, images_dir)
-        logging.debug(f"  Wrote labels for {drop_dir.name} → {labels_dir}")
+        # Wipe per-drop labels first so two sources / two runs can never mix
+        # stale .txt (the source-side version of the labels_staged staleness).
+        if labels_dir.exists():
+            shutil.rmtree(labels_dir)
+        convert_annotations_to_yolo(
+            pd.read_csv(chosen),
+            class_map,
+            labels_dir,
+            images_dir,
+            context=f"{drop_dir.name} [{which}]",
+        )
+        logging.debug(f"  Wrote labels for {drop_dir.name} ({which}) → {labels_dir}")
 
     return class_map
 
@@ -526,7 +590,7 @@ def download_extra_volume_labels(
 
     This matches the normal deployment-data shape so downstream pipeline steps
     (`biigle_to_yolo`, `flatten_and_remap_labels`) pick it up via their usual
-    globs — no parallel code path needed.
+    globs, no parallel code path needed.
     """
     import shutil
 
@@ -561,11 +625,15 @@ def download_extra_volume_labels(
     shutil.copy2(resolved_class_map_path, sidecar_class_map)
     logging.info(f"Froze class_map sidecar → {sidecar_class_map}")
 
-    class_map = load_class_map(resolved_class_map_path)
-    summary = convert_annotations_to_yolo(df, class_map, labels_dir, frames_dir)
+    class_map = species_registry(
+        class_map_path=resolved_class_map_path
+    ).name_to_class_id()
+    summary = convert_annotations_to_yolo(
+        df, class_map, labels_dir, frames_dir, context=drop_name
+    )
     logging.info(f"Wrote {len(summary)} YOLO label files → {labels_dir}")
     logging.info(
-        f"Bundle ready at {source_dir} — populate {frames_dir}/ with JPEGs "
+        f"Bundle ready at {source_dir}, populate {frames_dir}/ with JPEGs "
         "before running the training pipeline."
     )
     return class_map
@@ -592,14 +660,14 @@ def download_training_volume_labels(
     frames that HAVE annotations, so the no-fish frames are
     ``volume file list − annotated``. We fetch the volume's full file list (the
     universe the expert was shown) via ``get_volume_images`` and write an empty
-    ``.txt`` for every frame that has no annotation — both the no-fish frames
+    ``.txt`` for every frame that has no annotation, both the no-fish frames
     inside reviewed drops and every frame of a fully-empty drop. An empty
     ``.txt`` is a YOLO background image; the dataset-level background proportion
     (Ultralytics rec ~0-10%) is a capping decision made later at assembly, not
-    here — this step records every reviewed frame's true label honestly.
+    here, this step records every reviewed frame's true label honestly.
 
     No "Done" gate (the report is fetched directly). Training-only: nothing is
-    written to the annotations DB and no pipeline status is advanced — unlike
+    written to the annotations DB and no pipeline status is advanced, unlike
     ``sync_biigle_annotations``.
 
     The raw CSV uses its own ``_biigle_training_raw.csv`` suffix (not the expert
@@ -608,12 +676,12 @@ def download_training_volume_labels(
 
     Contamination guard: drops that already have an expert MaxN CSV (real
     per-drop species review via ``--biigle-sync``) are SKIPPED. The raw CSVs no
-    longer collide, but the per-drop ``labels/`` dir is shared — and MaxN-backed
+    longer collide, but the per-drop ``labels/`` dir is shared, and MaxN-backed
     drops can be split into val/test, so without this skip their training frames
     would leak into evaluation. Those drops train via the normal MaxN path; this
     mirrors ``discover_extra_drops``, which also skips MaxN-backed drops.
 
-    The integer class ids written into the .txt files are PROVISIONAL — they
+    The integer class ids written into the .txt files are PROVISIONAL, they
     come from the current global class map purely so each box has *some* id.
     Training rebuilds the unified class ordering from the raw CSVs
     (``discover_extra_drops`` + ``flatten_and_remap_labels``) and remaps every
@@ -626,10 +694,16 @@ def download_training_volume_labels(
     training-frame convention); use that one for external volumes with no
     survey/drop structure.
 
+    Mixed volumes: any filename whose prefix doesn't validate as a canonical
+    drop_id is routed into ``extra_no_survey_id/volume_<volume_id>/`` (same
+    layout as ``download_extra_volume_labels``) instead of being dropped, so
+    orphan annotations in an otherwise-canonical training volume still reach
+    training, just via the extras assembly path.
+
     Note: per-frame YOLO box normalisation reads each image's real dimensions
     from ``training_frames/``. When the JPEGs aren't on this machine (e.g. they
     live on the HPC/S3), ``convert_annotations_to_yolo`` falls back to a default
-    resolution and logs a warning — empty negatives are unaffected, but
+    resolution and logs a warning, empty negatives are unaffected, but
     positive boxes are only geometrically correct where the frames are present.
 
     Returns ``{drop_id: {"frames": n, "positives": n, "negatives": n, "boxes": n}}``.
@@ -642,7 +716,9 @@ def download_training_volume_labels(
 
     handler = BiigleHandler()
     parser = BiigleParser()
-    class_map = load_class_map(class_map_path or config.class_map_path)
+    class_map = species_registry(
+        class_map_path=class_map_path or config.class_map_path
+    ).name_to_class_id()
 
     # Universe: every frame the expert was shown. The report lists only
     # annotated frames, so negatives = universe − annotated. /volumes/{id}/files
@@ -654,21 +730,23 @@ def download_training_volume_labels(
         fname = img.get("filename")
         if not fname or "__frame_" not in fname:
             continue
-        universe_by_drop.setdefault(fname.split("__frame_")[0], []).append(fname)
+        universe_by_drop.setdefault(drop_id_from_frame_filename(fname), []).append(
+            fname
+        )
 
     # Positives: the annotation report, grouped by drop_id parsed from filename.
     df = parser.download_volume_annotations(volume_id, type_id=report_type)
     report_cols = list(df.columns)
     report_by_drop: Dict[str, pd.DataFrame] = {}
     if not df.empty and "filename" in df.columns:
-        drop_ids = df["filename"].astype(str).str.split("__frame_").str[0]
+        drop_ids = df["filename"].astype(str).map(drop_id_from_frame_filename)
         report_by_drop = {d: g.copy() for d, g in df.groupby(drop_ids)}
 
     all_drops = sorted(set(universe_by_drop) | set(report_by_drop))
     if not all_drops:
         logging.warning(
             f"Volume {volume_id}: no '{'{drop_id}__frame_<secs>s.jpg'}' filenames "
-            "found — is this a training-frames volume?"
+            "found, is this a training-frames volume?"
         )
         return {}
 
@@ -709,7 +787,7 @@ def download_training_volume_labels(
         positives = boxes = 0
         if not is_empty_drop:
             file_summary = convert_annotations_to_yolo(
-                drop_df, class_map, labels_dir, training_frames_dir
+                drop_df, class_map, labels_dir, training_frames_dir, context=drop_id
             )
             written_stems = {Path(f).stem for f in file_summary}
             positives = sum(1 for n in file_summary.values() if n > 0)
@@ -726,7 +804,7 @@ def download_training_volume_labels(
             negatives += 1
         # Total negatives = universe negatives just written + any annotated
         # frames whose only labels were workflow markers (convert wrote those as
-        # empty .txt too). Derive from the truth — total frames minus positives.
+        # empty .txt too). Derive from the truth, total frames minus positives.
         negatives = len(written_stems) - positives
 
         summary[drop_id] = {
@@ -743,7 +821,7 @@ def download_training_volume_labels(
     bg_pct = (100.0 * total_neg / total_frames) if total_frames else 0.0
     logging.info(
         f"Volume {volume_id}: {len(summary)} drop(s) "
-        f"({len(empty_drops)} fully-empty) — {total_frames} frames "
+        f"({len(empty_drops)} fully-empty), {total_frames} frames "
         f"({total_pos} positive, {total_neg} background = {bg_pct:.0f}%), "
         f"{total_boxes} boxes."
     )
@@ -753,16 +831,67 @@ def download_training_volume_labels(
             f"{sorted(empty_drops)}"
         )
     if skipped:
-        logging.warning(
-            f"  Skipped {len(skipped)} filename prefix(es) that aren't valid "
-            f"drop_ids: {sorted(skipped)}"
+        # Orphan filenames don't parse to a canonical drop_id. Instead of
+        # silently dropping their annotations from training, bundle them into
+        # extra_no_survey_id/volume_<id>/ so they ride the same assembly path
+        # as fully-non-canonical volumes (download_extra_volume_labels output).
+        extra_dir = (
+            config.deployment_data_dir / "extra_no_survey_id" / f"volume_{volume_id}"
+        )
+        extra_annotations = extra_dir / "annotations"
+        extra_labels = extra_dir / "labels"
+        extra_frames = extra_dir / "frames"
+        extra_annotations.mkdir(parents=True, exist_ok=True)
+        extra_labels.mkdir(parents=True, exist_ok=True)
+        extra_frames.mkdir(parents=True, exist_ok=True)
+
+        orphan_parts = [report_by_drop[p] for p in skipped if p in report_by_drop]
+        orphan_df = (
+            pd.concat(orphan_parts, ignore_index=True)
+            if orphan_parts
+            else pd.DataFrame(columns=report_cols)
+        )
+        orphan_raw = (
+            extra_annotations / f"volume_{volume_id}{config.biigle_expert_raw_suffix}"
+        )
+        orphan_df.to_csv(orphan_raw, index=False)
+
+        written_orphan_stems: set = set()
+        orphan_pos = orphan_boxes = 0
+        if not orphan_df.empty:
+            file_summary = convert_annotations_to_yolo(
+                orphan_df,
+                class_map,
+                extra_labels,
+                extra_frames,
+                context=f"volume_{volume_id} orphans",
+            )
+            written_orphan_stems = {Path(f).stem for f in file_summary}
+            orphan_pos = sum(1 for n in file_summary.values() if n > 0)
+            orphan_boxes = sum(file_summary.values())
+
+        for prefix in skipped:
+            for fname in universe_by_drop.get(prefix, []):
+                stem = Path(fname).stem
+                if stem in written_orphan_stems:
+                    continue
+                (extra_labels / f"{stem}.txt").write_text("")
+                written_orphan_stems.add(stem)
+        orphan_neg = len(written_orphan_stems) - orphan_pos
+
+        logging.info(
+            f"  Routed {len(skipped)} orphan prefix(es) → "
+            f"{extra_dir.relative_to(config.deployment_data_dir.parent)}: "
+            f"{len(written_orphan_stems)} frame(s), {orphan_pos} positive, "
+            f"{orphan_neg} background, {orphan_boxes} boxes "
+            f"(prefixes: {sorted(skipped)})"
         )
     return summary
 
 
 def _drop_id_from_volume_name(name: str) -> Optional[str]:
     """Parse a canonical drop_id from a volume name like
-    `"{drop_id} — video labels"` or `"{drop_id} — ML frames"`. Returns None when
+    `"{drop_id}, video labels"` or `"{drop_id}. ML frames"`. Returns None when
     the first token doesn't validate as a drop_id (i.e. a multi-drop volume)."""
     head = re.split(r"\s+|—|–|-", name.strip(), maxsplit=1)[0]
     try:
@@ -780,7 +909,7 @@ def download_project_volume_labels(
     For each volume in `project_id`:
       - if the volume name starts with a canonical drop_id (per-drop volume)
         and that drop's `_biigle_training_raw.csv` already exists, skip unless
-        ``force`` — fast path, no API calls beyond the project's volume list;
+        ``force``, fast path, no API calls beyond the project's volume list;
       - otherwise hand off to `download_training_volume_labels(volume_id)`
         (which handles multi-drop survey-level volumes via the
         `{drop_id}__frame_<secs>s.jpg` filename convention).
@@ -803,11 +932,65 @@ def download_project_volume_labels(
         if drop_id and not force:
             raw_path = config.get_biigle_training_raw_csv_path(drop_id)
             if raw_path.exists():
-                logging.info(f"  skip {vol_id} ({drop_id}) — {raw_path.name} exists")
+                logging.info(f"  skip {vol_id} ({drop_id}), {raw_path.name} exists")
                 skipped += 1
                 continue
         logging.info(f"  download {vol_id} ({name})")
         out[vol_id] = download_training_volume_labels(vol_id)
+        downloaded += 1
+
+    logging.info(
+        f"Project {project_id}: downloaded {downloaded}, skipped {skipped} "
+        f"(use --force to re-download)"
+    )
+    return out
+
+
+def download_project_extra_volume_labels(
+    project_id: int,
+    deployment_data_dir: Optional[Path] = None,
+    class_map_path: Optional[Path] = None,
+    report_type: Optional[int] = None,
+    force: bool = False,
+) -> Dict[int, Dict[str, int]]:
+    """Per-project wrapper around `download_extra_volume_labels`.
+
+    Each volume in `project_id` is downloaded into
+    `extra_no_survey_id/volume_<id>/` regardless of its filename convention,
+    use this for non-Spyfish projects (e.g. UoA mussel farms, project 4510)
+    whose images don't follow the `{drop_id}__frame_<secs>s.jpg` pattern.
+
+    Skip logic: a volume is skipped when its `volume_<id>_biigle_expert_raw.csv`
+    is already on disk; pass ``force=True`` to re-download.
+    """
+    from spyfish.biigle.biigle_handler import BiigleHandler
+
+    deployment_data_dir = deployment_data_dir or config.deployment_data_dir
+
+    handler = BiigleHandler()
+    volumes = handler.get_volumes(project_id)
+    logging.info(f"Project {project_id}: {len(volumes)} volume(s) (extras path)")
+
+    out: Dict[int, Dict[str, int]] = {}
+    skipped = downloaded = 0
+    for v in volumes:
+        vol_id = v["id"]
+        name = v.get("name", "")
+        raw_path = (
+            deployment_data_dir
+            / "extra_no_survey_id"
+            / f"volume_{vol_id}"
+            / "annotations"
+            / f"volume_{vol_id}{config.biigle_expert_raw_suffix}"
+        )
+        if raw_path.exists() and not force:
+            logging.info(f"  skip {vol_id} ({name}), {raw_path.name} exists")
+            skipped += 1
+            continue
+        logging.info(f"  download {vol_id} ({name})")
+        out[vol_id] = download_extra_volume_labels(
+            vol_id, deployment_data_dir, class_map_path, report_type
+        )
         downloaded += 1
 
     logging.info(
@@ -900,6 +1083,42 @@ def main():
         "--force", action="store_true", help="Re-download even when local CSV exists"
     )
 
+    # New: per-project loop, EXTRAS path. Each volume lands in
+    # extra_no_survey_id/volume_<id>/, use for projects whose images don't
+    # follow the {drop_id}__frame_<secs>s.jpg convention (e.g. UoA 4510).
+    proj_x_cmd = subparsers.add_parser(
+        "download-project-extras",
+        help=(
+            "Download every volume in a BIIGLE project into "
+            "extra_no_survey_id/volume_<id>/ (no drop_id parsing). Volumes "
+            "whose raw CSV already exists are skipped (use --force to re-download)."
+        ),
+    )
+    proj_x_cmd.add_argument(
+        "--project-id", required=True, type=int, help="BIIGLE project ID"
+    )
+    proj_x_cmd.add_argument(
+        "--deployment-data-dir",
+        type=Path,
+        default=None,
+        help="Root deployment_data directory (default: config.deployment_data_dir)",
+    )
+    proj_x_cmd.add_argument(
+        "--class-map",
+        type=Path,
+        default=None,
+        help="Path to class_map.json (defaults to config.class_map_path)",
+    )
+    proj_x_cmd.add_argument(
+        "--report-type",
+        type=int,
+        default=None,
+        help="Biigle report type ID (default: image annotations)",
+    )
+    proj_x_cmd.add_argument(
+        "--force", action="store_true", help="Re-download even when local CSV exists"
+    )
+
     args = parser.parse_args()
 
     if args.command == "convert":
@@ -911,6 +1130,14 @@ def main():
         )
     elif args.command == "download-training-volume":
         download_training_volume_labels(args.volume_id)
+    elif args.command == "download-project-extras":
+        download_project_extra_volume_labels(
+            args.project_id,
+            args.deployment_data_dir,
+            args.class_map,
+            args.report_type,
+            force=args.force,
+        )
     elif args.command == "download-project":
         download_project_volume_labels(args.project_id, force=args.force)
     else:

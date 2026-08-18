@@ -82,7 +82,7 @@ AWS_DEFAULT_REGION=ap-southeast-2
        parallel_drops=PARALLEL_DROPS,
        sequential_download=SEQUENTIAL_DOWNLOAD
    )
-   
+
    # Preview files that will be processed
    display(processor.filtered_df)
    ```
@@ -110,7 +110,7 @@ AWS_DEFAULT_REGION=ap-southeast-2
 
 GoPro cameras split long recordings into multiple files:
 - `GOPR0298.MP4` - First file in recording #0298
-- `GP010298.MP4` - Second file in recording #0298  
+- `GP010298.MP4` - Second file in recording #0298
 - `GP020298.MP4` - Third file in recording #0298
 - `GOPR0392.MP4` - New recording #0392 starts
 
@@ -159,10 +159,10 @@ If a drop folder contains multiple GoPro sequences, they are saved with suffix l
 5. **List All Videos in a Folder** (Fourth cell)
    ```python
    S3_PREFIX = "media/HOR_20240408_BUV/HOR_20240408_BUV_HOR_096_01/"
-   
+
    import pandas as pd
    pd.set_option('display.max_colwidth', None)  # Show full paths
-   
+
    movies_df = processor.get_movies_df(prefix=S3_PREFIX)
    display(movies_df)
    ```
@@ -185,14 +185,14 @@ If a drop folder contains multiple GoPro sequences, they are saved with suffix l
 #### Step-by-Step Instructions
 
 1. **Prepare Your CSV File**
-   
+
    Create a CSV with two columns containing old and new S3 keys:
    ```csv
    OLD,NEW
    media/survey/drop1/video_old.mp4,media/survey/drop1/video_new.mp4
    media/survey/drop2/GOPR0123.mp4,media/survey/drop2/drop2_concatenated.mp4
    ```
-   
+
    Save this as `rename_movies.csv` in your data folder.
 
 2. **Launch the Notebook**
@@ -442,12 +442,12 @@ for SURVEY in "${SURVEYS[@]}"; do
   echo "=========================================="
   echo "Processing survey: $SURVEY"
   echo "=========================================="
-  
+
   python gopro_concat.py \
     --prefix "$SURVEY" \
     --parallel-drops 2 \
     --download-threads 4
-  
+
   if [ $? -eq 0 ]; then
     echo "✓ Successfully processed $SURVEY"
   else

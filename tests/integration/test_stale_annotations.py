@@ -1,26 +1,19 @@
 """
-Regression test for the stale annotations bug.
+A re-run that detects nothing must not leave the previous run's rows behind.
 
-Bug location: process_ml_annotations.py, _ingest_ml_annotations(), lines 148–154.
+`clear_annotations()` has to run whether or not there is anything to write. Put
+it behind an `if annotations_to_add:` guard and a zero-detection re-run skips
+it entirely, so the earlier run's annotations stay in the database for good and
+the deployment reads as populated when the current model finds nothing in it.
 
-    if annotations_to_add:          # ← guard controls clear_annotations too
-        ann_db.clear_annotations(drop_id, "ml")
-        ann_db.add_annotations(annotations_to_add)
-
-When a re-run produces zero detections above the MaxN confidence threshold,
-`process_maxn()` returns an empty DataFrame. The `for ... in maxn_df.iterrows()`
-loop runs zero times, `annotations_to_add` stays `[]`, and the `if` guard is False.
-`clear_annotations()` is never called. ML annotations from the previous run remain
-in the database permanently.
-
-Fix: move `ann_db.clear_annotations(drop_id, "ml")` outside (above) the `if` guard
-so it always runs, regardless of whether there are new annotations to write.
-
-This test FAILS against the unfixed code and PASSES after the fix is applied.
+What a zero-detection run leaves behind is one null-species row, not an empty
+table: "reviewed, saw nothing" has to be distinguishable from "ML never ran",
+and detection-rate denominators need this deployment counted as a real zero.
 """
 
 import pandas as pd
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations, process_maxn
 from tests.conftest import DROP_NORMAL, MODEL_NAME
 
@@ -36,6 +29,18 @@ def _count_ml_annotations(ann_db, drop_id: str) -> int:
             (drop_id,),
         )
         return cursor.fetchone()[0]
+
+
+def _ml_species(ann_db, drop_id: str) -> list:
+    """Scientific names on this drop's ML rows. NULL_DEPLOYMENT marks "saw nothing"."""
+    with ann_db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT scientific_name FROM annotations "
+            "WHERE drop_id = ? AND annotated_by = 'ml'",
+            (drop_id,),
+        )
+        return [row[0] for row in cursor.fetchall()]
 
 
 # ── Test data ─────────────────────────────────────────────────────────────────
@@ -113,13 +118,9 @@ _RAW_DETECTIONS_ZERO = _RAW_DETECTIONS_5.assign(confidence=0.30)
 
 def test_stale_annotations_cleared_on_zero_detection_rerun(pipeline_env):
     """
-    After a first run that writes N annotations, a subsequent run that produces
-    zero detections above threshold must leave the database with 0 annotations —
-    not the stale N from the first run.
-
-    Sequence:
-        1. process_maxn() + _ingest_ml_annotations() with 5 detections → assert 5 in DB
-        2. process_maxn() + _ingest_ml_annotations() with 0 detections → assert 0 in DB  ← FAILS
+    After a first run that writes 5 annotations, a re-run that detects nothing
+    must leave exactly one null-species row — the "reviewed, saw nothing"
+    marker — and none of the 5 stale rows.
     """
     ann_db = pipeline_env.ann_db
     drop_id = DROP_NORMAL
@@ -165,17 +166,13 @@ def test_stale_annotations_cleared_on_zero_detection_rerun(pipeline_env):
 
     _ingest_ml_annotations(ann_db, drop_id, maxn_df_run2, MODEL_NAME)
 
-    # ── Regression assertion ───────────────────────────────────────────────────
-    # CURRENT BEHAVIOUR (bug): _ingest_ml_annotations builds annotations_to_add = []
-    # from an empty maxn_df. The guard `if annotations_to_add:` is False.
-    # clear_annotations() is never called. The 5 rows from run 1 survive.
-    #
-    # EXPECTED BEHAVIOUR (after fix): clear_annotations() runs unconditionally,
-    # then add_annotations() is skipped because there is nothing to add.
-    count_run2 = _count_ml_annotations(ann_db, drop_id)
-    assert count_run2 == 0, (
-        f"Expected 0 ML annotations after zero-detection re-run, got {count_run2}. "
-        f"Stale annotations from run 1 were not cleared.\n"
-        f"Fix: in _ingest_ml_annotations() (process_ml_annotations.py), move "
-        f"ann_db.clear_annotations(drop_id, 'ml') above the `if annotations_to_add:` guard."
+    # ── Regression assertions ─────────────────────────────────────────────────
+    # Species, not just the count: a bare count of 1 would also pass if one of
+    # run 1's five rows had survived and the null row had never been written,
+    # which is the exact failure this test exists to catch.
+    species_run2 = _ml_species(ann_db, drop_id)
+    assert species_run2 == [NULL_DEPLOYMENT], (
+        f"Expected exactly one {NULL_DEPLOYMENT!r} row after a zero-detection "
+        f"re-run, got {species_run2}. Either run 1's annotations were not "
+        f"cleared, or the 'reviewed, saw nothing' row was not written."
     )
