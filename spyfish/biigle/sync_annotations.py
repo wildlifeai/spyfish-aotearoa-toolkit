@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import pandas as pd
 
@@ -10,25 +10,52 @@ from spyfish.biigle.biigle_to_yolo import biigle_to_yolo
 from spyfish.config.base import ExpertStatus
 from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.database.annotation_manager import (
+    AnnotationDatabaseManager,
+    null_deployment_row,
+)
 from spyfish.database.manager import DatabaseManager
 from spyfish.utils import seconds_to_time, time_to_seconds
 
 
-def _drop_substrate_rows(df: pd.DataFrame, substrate_label_ids: set) -> pd.DataFrame:
-    """Remove CMECS substrate annotations from a report DataFrame.
+def _keep_countable_rows(
+    df: pd.DataFrame,
+    species_label_ids: set,
+    workflow_label_ids: set,
+    substrate_label_ids: set,
+) -> pd.DataFrame:
+    """Keep the report rows that MaxN should count, drop the rest.
 
-    Substrate is measured as percent-cover (process_substrate), not counted as
-    a species, so its rows must be excluded before MaxN aggregation, or each
-    substrate polygon would inflate a bogus "species" count. Identified by the
-    same label-tree membership used in process_substrate.
+    An allowlist, not a substrate denylist. Excluding one known-bad tree meant
+    every other kind of label was countable by default, so a new tree, or a
+    label belonging to none, silently became a species. Here a row has to earn
+    its place: it is counted if it comes from the species tree, or is one of
+    the workflow labels that marks an animal, or belongs to no tree we know
+    (legacy and genus-level names, which `_map_biigle_to_spyfish_schema` then
+    judges on shape).
+
+    What this removes is substrate, which is measured as percent-cover by
+    `process_substrate` rather than counted, and the workflow tree's progress
+    markers. Without it each substrate polygon would inflate a bogus "species".
+
+    Falls through unfiltered when the report has no `label_id` or no tree could
+    be fetched: the per-row mapper still applies its own name-based checks, so
+    this degrades rather than dropping everything.
     """
-    if not substrate_label_ids or "label_id" not in df.columns:
+    known = species_label_ids | workflow_label_ids | substrate_label_ids
+    if "label_id" not in df.columns or not known:
         return df
-    is_substrate = pd.to_numeric(df["label_id"], errors="coerce").isin(
-        substrate_label_ids
+
+    ids = pd.to_numeric(df["label_id"], errors="coerce")
+    # "In no tree we know" must be tested against EVERY known tree, not just
+    # the two whose rows we keep. Leaving substrate out of `known` would let
+    # every substrate polygon through this clause as an unrecognised label.
+    countable = (
+        ids.isin(species_label_ids)
+        | ids.isin(set(config.biigle_workflow_tree_keep_labels))
+        | ~ids.isin(known)
     )
-    return df[~is_substrate].copy()
+    return df[countable].copy()
 
 
 def _extract_timestamp_from_filename(row: pd.Series, fname_col: str) -> Optional[str]:
@@ -67,51 +94,88 @@ def _map_biigle_to_spyfish_schema(
     drop_id: str,
     timestamp: Optional[str],
     frame_key: str,
+    workflow_label_ids: Optional[set] = None,
+    species_label_ids: Optional[set] = None,
 ) -> Optional[Tuple[Tuple[str, str], Dict[str, Any]]]:
     """Maps a Biigle annotation row to the Spyfish schema. Returns (aggregation_key, mapped_dict).
 
-    Returns None for rows whose label is not a species: label-tree species are
-    named "Common - Scientific", so a bare label the species registry doesn't
-    know is a workflow label ("Done Volume", "Review"), letting it through
-    would write it into the annotations DB as a scientific name.
+    Which LABEL TREE a label belongs to decides what it means, so that is
+    checked first and the text second. A tree is assigned by the system; the
+    text is typed by a person, so the tree is the stronger signal.
 
-    Names the registry DOES know are resolved to their canonical scientific
-    name, not kept as written. The registry treats "Fish: final" as an alias of
-    the `fish` bucket; recognising it and then storing the alias put a second
-    spelling of one class into the database, where every reader has to know
-    both.
+    * **Species tree** — always kept. An expert picked it from the species
+      list, which settles the question; if the registry has not heard of it
+      that is the registry's gap, so it is stored and reported rather than
+      dropped.
+    * **Workflow tree** — annotator progress markers ("Done Volume", "In
+      progress", "Nothing here"), dropped. Except the entries in
+      `biigle_workflow_tree_keep_labels`, which mark a real animal and become
+      the class named there: an unidentified fish, or the bait.
+    * **No known tree** — a legacy or genus-level name ("Conger sp"). Kept if
+      it has a taxonomic shape, reported either way.
+
+    Names the registry knows are resolved to their canonical scientific name
+    rather than kept as written: it treats "Fish: final" as an alias of `fish`,
+    and storing the alias would put a second spelling of one class in the
+    database for every reader to know about.
 
     `frame_key` is used as the per-frame identifier when `timestamp` is None,
     e.g. for image volumes (like UUID-named uploads) where no clip/frame-seconds
     pattern is in the filename. Preserves per-frame uniqueness for MaxN aggregation.
     """
     label = str(row.get(label_col, "unknown_species")).strip()
+    label_id = pd.to_numeric(row.get("label_id"), errors="coerce")
+    label_id = None if pd.isna(label_id) else int(label_id)
 
-    # The registry first, on the WHOLE label. It knows the label-tree strings
-    # as aliases, so "Fish - Final" resolves to `fish` and "Snapper - Pagrus
-    # auratus" to `Pagrus auratus`. Splitting on " - " first would take the
-    # second half blindly and turn "Fish - Final" into a species called
-    # "Final".
-    registry = species_registry()
-    known = registry.get(label) or registry.get(label.lower())
-    if known is not None:
-        species = known.scientific_name
-    elif " - " in label:
-        # Not in the registry, but it carries the label tree's
-        # "Common - Scientific" shape, so the half after the separator is the
-        # scientific name. This is how a species new to the tree arrives before
-        # anyone adds it to the registry.
-        species = label.split(" - ", 1)[1]
+    # ── Workflow tree: progress markers, not sightings ───────────────────────
+    if workflow_label_ids and label_id in workflow_label_ids:
+        keep = config.biigle_workflow_tree_keep_labels
+        if label_id in keep:
+            species = keep[label_id]
+        else:
+            logging.debug(
+                f"{drop_id}: skipping workflow-tree label {label!r} (id {label_id})."
+            )
+            return None
     else:
-        # A bare label the registry does not know is a workflow label
-        # ("Done Volume", "Interesting Sighting"); letting it through would
-        # write it into the annotations database as a scientific name.
-        logging.warning(
-            f"{drop_id}: skipping BIIGLE annotation with non-species label "
-            f"{label!r} (no 'Common - Scientific' form, unknown to the "
-            "species registry)."
-        )
-        return None
+        in_species_tree = bool(species_label_ids) and label_id in species_label_ids
+        registry = species_registry()
+        known = registry.get(label) or registry.get(label.lower())
+        if known is not None:
+            species = known.scientific_name
+        elif in_species_tree or " - " in label:
+            # From the species tree, so it is a species by construction. The
+            # tree's convention is "Common - Scientific", so the half after the
+            # separator is the scientific name; a name without the separator is
+            # taken whole. This is how a species new to the tree arrives before
+            # anyone adds it to the registry.
+            species = label.split(" - ", 1)[1] if " - " in label else label
+            logging.warning(
+                f"{drop_id}: BIIGLE label {label!r} (id {label_id}) is in the "
+                f"species tree but not in the species registry; storing "
+                f"{species!r}. Add it to the registry."
+            )
+        elif re.match(config.genus_level_label_pattern, label):
+            # A genus-level identification ("Conger sp"). An expert chose it
+            # deliberately, so dropping it would lose a real observation that
+            # no re-sync can recover. Matched on shape rather than accepted
+            # blanket, so "Interesting Sighting" still cannot get in. The
+            # trailing dot goes, so "Arripis sp." and "Arripis sp" land as one
+            # name in the database.
+            species = label.rstrip(".")
+            logging.warning(
+                f"{drop_id}: BIIGLE label {label!r} (id {label_id}) is a "
+                "genus-level ID unknown to the species registry; storing it "
+                "as-is. Add it to the registry."
+            )
+        else:
+            logging.warning(
+                f"{drop_id}: skipping BIIGLE annotation with non-species label "
+                f"{label!r} (id {label_id}): in no known label tree, unknown to "
+                "the species registry, and neither 'Common - Scientific' nor "
+                "genus-level in form."
+            )
+            return None
 
     sortable_time = timestamp or frame_key
     key = (sortable_time, species)
@@ -136,7 +200,10 @@ def _map_biigle_to_spyfish_schema(
 
 
 def aggregate_raw_to_maxn_rows(
-    fish_annotations_df: pd.DataFrame, drop_id: str
+    fish_annotations_df: pd.DataFrame,
+    drop_id: str,
+    workflow_label_ids: Optional[set] = None,
+    species_label_ids: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """Aggregate raw Biigle annotation rows into MaxN rows (one per frame × species).
 
@@ -144,6 +211,10 @@ def aggregate_raw_to_maxn_rows(
     download-volume bundle synthesizer. Returns a list of dicts using the
     Spyfish lowercase schema (drop_id, scientific_name, time_of_max, ...);
     use `maxn_rows_to_df` to rename for CSV output.
+
+    The two label-id sets are the trees, fetched once per run by the caller.
+    Both optional so the bundle synthesizer, which has no API session, still
+    works; without them labels fall back to being judged by name.
     """
     label_col = "label_name"
     fname_col = "filename"
@@ -153,7 +224,13 @@ def aggregate_raw_to_maxn_rows(
         fname = str(row.get(fname_col, ""))
         timestamp = _extract_timestamp_from_filename(row, fname_col)
         mapped = _map_biigle_to_spyfish_schema(
-            row, label_col, drop_id, timestamp, fname
+            row,
+            label_col,
+            drop_id,
+            timestamp,
+            fname,
+            workflow_label_ids,
+            species_label_ids,
         )
         if mapped is None:
             continue
@@ -188,6 +265,153 @@ def maxn_rows_to_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
     )
 
 
+def _fetch_tree_label_ids(handler, tree_id: int, name: str) -> set:
+    """Label ids belonging to one BIIGLE label tree, or an empty set.
+
+    An empty set means "this tree's rule cannot be applied this run", which
+    every caller degrades to name-based handling. That is weaker than tree
+    membership but it keeps a sync going through an API hiccup, and the warning
+    says which rule was lost.
+    """
+    try:
+        ids = {int(lbl["id"]) for lbl in handler.get_label_tree_labels(tree_id)}
+        logging.info(f"{name.capitalize()} tree {tree_id} has {len(ids)} label(s)")
+        return ids
+    except Exception as e:
+        logging.warning(
+            f"Could not fetch {name} label tree {tree_id}: {e}. "
+            f"{name.capitalize()} labels will be handled by name only this run."
+        )
+        return set()
+
+
+class LabelTrees(NamedTuple):
+    """The three label-id sets, passed around together.
+
+    They are always fetched together and always used together, so one value
+    beats three parallel arguments that a caller can pass in the wrong order.
+    """
+
+    species: set
+    substrate: set
+    workflow: set
+
+
+def _fetch_label_trees(handler) -> LabelTrees:
+    """Every tree's label ids, fetched once per run.
+
+    Which tree a label belongs to is what decides how its annotation is
+    handled: the tree is assigned by BIIGLE, while the label text is typed by a
+    person, so the tree is the stronger signal.
+    """
+    return LabelTrees(
+        species=_fetch_tree_label_ids(handler, config.default_label_tree_id, "species"),
+        substrate=_fetch_tree_label_ids(
+            handler, config.biigle_substrate_label_tree_id, "substrate"
+        ),
+        workflow=_fetch_tree_label_ids(
+            handler, config.biigle_workflow_label_tree_id, "workflow"
+        ),
+    )
+
+
+def _ready_media_type(handler, drop_id, volume_id, done_volumes) -> Optional[str]:
+    """The volume's media type if it is ready to sync, else None.
+
+    Two gates. Project membership is the real one: only volumes in `done` are
+    finished. The `Done Volume` whole-file label is the legacy gate, kept
+    behind `require_done_label` as belt-and-braces during the transition.
+
+    Returns None rather than raising, because "not ready yet" is the normal
+    case on most runs, not a failure.
+    """
+    done_project_id = config.biigle_done_project_id
+    if volume_id not in done_volumes:
+        logging.debug(
+            f"  Volume {volume_id} for {drop_id} not in project "
+            f"{done_project_id} (done) yet. Skipping."
+        )
+        return None
+
+    if config.biigle_require_done_label:
+        is_done, media_type = handler.volume_is_done(volume_id)
+        if not is_done:
+            logging.debug(
+                f"  Volume {volume_id} for {drop_id} in done project but "
+                "Done-label gate enabled and label missing. Skipping."
+            )
+            return None
+        logging.info(
+            f"  Volume {volume_id} for {drop_id} is DONE ({media_type}). "
+            "Downloading report..."
+        )
+        return media_type
+
+    # Reuse cached metadata, saves a get_volume_info() round-trip per volume
+    media_type = done_volumes[volume_id].get("media_type", "image")
+    logging.info(
+        f"  Volume {volume_id} for {drop_id} in done project "
+        f"({media_type}). Downloading report..."
+    )
+    return media_type
+
+
+def _record_null_deployment(db, ann_db, drop_id: str, volume_id: int, why: str) -> None:
+    """Record that this expert review found nothing, and complete the drop.
+
+    Reached two ways — an empty report, and a report whose labels were all
+    non-fish — and they mean the same thing, so they write the same row. The
+    null-deployment row keeps "reviewed, saw nothing" distinguishable from
+    "never reviewed", and lets the data-presence rule in sync_annotation_counts
+    advance the status like any other completion.
+
+    Volume-scoped external_id so a re-sync replaces it: clear_synced_annotations
+    only removes rows with a non-null external_id, which is what protects
+    hand-entered expert rows.
+    """
+    logging.info(f"  {why} for {drop_id} — recording a null-deployment row.")
+    ann_db.clear_synced_annotations(drop_id, "expert")
+    ann_db.add_annotations(
+        [
+            null_deployment_row(
+                drop_id, "expert", external_id=f"biigle_volume_{volume_id}"
+            )
+        ]
+    )
+    db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
+
+
+def _write_substrate_csv(parser, report: pd.DataFrame, drop_id: str, trees) -> None:
+    """Export substrate percent-cover for this drop, if it has any.
+
+    Substrate is an area-cover statistic, not a count, so it is computed and
+    exported separately and never reaches the MaxN aggregation.
+    """
+    substrate_df = parser.process_substrate(report, trees.substrate)
+    if substrate_df.empty:
+        return
+    substrate_path = config.get_biigle_expert_substrate_csv_path(drop_id)
+    substrate_df.to_csv(substrate_path, index=False)
+    logging.info(f"  Expert substrate ({len(substrate_df)} rows) → {substrate_path}")
+
+
+def _ingest_species(db, ann_db, drop_id: str, annotations_to_add: list) -> None:
+    """Replace this drop's synced expert rows, export its MaxN CSV, complete it.
+
+    Only Biigle-sourced rows are cleared (external_id IS NOT NULL), so
+    manually-entered expert annotations survive a re-sync.
+    """
+    ann_db.clear_synced_annotations(drop_id, "expert")
+    ann_db.add_annotations(annotations_to_add)
+
+    maxn_path = config.get_biigle_expert_maxn_csv_path(drop_id)
+    maxn_rows_to_df(annotations_to_add).to_csv(maxn_path, index=False)
+    logging.info(f"  Expert MaxN → {maxn_path}")
+    logging.info(f"  Ingested {len(annotations_to_add)} annotations for {drop_id}")
+
+    db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
+
+
 def sync_biigle_annotations():
     """
     Sync annotations from Biigle volumes that the annotator has marked as done.
@@ -220,25 +444,9 @@ def sync_biigle_annotations():
     done_volumes = {v["id"]: v for v in handler.get_volumes(done_project_id)}
     logging.info(f"Project {done_project_id} (done) has {len(done_volumes)} volume(s)")
 
-    # Substrate (CMECS) label-id set, fetched once for the whole run, these are
-    # the labels whose annotations are measured as percent-cover instead of being
-    # counted as a species. Empty set (e.g. API hiccup) cleanly disables substrate
-    # processing without aborting the species sync.
-    substrate_tree_id = config.biigle_substrate_label_tree_id
-    try:
-        substrate_label_ids = {
-            int(lbl["id"]) for lbl in handler.get_label_tree_labels(substrate_tree_id)
-        }
-        logging.info(
-            f"Substrate tree {substrate_tree_id} has "
-            f"{len(substrate_label_ids)} label(s)"
-        )
-    except Exception as e:
-        logging.warning(
-            f"Could not fetch substrate label tree {substrate_tree_id}: {e}. "
-            "Substrate percent-cover will be skipped this run."
-        )
-        substrate_label_ids = set()
+    # Each tree falls back to an empty set on API failure, which degrades that
+    # one routing rule to name-based handling rather than aborting the sync.
+    trees = _fetch_label_trees(handler)
 
     processed_drops = []
     for dep in deployments:
@@ -248,100 +456,55 @@ def sync_biigle_annotations():
         logging.debug(f"Checking Biigle volume {volume_id} for {drop_id}")
 
         try:
-            if volume_id not in done_volumes:
-                logging.debug(
-                    f"  Volume {volume_id} for {drop_id} not in project "
-                    f"{done_project_id} (done) yet. Skipping."
-                )
+            media_type = _ready_media_type(handler, drop_id, volume_id, done_volumes)
+            if media_type is None:
                 continue
 
-            if config.biigle_require_done_label:
-                is_done, media_type = handler.volume_is_done(volume_id)
-                if not is_done:
-                    logging.debug(
-                        f"  Volume {volume_id} for {drop_id} in done project but "
-                        "Done-label gate enabled and label missing. Skipping."
-                    )
-                    continue
-                logging.info(
-                    f"  Volume {volume_id} for {drop_id} is DONE ({media_type}). Downloading report..."
-                )
-            else:
-                # Reuse cached metadata, saves a get_volume_info() round-trip per volume
-                media_type = done_volumes[volume_id].get("media_type", "image")
-                logging.info(
-                    f"  Volume {volume_id} for {drop_id} in done project "
-                    f"({media_type}). Downloading report..."
-                )
-
             parser = BiigleParser()
-            report_type = (
-                config.annotation_report_type_video
-                if media_type == "video"
-                else config.annotation_report_type_images
+            report = parser.download_volume_annotations(
+                volume_id=volume_id,
+                type_id=(
+                    config.annotation_report_type_video
+                    if media_type == "video"
+                    else config.annotation_report_type_images
+                ),
             )
 
-            fish_annotations_df = parser.download_volume_annotations(
-                volume_id=volume_id, type_id=report_type
-            )
-
-            if fish_annotations_df.empty:
-                logging.debug(f"  No annotations found for {drop_id}.")
-                db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
+            if report.empty:
+                _record_null_deployment(
+                    db, ann_db, drop_id, volume_id, "No annotations found"
+                )
+                processed_drops.append(drop_id)
                 continue
 
             # Save raw Biigle report (used by YOLO label generation)
             config.get_drop_annotations_dir(drop_id).mkdir(parents=True, exist_ok=True)
             raw_path = config.get_biigle_expert_raw_csv_path(drop_id)
-            fish_annotations_df.to_csv(raw_path, index=False)
+            report.to_csv(raw_path, index=False)
             logging.info(f"  Raw expert annotations → {raw_path}")
 
-            # Substrate (CMECS) is an area-cover statistic, computed separately
-            # from species MaxN. Export per-drop percentages, then drop substrate
-            # rows so they never count as a "species" in the fish aggregation.
-            substrate_df = parser.process_substrate(
-                fish_annotations_df, substrate_label_ids
-            )
-            if not substrate_df.empty:
-                substrate_path = config.get_biigle_expert_substrate_csv_path(drop_id)
-                substrate_df.to_csv(substrate_path, index=False)
-                logging.info(
-                    f"  Expert substrate ({len(substrate_df)} rows) → {substrate_path}"
-                )
-            fish_annotations_df = _drop_substrate_rows(
-                fish_annotations_df, substrate_label_ids
-            )
+            _write_substrate_csv(parser, report, drop_id, trees)
 
-            # Aggregate into MaxN counts
+            countable = _keep_countable_rows(
+                report, trees.species, trees.workflow, trees.substrate
+            )
             annotations_to_add = aggregate_raw_to_maxn_rows(
-                fish_annotations_df, drop_id
+                countable, drop_id, trees.workflow, trees.species
             )
 
             if not annotations_to_add:
-                logging.info(
-                    f"  No fish annotations after aggregation for {drop_id} "
-                    "(only non-fish labels). Advancing to complete."
+                _record_null_deployment(
+                    db,
+                    ann_db,
+                    drop_id,
+                    volume_id,
+                    "No fish annotations after aggregation (only non-fish labels)",
                 )
-                db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
+                processed_drops.append(drop_id)
                 continue
 
-            # Replace only Biigle-sourced expert annotations (external_id IS NOT NULL).
-            # Manually-entered expert annotations (external_id = NULL) are preserved.
-            ann_db.clear_synced_annotations(drop_id, "expert")
-            ann_db.add_annotations(annotations_to_add)
-
-            # Export MaxN CSV per drop
-            maxn_df = maxn_rows_to_df(annotations_to_add)
-            maxn_path = config.get_biigle_expert_maxn_csv_path(drop_id)
-            maxn_df.to_csv(maxn_path, index=False)
-            logging.info(f"  Expert MaxN → {maxn_path}")
-
+            _ingest_species(db, ann_db, drop_id, annotations_to_add)
             processed_drops.append(drop_id)
-            logging.info(
-                f"  Ingested {len(annotations_to_add)} annotations for {drop_id}"
-            )
-
-            db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
 
         except Exception as e:
             logging.error(

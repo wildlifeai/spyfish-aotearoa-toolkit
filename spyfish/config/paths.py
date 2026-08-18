@@ -435,16 +435,33 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_substrate_suffix}"
         )
 
-    def get_coco_annotations_path(self, drop_id: str) -> Path:
+    def get_coco_annotations_path(self, drop_id: str, target: str = "") -> Path:
         """COCO JSON of YOLO detections for a drop's selected frames.
 
-        Single source of truth for this filename, written by the frame
-        extractors, rebuilt by the Zooniverse-path inference rerun, and
-        read by ``upload_frames_to_biigle`` before upload.
+        `target` scopes the file to the workflow that produced it, mirroring
+        ``get_frames_dir(drop_id, target)``:
+
+          - ``""``          → ``{drop}_coco_annotations_for_biigle.json``
+            The expert-review path: written by ``extract_frames``, rebuilt by
+            the Zooniverse-path inference rerun, read by
+            ``upload_frames_to_biigle``. Those three intentionally share one
+            file, and each rewrite targets the same per-drop review volume.
+          - ``"training"``  → ``{drop}_training_coco_annotations_for_biigle.json``
+            The survey-pooled training path (``extract_training_frames``).
+
+        A COCO is only meaningful against the exact image set it was built
+        for, and the two workflows select DIFFERENT frames from the same drop
+        (review picks ML detection peaks at fractional timestamps; training
+        picks blind evenly-spaced ones). Before this split both wrote the same
+        filename, so whichever ran last silently destroyed the other's record
+        of what the model had predicted, and an upload could push one
+        workflow's boxes at the other's images, where every filename join
+        misses and the annotations vanish without an error.
         """
+        suffix = f"_{target}" if target else ""
         return (
             self.get_drop_annotations_dir(drop_id)
-            / f"{self.validate_drop_id(drop_id)}_coco_annotations_for_biigle.json"
+            / f"{self.validate_drop_id(drop_id)}{suffix}_coco_annotations_for_biigle.json"
         )
 
     _ZOONIVERSE_FRAMES_RAW_SUFFIXES = {

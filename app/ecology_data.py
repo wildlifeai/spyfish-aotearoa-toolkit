@@ -14,6 +14,7 @@ import streamlit as st
 from utils import CACHE_TTL_SECONDS
 
 from spyfish.config.base import (
+    NULL_DEPLOYMENT,
     CitSciStatus,
     ExpertStatus,
     IngestStatus,
@@ -84,24 +85,42 @@ def source_bucket(annotated_by: pd.Series) -> pd.Series:
 
 PROTECTED = "Protected"
 UNPROTECTED = "Unprotected"
+# Neither: a partial or unclear regime. Its own group rather than a side,
+# because folding it into either one answers the reserve question with
+# deployments that cannot answer it.
+OTHER_PROTECTION = "Other"
 
 
 def protection_group(status: pd.Series) -> pd.Series:
-    """Protected / Unprotected / None from `protection_status`.
+    """Protected / Unprotected / Other / None from `protection_status`.
 
-    Protected is exactly `config.protected_statuses`, partial regimes
-    (mātaitai, taiāpure, seafloor-only) count as unprotected because they do
-    not restrict the take of the indicator species. Missing or "unknown"
-    metadata maps to None rather than being guessed at: a deployment we cannot
-    place should be reported as unclassified, not silently strengthen either
-    side of the comparison.
+    Three groups, not two. `config.protected_statuses` and
+    `config.unprotected_statuses` each name exactly the statuses that mean what
+    they say; everything else (High Protection Area, Type II MPA, taiapure,
+    mataitai, Fisheries Act closures, seafloor protection, "Other") is a
+    partial or unclear regime and becomes **Other**.
+
+    That third group used to be split across the two sides: the config counted
+    High Protection Area and Type II MPA as protected while the MPA view's own
+    substring classifier read them as outside, so one deployment sat on
+    opposite sides of the comparison depending on which chart was open. Naming
+    both ends and leaving the remainder as Other means neither side can absorb
+    a deployment nobody has decided about.
+
+    Missing or "unknown" metadata maps to None, still separate from Other: one
+    is "we know it is partial", the other is "we do not know".
     """
     protected = set(config.protected_statuses)
+    unprotected = set(config.unprotected_statuses)
 
     def bucket(value):
         if pd.isna(value) or str(value).strip().lower() in ("", "unknown"):
             return None
-        return PROTECTED if value in protected else UNPROTECTED
+        if value in protected:
+            return PROTECTED
+        if value in unprotected:
+            return UNPROTECTED
+        return OTHER_PROTECTION
 
     return status.map(bucket)
 
@@ -166,7 +185,14 @@ def pielou(counts) -> float:
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_maxn() -> pd.DataFrame:
-    return AnnotationDatabaseManager().get_maxn_summary()
+    df = AnnotationDatabaseManager().get_maxn_summary()
+    # The DB speaks NULL_DEPLOYMENT ("reviewed, nothing seen"); app frames
+    # speak NaN, which every notna/groupby path here already treats as
+    # "no species" while keeping the row. NaN is unambiguous in a frame: a
+    # never-reviewed source has no rows at all, so isna() means exactly the
+    # reviewed-empty deployments.
+    df.loc[df["scientific_name"] == NULL_DEPLOYMENT, "scientific_name"] = pd.NA
+    return df
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)

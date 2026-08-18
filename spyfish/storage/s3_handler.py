@@ -639,6 +639,30 @@ class S3Handler:
                 return None
             raise
 
+    def get_object_storage(self, key: str) -> Optional[Dict[str, Optional[str]]]:
+        """Storage class and restore state for one object, or None if absent.
+
+        Returns ``{"storage_class": ..., "restore": ...}``:
+
+        - ``storage_class``: "STANDARD" (head_object omits the field for
+          standard storage, normalised here), "DEEP_ARCHIVE", "GLACIER", …
+          The pipeline's archive tier is DEEP_ARCHIVE (see ingest.py).
+        - ``restore``: the raw Restore header once a restore has been
+          requested — ``ongoing-request="true"`` while in flight,
+          ``ongoing-request="false", expiry-date="…"`` while the temporary
+          readable copy exists — else None.
+        """
+        try:
+            response = self.s3.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("404", "403", "NoSuchKey", "NotFound"):
+                return None
+            raise
+        return {
+            "storage_class": response.get("StorageClass", "STANDARD"),
+            "restore": response.get("Restore"),
+        }
+
     def read_df_from_s3_csv(self, csv_s3_path: str) -> pd.DataFrame:
         """
         Downloads a CSV file from S3 and loads it into a pandas DataFrame.

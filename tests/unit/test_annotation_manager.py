@@ -167,3 +167,39 @@ def test_get_maxn_summary_separates_species(ann_db):
 def test_get_maxn_summary_empty(ann_db):
     df = ann_db.get_maxn_summary(drop_id="NONEXISTENT")
     assert df.empty
+
+
+# ── null_deployment_row ─────────────────────────────────────────────────────
+
+
+def test_null_deployment_row_round_trip(ann_db):
+    """The absence record survives storage and the MaxN summary.
+
+    get_maxn_summary once dropped absence records via a NULL = NULL subquery;
+    the sentinel plus the null-safe IS comparison keeps them visible.
+    """
+    from spyfish.config.base import NULL_DEPLOYMENT
+    from spyfish.database.annotation_manager import null_deployment_row
+
+    row = null_deployment_row(DROP, "citsci")
+    assert row["scientific_name"] == NULL_DEPLOYMENT
+    assert row["max_interval"] == 0
+    assert row["time_of_max_seconds"] is None
+
+    _seed(ann_db, [row])
+    stored = ann_db.get_annotations_for_drop(DROP, "citsci")
+    assert len(stored) == 1
+    assert stored[0]["scientific_name"] == NULL_DEPLOYMENT
+
+    summary = ann_db.get_maxn_summary(drop_id=DROP)
+    assert len(summary) == 1
+    assert summary.iloc[0]["maxn"] == 0
+
+
+def test_null_deployment_row_biigle_replaceable(ann_db):
+    """A volume-scoped external_id makes the row clear_synced-replaceable."""
+    from spyfish.database.annotation_manager import null_deployment_row
+
+    _seed(ann_db, [null_deployment_row(DROP, "expert", external_id="biigle_volume_7")])
+    ann_db.clear_synced_annotations(DROP, "expert")
+    assert ann_db.get_annotations_for_drop(DROP, "expert") == []

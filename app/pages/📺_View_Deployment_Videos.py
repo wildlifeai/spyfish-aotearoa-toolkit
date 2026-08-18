@@ -128,7 +128,49 @@ def _presign_into_session_state(key: str, drop_label: str) -> bool:
         return False
     st.session_state["presigned_url"] = ps_url
     st.session_state["presigned_drop_id"] = drop_label
+    # Presigning succeeds for archived objects too — the failure only shows
+    # when the player tries to GET the bytes. Fetch the storage state now so
+    # the page can say "frozen" instead of showing a video box that silently
+    # never plays.
+    try:
+        st.session_state["presigned_storage"] = get_s3_handler().get_object_storage(key)
+    except Exception:  # noqa: BLE001, the note is best-effort, never blocking
+        st.session_state["presigned_storage"] = None
     return True
+
+
+def _render_storage_note() -> None:
+    """Say whether the loaded video is in frozen storage, and what that means.
+
+    The pipeline archives footage to DEEP_ARCHIVE (see `video_presence` =
+    `archived`). Such an object still presigns, but the player cannot read the
+    bytes until a restore completes, so the state is surfaced here rather than
+    discovered as an endlessly-buffering video box.
+    """
+    storage = st.session_state.get("presigned_storage") or {}
+    storage_class = storage.get("storage_class")
+    restore = storage.get("restore") or ""
+    if storage_class in ("DEEP_ARCHIVE", "GLACIER"):
+        if 'ongoing-request="true"' in restore:
+            st.warning(
+                "🧊 This video is in frozen storage and a **restore is in "
+                "progress**. It cannot play yet — deep-archive restores "
+                "typically take up to 12–48 hours. Check back later."
+            )
+        elif 'ongoing-request="false"' in restore:
+            st.info(
+                "🧊 This video lives in frozen storage but a **temporary "
+                "restored copy is available**, so it should play normally. "
+                f"The copy expires: `{restore}`"
+            )
+        else:
+            st.error(
+                "🧊 This video is in **frozen storage (deep archive)**. The "
+                "player below will not work until the footage is restored — "
+                "ask the team to trigger a restore, then allow up to 48 hours."
+            )
+    elif storage_class:
+        st.caption(f"Storage: `{storage_class}` — playable now, no restore needed.")
 
 
 # Shareable links: ?drop_id=ABC123 pre-fills the input and auto-presigns on first
@@ -191,6 +233,7 @@ if presigned_url:
     st.subheader("Video preview.")
     st.write("Does the path look ok? (In the future this will check automatically.)")
     st.code(st.session_state.get("presigned_drop_id", ""), language="text")
+    _render_storage_note()
     st.write(
         "The video box will show even when there are issues, so check above/try again later, or raise an issue."
     )

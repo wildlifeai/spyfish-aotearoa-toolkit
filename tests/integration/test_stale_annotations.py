@@ -13,6 +13,7 @@ and detection-rate denominators need this deployment counted as a real zero.
 
 import pandas as pd
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations, process_maxn
 from tests.conftest import DROP_NORMAL, MODEL_NAME
 
@@ -31,7 +32,7 @@ def _count_ml_annotations(ann_db, drop_id: str) -> int:
 
 
 def _ml_species(ann_db, drop_id: str) -> list:
-    """Scientific names on this drop's ML rows. None marks a null-species row."""
+    """Scientific names on this drop's ML rows. NULL_DEPLOYMENT marks "saw nothing"."""
     with ann_db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -170,8 +171,8 @@ def test_stale_annotations_cleared_on_zero_detection_rerun(pipeline_env):
     # run 1's five rows had survived and the null row had never been written,
     # which is the exact failure this test exists to catch.
     species_run2 = _ml_species(ann_db, drop_id)
-    assert species_run2 == [None], (
-        f"Expected exactly one null-species row after a zero-detection re-run, "
-        f"got {species_run2}. Either run 1's annotations were not cleared, or "
-        f"the 'reviewed, saw nothing' row was not written."
+    assert species_run2 == [NULL_DEPLOYMENT], (
+        f"Expected exactly one {NULL_DEPLOYMENT!r} row after a zero-detection "
+        f"re-run, got {species_run2}. Either run 1's annotations were not "
+        f"cleared, or the 'reviewed, saw nothing' row was not written."
     )

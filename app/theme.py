@@ -20,6 +20,11 @@ variants are kept validated alongside them so that switching the app theme later
 is a one-line change rather than a re-derivation.
 """
 
+# stdlib only, deliberately. This module is imported by anything that wants a
+# hex value, so it stays free of the config loader and the plotting stack —
+# `apply_plotly_defaults` imports plotly lazily for the same reason.
+import logging
+
 # ── Annotation sources (categorical) ─────────────────────────────────────────
 #
 # Okabe-Ito derived. Both sets pass the six palette checks (lightness band,
@@ -136,14 +141,47 @@ PROTECTION_COLORS = {
 }
 
 
+# Statuses already reported as unknown. Both lookups below run on every rerun,
+# for every status on the chart, so without this one unrecognised value would
+# fill the log and bury whatever else was wrong.
+_UNKNOWN_PROTECTION_SEEN: set = set()
+
+
+def _note_unknown_protection(status) -> None:
+    """Report a protection status this module has no colour or position for.
+
+    The fall-backs are deliberate — grey and last, so an unclassified status
+    looks unclassified — but silence makes them indistinguishable from a
+    correctly-styled category. The usual cause is a value added to
+    `known_protection_statuses` in config.yaml without the matching entry here.
+    """
+    if status is None or status in _UNKNOWN_PROTECTION_SEEN:
+        return
+    _UNKNOWN_PROTECTION_SEEN.add(status)
+    logging.warning(
+        "Protection status %r has no entry in theme.PROTECTION_COLORS / "
+        "PROTECTION_ORDER, so it renders neutral grey and sorts last. Add it "
+        "to both if it is a real category.",
+        status,
+    )
+
+
 def protection_color_map(statuses) -> dict:
     """Plotly `color_discrete_map` for the protection statuses actually present.
 
     Anything not in `PROTECTION_COLORS` falls back to neutral grey instead of
     raising or being auto-assigned a hue, a status added upstream should look
-    unclassified, not like a new category with meaning.
+    unclassified, not like a new category with meaning. It is logged once, so
+    the fall-back is visible without being repeated on every rerun.
     """
-    return {status: PROTECTION_COLORS.get(status, NEUTRAL) for status in statuses}
+    out = {}
+    for status in statuses:
+        if status in PROTECTION_COLORS:
+            out[status] = PROTECTION_COLORS[status]
+        else:
+            _note_unknown_protection(status)
+            out[status] = NEUTRAL
+    return out
 
 
 def protection_sort_key(status: str) -> int:
@@ -151,6 +189,7 @@ def protection_sort_key(status: str) -> int:
     try:
         return PROTECTION_ORDER.index(status)
     except ValueError:
+        _note_unknown_protection(status)
         return len(PROTECTION_ORDER)
 
 

@@ -1,7 +1,5 @@
 import logging
 import os
-from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
@@ -183,75 +181,6 @@ def generate_frame_filename(drop_id: str, time_seconds: float) -> str:
     under 10 000s. Existing un-padded frames on S3 are unaffected.
     """
     return f"{drop_id}__frame_{time_seconds:08.3f}s.jpg"
-
-
-# ── Species labels (shared Biigle label-tree export) ────────────────────────
-#
-# NOTE: superseded by ``spyfish.config.species.species_registry``, the only
-# remaining consumer is ``spyfish/biigle/upload_frames.py`` (name_to_label_id).
-# Delete this loader once that call site migrates. New code should use the
-# registry, not this.
-
-
-@dataclass(frozen=True)
-class SpeciesLabels:
-    """Loaded view of ``process_files/biigle/labels/species_labels.csv``.
-
-    One loader for the two consumers that need it:
-      - BIIGLE upload routes annotations by scientific name → label_id.
-      - Zooniverse parsing maps ALL_CAPS choice keys → scientific name.
-
-    The CSV is the BIIGLE label-tree export; each row's ``name`` is
-    ``"Common - Scientific"`` with a numeric ``id``. ``name_to_label_id``
-    keys both the bare scientific name and the full ``"Common - Scientific"``
-    string so callers can match whichever upstream convention they have.
-    """
-
-    zoo_choice_to_scientific: dict[str, str]
-    name_to_label_id: dict[str, int]
-
-
-@lru_cache(maxsize=1)
-def load_species_labels() -> SpeciesLabels:
-    """Load and cache the BIIGLE species label tree.
-
-    Returns empty mappings (and warns) when the file is absent, the pipeline
-    degrades gracefully rather than crashing on environments that haven't
-    synced the labels CSV.
-    """
-    labels_path = config.species_labels_csv_path
-    if not labels_path.exists():
-        logging.warning(
-            f"species_labels.csv not found at {labels_path}. BIIGLE annotations "
-            "will fall back to default_fish_label_id and Zooniverse choice keys "
-            "will not be normalised to scientific names."
-        )
-        return SpeciesLabels({}, {})
-
-    from spyfish.config.species import normalise_zoo_choice
-
-    df = pd.read_csv(labels_path)
-    zoo: dict[str, str] = {}
-    name_to_id: dict[str, int] = {}
-    for _, row in df.iterrows():
-        full = str(row.get("name", "")).strip()
-        if " - " not in full:
-            continue
-        common, scientific = full.split(" - ", 1)
-        scientific = scientific.strip()
-        zoo[normalise_zoo_choice(common)] = scientific
-        try:
-            label_id = int(row["id"])
-        except (ValueError, TypeError, KeyError):
-            continue
-        name_to_id[scientific] = label_id
-        name_to_id[full] = label_id
-
-    logging.info(
-        f"Loaded species_labels.csv: {len(zoo)} zoo-choice mappings, "
-        f"{len(name_to_id)} name → label_id mappings."
-    )
-    return SpeciesLabels(zoo, name_to_id)
 
 
 def validate_model_path(model_path: str | Path) -> Path:

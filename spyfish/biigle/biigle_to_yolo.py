@@ -526,26 +526,32 @@ def biigle_to_yolo(
         f"({n_classes} classes) from {class_map_path}"
     )
 
-    n_training = sum(1 for s in candidates.values() if "training" in s)
+    n_expert = sum(1 for s in candidates.values() if "expert" in s)
     logging.info(
         f"{len(candidates)} drop(s) with annotations, "
-        f"{n_training} via training_raw (preferred), "
-        f"{len(candidates) - n_training} via expert_raw."
+        f"{n_expert} via expert_raw (preferred), "
+        f"{len(candidates) - n_expert} via training_raw."
     )
 
     both = sorted(d.name for d, s in candidates.items() if len(s) > 1)
     if both:
         logging.warning(
-            f"{len(both)} drop(s) have BOTH training_raw and expert_raw. "
-            f"training_raw wins and the expert review is NOT converted to labels "
-            f"as a June 2026 stopgap, see claude_docs/annotation_source_consolidation_brief.md. "
+            f"{len(both)} drop(s) have BOTH expert_raw and training_raw. "
+            f"expert_raw wins — a focused per-drop review beats bulk survey "
+            f"labelling — and the training_raw file is NOT converted to labels "
+            f"for these drops. If the training volume holds annotations the "
+            f"review does not, they are lost from this training run; see "
+            f"claude_docs/annotation_source_consolidation_brief.md. "
             f"Affected: {', '.join(both[:10])}"
             + (f" (+{len(both) - 10} more)" if len(both) > 10 else "")
         )
 
     for drop_dir, srcs in sorted(candidates.items()):
-        chosen = srcs.get("training") or srcs["expert"]
-        which = "training_raw" if "training" in srcs else "expert_raw"
+        # Provenance beats vintage: the drop's own expert review wins over the
+        # survey-pooled training volume (decided 2026-08-22, replacing the
+        # June 2026 "training wins" stopgap).
+        chosen = srcs.get("expert") or srcs["training"]
+        which = "expert_raw" if "expert" in srcs else "training_raw"
         labels_dir = drop_dir / "labels"
         images_dir = drop_dir / "frames"
         # Wipe per-drop labels first so two sources / two runs can never mix

@@ -219,10 +219,23 @@ def crop_window(
     so those crops degenerate to a near-full-frame view, which is the right
     thing to show anyway.
 
-    The window is centred on the box and **clipped** at frame edges rather than
-    slid inwards. Sliding would keep the window square but push the animal
-    off-centre, and for a fish half out of shot it pulls in water on the wrong
-    side. ``pad_to_square`` restores the square afterwards.
+    Edge behaviour is **slide, then clip**. A window overhanging the frame is
+    first slid back inside, but only as far as the box's own margin allows, so
+    the animal never leaves the window; whatever overhang remains is clipped and
+    ``pad_to_square`` fills it.
+
+    Pure clipping (the previous behaviour) padded 64% of a real 421-crop set,
+    median 13% of the image. Most of that was not "the animal is at the frame
+    edge" but "a square window does not fit in a 16:9 frame": a 437 px window
+    overhangs whenever the box centre is within ~218 px of the top or bottom,
+    which is most fish, since they sit near the substrate. Black bars are wasted
+    screen on the phones this is designed for.
+
+    Pure sliding was rejected for the opposite reason. Our fish are often
+    genuinely half out of shot, and sliding a window fully inside then shows
+    water on the wrong side with the animal jammed against an edge. Capping the
+    slide at the box's margin keeps the animal enclosed and roughly central,
+    while removing the padding in the common case where it bought nothing.
 
     Returns integer (left, top, right, bottom), always inside the frame.
     """
@@ -232,10 +245,25 @@ def crop_window(
 
     cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     half = side / 2.0
-    left = int(round(max(0.0, cx - half)))
-    top = int(round(max(0.0, cy - half)))
-    right = int(round(min(float(frame_w), cx + half)))
-    bottom = int(round(min(float(frame_h), cy + half)))
+
+    def _slide(lo: float, hi: float, box_lo: float, box_hi: float, limit: float):
+        """Shift [lo, hi] back inside [0, limit] without uncovering the box."""
+        if lo < 0.0:
+            # Room to move right before the window's left edge passes the box's.
+            lo, hi = (lambda s: (lo + s, hi + s))(min(-lo, max(0.0, box_lo - lo)))
+        elif hi > limit:
+            lo, hi = (lambda s: (lo - s, hi - s))(
+                min(hi - limit, max(0.0, hi - box_hi))
+            )
+        return lo, hi
+
+    x_lo, x_hi = _slide(cx - half, cx + half, x1, x2, float(frame_w))
+    y_lo, y_hi = _slide(cy - half, cy + half, y1, y2, float(frame_h))
+
+    left = int(round(max(0.0, x_lo)))
+    top = int(round(max(0.0, y_lo)))
+    right = int(round(min(float(frame_w), x_hi)))
+    bottom = int(round(min(float(frame_h), y_hi)))
     return left, top, right, bottom
 
 

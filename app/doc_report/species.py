@@ -20,6 +20,7 @@ the peak across those intervals, never the sum. That peak is taken once, by
 
 import streamlit as st
 from ecology_data import (
+    OTHER_PROTECTION,
     PROTECTED,
     UNPROTECTED,
     load_common_names,
@@ -36,6 +37,7 @@ from .charts.species import (
     render_reserve_effect,
     render_species_abundance,
     render_species_accumulation,
+    render_species_depth,
     render_species_over_time,
 )
 from .data import experiments_frame, species_maxn
@@ -61,6 +63,7 @@ def render(ctx: dict) -> None:
             "Frequency vs abundance",
             "Co-occurrence",
             "Accumulation",
+            "Depth",
         ]
     )
 
@@ -126,8 +129,12 @@ def render(ctx: dict) -> None:
 
     # ── Protected against unprotected ────────────────────────────────────────
     section("Protected vs unprotected")
-    comparable = per_dep[per_dep["Group"].notna()]
-    unclassified = per_dep["Group"].isna().sum()
+    # The comparison is protected against unprotected, so it uses only those
+    # two. Partial regimes are their own group and are counted out loud below
+    # rather than being folded into whichever side would have taken them.
+    comparable = per_dep[per_dep["Group"].isin([PROTECTED, UNPROTECTED])]
+    partial = int((per_dep["Group"] == OTHER_PROTECTION).sum())
+    unknown = int(per_dep["Group"].isna().sum())
 
     if comparable["Group"].nunique() < 2:
         st.info(
@@ -141,11 +148,23 @@ def render(ctx: dict) -> None:
             "line inside it is the median. Two deployments differing only in "
             "protection is the comparison that makes a difference attributable."
         )
-        if unclassified:
+        if partial or unknown:
+            left_out = []
+            if partial:
+                left_out.append(
+                    f"**{partial:,}** sit in a partial or unclear regime "
+                    "(high protection area, Type II MPA, taiapure, mataitai, "
+                    "fisheries closure, seafloor protection)"
+                )
+            if unknown:
+                left_out.append(f"**{unknown:,}** have no protection status recorded")
             st.caption(
-                f"{unclassified:,} deployments are left out: their "
-                "`protection_status` does not clearly say protected or not, and "
-                "guessing would invent the result."
+                "Left out of this comparison: "
+                + "; ".join(left_out)
+                + ". They restrict some fishing without clearly protecting the "
+                "species counted here, so putting them on either side would "
+                "answer the question with deployments that cannot answer it. "
+                "They are still in every other chart on this page."
             )
 
         render_protection_boxes(comparable)
@@ -258,3 +277,8 @@ def render(ctx: dict) -> None:
     ):
         st.divider()
         chart(exp)
+
+    # Needs the deployments frame as well (depth lives there, not on the
+    # annotations), so it sits outside the single-frame loop above.
+    st.divider()
+    render_species_depth(exp, ctx["deployments"])

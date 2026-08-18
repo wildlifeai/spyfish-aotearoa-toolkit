@@ -42,14 +42,47 @@ def protection_dashes(statuses) -> dict:
     reserve.
 
     Partial protection gets a dash: it is neither, and drawing it as one of the
-    two would claim something the status does not say.
+    two would claim something the status does not say. The grouping is
+    `protection_group`, the same config-driven definition every comparison
+    uses, so a status cannot be solid on one chart and dotted on the next.
     """
-    from .data import protection_rank
+    import pandas as pd
+    from ecology_data import OTHER_PROTECTION, PROTECTED, protection_group
+
+    groups = protection_group(pd.Series(list(statuses)))
+    dashes = {PROTECTED: "solid", OTHER_PROTECTION: "dash"}
+    return {status: dashes.get(group, "dot") for status, group in zip(statuses, groups)}
+
+
+def group_colors() -> dict:
+    """One colour pair for the Protected/Unprotected comparison.
+
+    Three charts used to carry three different hex pairs for the same
+    comparison. These are the theme's own anchors — the strongest-protection
+    blue and the no-protection orange from `PROTECTION_COLORS` — so a chart
+    coloured by group and one coloured by exact status agree about which end
+    of the spectrum each side sits on. The partial group gets the neutral
+    grey: it is neither side.
+    """
+    from ecology_data import OTHER_PROTECTION, PROTECTED, UNPROTECTED
+    from theme import NEUTRAL, PROTECTION_COLORS
 
     return {
-        status: ("solid", "dash", "dot", "dot")[protection_rank(status)]
-        for status in statuses
+        PROTECTED: PROTECTION_COLORS["Type I MPA (Marine Reserve)"],
+        UNPROTECTED: PROTECTION_COLORS["No protection"],
+        OTHER_PROTECTION: NEUTRAL,
     }
+
+
+def group_dashes() -> dict:
+    """The group-level dash convention: solid = protected, dot = not.
+
+    The per-status version is `protection_dashes` above; this one keys on the
+    already-bucketed group labels for charts drawing one line per side.
+    """
+    from ecology_data import OTHER_PROTECTION, PROTECTED, UNPROTECTED
+
+    return {PROTECTED: "solid", OTHER_PROTECTION: "dash", UNPROTECTED: "dot"}
 
 
 def source_coverage_note(df, label: str = "these numbers") -> None:
@@ -136,21 +169,17 @@ def style(
     return fig
 
 
-def outside_labels(fig: go.Figure, **traces) -> go.Figure:
-    """Bar labels outside the bar, and not clipped by the axis.
+def top_n_slider(
+    label: str, n_items: int, default: int, key: str, help: str | None = None
+) -> int:
+    """The "Show top N" slider, with the bounds every chart was hand-rolling.
 
-    `cliponaxis=False` is the half of this that is easy to forget: without it
-    the label on the longest bar — the one most worth reading — is the one the
-    plot area cuts off.
+    Floor of 5 so the chart is never a single bar, ceiling at the item count,
+    default clamped into range — four charts wrote this triple with small
+    inconsistencies; one definition keeps the sliders behaving alike.
     """
-    fig.update_traces(textposition="outside", cliponaxis=False, **traces)
-    return fig
+    import streamlit as st
 
-
-def no_axis_titles(fig: go.Figure, x: bool = True, y: bool = True) -> go.Figure:
-    """Drop axis titles that only repeat the section heading above the chart."""
-    if x:
-        fig.update_xaxes(title=None)
-    if y:
-        fig.update_yaxes(title=None)
-    return fig
+    return st.slider(
+        label, 5, max(5, n_items), min(default, n_items), key=key, help=help
+    )

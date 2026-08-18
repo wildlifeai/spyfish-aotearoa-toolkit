@@ -284,11 +284,12 @@ def _select_frames_with_strategy(
     spacing = (
         strategy_params["temporal_spacing_seconds"] / strategy_params["spacing_divisor"]
     )
-    n_maxn_per_sp = strategy_params["per_species_maxn"]
-    n_confusing_per_sp = strategy_params["per_species_confusing"]
+    effort = strategy_params["effort_multiplier"]
+    n_maxn_per_sp = strategy_params["per_species_maxn"] * effort
+    n_confusing_per_sp = strategy_params["per_species_confusing"] * effort
     n_start = strategy_params["start_export"]
     fish_class = config.catchall_class
-    n_bands = strategy_params["fish_bands"]
+    n_bands = strategy_params["fish_bands"] * effort
     same_frame = strategy_params["same_frame_seconds"]
     merge_window = strategy_params["peak_merge_seconds"]
 
@@ -539,6 +540,7 @@ def _run_selection(
     drop_id: str,
     output_selections_path: str,
     source_label: str,
+    allow_fallback_window: bool = False,
 ) -> pd.DataFrame:
     """Apply strategy, write selections CSV, return result.
 
@@ -546,6 +548,13 @@ def _run_selection(
     Callers are responsible for building and validating frame_df; this
     function owns the strategy selection, _select_frames_with_strategy call,
     and file write.
+
+    `allow_fallback_window` decides what happens when a deployment has no
+    `sampling_end`, which is the case for ~41% of rows. False (default, the
+    expert-review path) raises: a review with no blind frames is a silently
+    weaker review, and expert time is too scarce to spend on one. True (the
+    training path) falls back to the expected deployment duration, since those
+    frames become training labels rather than a reported abundance figure.
     """
     deployment = DatabaseManager().get_deployment(drop_id)
     if not deployment or deployment.get("sampling_start") is None:
@@ -571,15 +580,32 @@ def _run_selection(
     # missed matters most.
     strategy = config.frame_strategy
     shortfall = max(
-        strategy["blind_export"],
+        strategy["blind_export"] * strategy["effort_multiplier"],
         config.min_frames_per_drop - len(selections_df),
     )
     if sampling_end is None:
+        if not allow_fallback_window:
+            # Expert review: refuse rather than degrade. Without a window there
+            # are no blind frames, and a review built only from ML-nominated
+            # moments can confirm precision but can never reveal a fish the
+            # model missed, while looking entirely normal from the outside.
+            raise ValueError(
+                f"Missing sampling_end for {drop_id}, refusing to select frames "
+                "for expert review: with no sampling window the review would "
+                "contain only ML-nominated moments and could never reveal a "
+                "missed fish. Fix the deployment metadata, or run the training "
+                "path, which falls back to the expected deployment duration."
+            )
+        # Training: the frames feed labels, not a reported abundance figure, so
+        # an assumed window is better than no blind frames at all.
+        sampling_end = float(config.buv_video_duration_seconds)
         logging.warning(
-            f"{drop_id}: no sampling_end, skipping blind frames, so this drop's "
-            "review contains only ML-nominated moments."
+            f"{drop_id}: no sampling_end; assuming the expected deployment "
+            f"duration ({sampling_end:.0f}s) so blind frames still get taken. "
+            "Fix the deployment metadata to make this exact."
         )
-    elif shortfall > 0:
+
+    if shortfall > 0:
         blind_df = blind_selections(
             drop_id=drop_id,
             sampling_start=sampling_start,
@@ -759,6 +785,7 @@ def select_frames(
     raw_csv_path: str,
     output_selections_path: str,
     drop_id: str,
+    allow_fallback_window: bool = False,
 ) -> pd.DataFrame:
     """
     Select frames from the raw ML CSV using the export strategy.
@@ -771,6 +798,11 @@ def select_frames(
         raw_csv_path: Path to the raw YOLO CSV produced by ML inference.
         output_selections_path: Path to write the selections CSV.
         drop_id: Deployment identifier.
+        allow_fallback_window: When the deployment has no `sampling_end`,
+            assume the expected deployment duration instead of raising. Set by
+            the training-frame extractor only — the expert-review path must
+            fail, because a review without blind frames cannot reveal a fish
+            the model missed and nothing downstream would show that.
 
     Returns:
         DataFrame of selected frame moments.
@@ -804,4 +836,71 @@ def select_frames(
         config.csv_confidence_agreement_column
     ].round(4)
 
-    return _run_selection(frame_df, drop_id, output_selections_path, "ML raw CSV")
+    return _run_selection(
+        frame_df,
+        drop_id,
+        output_selections_path,
+        "ML raw CSV",
+        allow_fallback_window=allow_fallback_window,
+    )
+
+
+def write_blind_selections(
+    drop_id: str, output_path: Path, n_frames: Optional[int] = None
+) -> pd.DataFrame:
+    """Selections CSV built without consulting the model, the --test-frames path.
+
+    Produces the same CSV `select_frames` does, so everything downstream is
+    shared; only where the timestamps came from differs.
+    """
+    deployment = DatabaseManager().get_deployment(drop_id)
+    if deployment is None:
+        raise ValueError(f"{drop_id}: not found in deployments DB")
+    start = deployment.get("sampling_start")
+    end = deployment.get("sampling_end")
+    if start is None or end is None:
+        raise ValueError(
+            f"{drop_id}: missing sampling window (start={start}, end={end})"
+        )
+
+    n = n_frames or config.training_extraction_n_frames
+    df = blind_selections(
+        drop_id=drop_id,
+        sampling_start=float(start),
+        sampling_end=float(end),
+        taken_times=pd.Series(dtype=float),
+        spacing=config.frame_strategy["temporal_spacing_seconds"],
+        n=n,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    logging.info(f"{drop_id}: {len(df)} blind selection(s) → {output_path.name}")
+    return df
+
+
+def upsert_selections(
+    prior: Optional[pd.DataFrame], fresh: pd.DataFrame
+) -> pd.DataFrame:
+    """Merge `fresh` into the prior pass's selections, keyed on timestamp.
+
+    Biigle volumes APPEND rather than replace, so a second pass over a drop adds
+    frames to the volume. A selections CSV that got clobbered would then no
+    longer describe what the volume holds. Upserting keeps it a true record of
+    every frame ever sent for this drop, with `SelectionReason` distinguishing
+    which pass each came from.
+
+    `prior` must be captured BEFORE the selection step runs: both selection
+    functions write `fresh` to the selections CSV themselves, so reading the
+    file here would always see `fresh` and the merge would keep nothing.
+    """
+    if prior is None or prior.empty:
+        return fresh
+    key = config.csv_clip_max_time_column
+    kept = prior[~prior[key].round(3).isin(fresh[key].round(3))]
+    merged = pd.concat([kept, fresh], ignore_index=True).sort_values(key)
+    if len(kept):
+        logging.info(
+            f"Selections upsert: kept {len(kept)} selection(s) from an earlier "
+            f"pass, added {len(fresh)}."
+        )
+    return merged.reset_index(drop=True)

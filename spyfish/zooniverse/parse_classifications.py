@@ -1040,14 +1040,18 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
     re-running is safe. `sync_annotation_counts([drop_id])` advances
     citsci_status → citsci_complete automatically when count > 0. The
     all-NOTHINGHERE case (empty CSV, fully retired with zero positive
-    findings) needs an explicit advance since the data-presence rule wouldn't
-    trigger, that's still a valid completion, just with no observations.
+    findings) writes one null-deployment row — "reviewed, nothing seen" is a
+    result, and the row lets the same data-presence rule advance the status
+    that every other completion goes through.
 
     Returns:
-        Number of annotation rows ingested (0 if CSV not found or empty).
+        Number of annotation rows ingested (0 if CSV not found; 1 for the
+        null-deployment row of a confirmed-empty review).
     """
-    from spyfish.config.base import CitSciStatus
-    from spyfish.database.annotation_manager import AnnotationDatabaseManager
+    from spyfish.database.annotation_manager import (
+        AnnotationDatabaseManager,
+        null_deployment_row,
+    )
     from spyfish.database.manager import DatabaseManager as PipelineDB
 
     maxn_csv = config.get_zooniverse_maxn_csv_path(drop_id)
@@ -1065,19 +1069,12 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
 
     if df.empty:
         logging.info(
-            f"ingest_zooniverse: MaxN CSV is empty for {drop_id} (all-NOTHINGHERE)"
+            f"ingest_zooniverse: MaxN CSV is empty for {drop_id} "
+            "(all-NOTHINGHERE) — recording a null-deployment row."
         )
+        ann_db.add_annotations([null_deployment_row(drop_id, "citsci")])
         pipeline_db.sync_annotation_counts([drop_id])
-        # Confirmed-empty review still completes the citsci stage,
-        # data-presence rule in sync_annotation_counts won't trigger
-        # because count = 0, so advance explicitly.
-        pipeline_db.bulk_update_section_status(
-            [drop_id],
-            CitSciStatus.COLUMN,
-            CitSciStatus.COMPLETE,
-            skip_if_in=[CitSciStatus.COMPLETE],
-        )
-        return 0
+        return 1
 
     annotations = []
     for _, row in df.iterrows():

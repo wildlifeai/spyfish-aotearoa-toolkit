@@ -102,6 +102,42 @@ def test_map_null_timestamp_uses_frame_key():
     assert mapped["time_of_max"] == "image_uuid_001.jpg"
 
 
+def test_map_genus_level_label_kept():
+    """Genus-level IDs are real observations, kept without a registry entry."""
+    _, mapped = _map_biigle_to_spyfish_schema(
+        pd.Series({"label_name": "Conger sp", "annotation_id": "7"}),
+        "label_name",
+        "DROP_01",
+        "00:00:05.000",
+        "frame_5.0s.jpg",
+    )
+    assert mapped["scientific_name"] == "Conger sp"
+
+
+def test_map_genus_level_trailing_dot_normalised():
+    """ "Arripis sp." and "Arripis sp" must land as one name in the DB."""
+    _, mapped = _map_biigle_to_spyfish_schema(
+        pd.Series({"label_name": "Arripis sp.", "annotation_id": "8"}),
+        "label_name",
+        "DROP_01",
+        "00:00:05.000",
+        "frame_5.0s.jpg",
+    )
+    assert mapped["scientific_name"] == "Arripis sp"
+
+
+def test_map_bare_workflow_label_still_dropped():
+    """The genus pattern must not readmit bare workflow labels."""
+    result = _map_biigle_to_spyfish_schema(
+        pd.Series({"label_name": "Interesting Sighting", "annotation_id": "9"}),
+        "label_name",
+        "DROP_01",
+        "00:00:05.000",
+        "frame_5.0s.jpg",
+    )
+    assert result is None
+
+
 # ── aggregate_raw_to_maxn_rows ───────────────────────────────────────────────────
 
 

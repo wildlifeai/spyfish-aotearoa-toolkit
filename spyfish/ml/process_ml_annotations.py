@@ -11,7 +11,10 @@ import numpy as np
 import pandas as pd
 
 from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.database.annotation_manager import (
+    AnnotationDatabaseManager,
+    null_deployment_row,
+)
 from spyfish.database.manager import DatabaseManager
 from spyfish.ml.draw_frames import draw_boxes_on_video_frames
 from spyfish.utils import seconds_to_time
@@ -153,22 +156,12 @@ def _ingest_ml_annotations(
     # detection re-run wipes stale rows from a prior run of THIS model.
     ann_db.clear_annotations(drop_id, "ml", external_id=model_name)
     if not annotations_to_add:
-        # Zero detections is still a result. A null-species row records
-        # "reviewed, nothing seen" — the same convention expert reviews use —
-        # so downstream consumers can tell it apart from "ML never ran" and
+        # Zero detections is still a result. The null-deployment row records
+        # "reviewed, nothing seen" — the same convention the other sources use
+        # — so downstream consumers can tell it apart from "ML never ran" and
         # detection-rate denominators include this deployment as a real zero.
         annotations_to_add.append(
-            {
-                "drop_id": drop_id,
-                "scientific_name": None,
-                "time_of_max": None,
-                "time_of_max_seconds": None,
-                "max_interval": 0,
-                "annotated_by": "ml",
-                "interval_annotation": "",
-                "confidence_agreement": None,
-                "external_id": model_name,
-            }
+            null_deployment_row(drop_id, "ml", external_id=model_name)
         )
     ann_db.add_annotations(annotations_to_add)
     logging.debug(

@@ -24,9 +24,13 @@ from ecology_data import (  # noqa: E402
 )
 from theme import protection_sort_key  # noqa: E402
 
-from .charts.sites import render_site_leaderboard, render_site_map  # noqa: E402
+from .charts.sites import (  # noqa: E402
+    render_click_to_filter,
+    render_site_leaderboard,
+    render_site_map,
+)
 from .charts.species import render_yearly_trend  # noqa: E402
-from .data import experiments_frame  # noqa: E402
+from .data import effort_per, experiments_frame, real_species  # noqa: E402
 from .layout import chips, extra_filters, section  # noqa: E402
 from .site_data import (  # noqa: E402
     apply_filters,
@@ -53,6 +57,7 @@ def render(ctx: dict | None = None) -> None:
             "Site map",
             "Leaderboard",
             "Year trend",
+            "Click to filter",
         ]
     )
 
@@ -144,20 +149,34 @@ def render(ctx: dict | None = None) -> None:
 
     section("Site detail")
 
+    # Species per deployment, not mean MaxN: the old column summed MaxN across
+    # species before dividing, the number the MPA view refuses. Richness counts
+    # only real species (generic and unidentified classes are N unknowns under
+    # one label), summed per deployment then divided by the analysed count.
+    real = real_species(df)
     site_rows = (
-        df.groupby(["site_id", "region", "protection_status"])
-        .agg(species=("scientific_name", "nunique"), total_maxn=("maxn", "sum"))
+        real.groupby(["site_id", "region", "protection_status"])
+        .agg(species=("scientific_name", "nunique"))
         .reset_index()
     )
-    site_effort = (
-        effort_view.groupby("site_id")["drop_id"].nunique().reset_index(name="analysed")
+    rich_sum = (
+        real.groupby(["site_id", "drop_id"])["scientific_name"]
+        .nunique()
+        .groupby("site_id")
+        .sum()
+        .reset_index(name="rich_sum")
     )
-    site_rows = site_rows.merge(site_effort, on="site_id", how="left")
+    site_rows = site_rows.merge(rich_sum, on="site_id", how="left")
+    site_rows = site_rows.merge(
+        effort_per(effort_view, "site_id"), on="site_id", how="left"
+    )
     site_rows["analysed"] = site_rows["analysed"].fillna(0)
-    site_rows["mean_maxn"] = site_rows["total_maxn"] / site_rows["analysed"].clip(
-        lower=1
+    site_rows["species_per_dep"] = site_rows["rich_sum"].fillna(0) / site_rows[
+        "analysed"
+    ].clip(lower=1)
+    site_rows = site_rows.drop(columns="rich_sum").sort_values(
+        "species_per_dep", ascending=False
     )
-    site_rows = site_rows.sort_values("mean_maxn", ascending=False)
 
     st.dataframe(
         site_rows,
@@ -169,7 +188,9 @@ def render(ctx: dict | None = None) -> None:
             "protection_status": st.column_config.TextColumn("Protection status"),
             "analysed": st.column_config.NumberColumn("Analysed"),
             "species": st.column_config.NumberColumn("Species"),
-            "mean_maxn": st.column_config.NumberColumn("Mean MaxN", format="%.2f"),
+            "species_per_dep": st.column_config.NumberColumn(
+                "Species/dep", format="%.1f"
+            ),
         },
         column_order=[
             "site_id",
@@ -177,7 +198,7 @@ def render(ctx: dict | None = None) -> None:
             "protection_status",
             "analysed",
             "species",
-            "mean_maxn",
+            "species_per_dep",
         ],
     )
 
@@ -197,6 +218,7 @@ def render(ctx: dict | None = None) -> None:
     # Reads the annotations in the shape that page works in, one row per
     # (deployment, source, species) with `maxn`, built by `experiments_frame`.
     ann = (ctx or {}).get("annotations")
+    exp = None
     if ann is not None and not ann.empty:
         st.divider()
         exp = experiments_frame(ann)
@@ -208,3 +230,13 @@ def render(ctx: dict | None = None) -> None:
 
     st.divider()
     render_site_map(df_context, effort_view, show_coords)
+
+    # An example of a technique rather than a finding: click a site, everything
+    # below filters. Last on the page because it is here to be judged, not to
+    # be relied on. See the note above `render_click_to_filter`. Skipped when
+    # there are no annotations, since `exp` is what it filters. `show_coords`
+    # is passed down because the gate toggle is a keyed widget already rendered
+    # above — drawing it a second time crashes the page.
+    if exp is not None:
+        st.divider()
+        render_click_to_filter(exp, show_coords)

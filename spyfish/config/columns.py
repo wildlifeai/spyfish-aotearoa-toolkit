@@ -110,6 +110,20 @@ class ColumnsConfig(BaseConfig):
         return get_required(self.reporting, "non_species_classes", "reporting")
 
     @property
+    def known_protection_statuses(self) -> list:
+        """Every ProtectionStatus spelling the pipeline recognises."""
+        return get_required(self._yaml_config, "known_protection_statuses", "")
+
+    @property
+    def unprotected_statuses(self) -> list:
+        """ProtectionStatus values treated as unprotected in inside/outside splits.
+
+        Named explicitly rather than "everything not protected", so a partial
+        regime lands in neither list and is reported as Other.
+        """
+        return get_required(self.reporting, "unprotected_statuses", "reporting")
+
+    @property
     def unidentified_label(self) -> str:
         """What the report calls the merged non-species classes."""
         return get_required(self.reporting, "unidentified_label", "reporting")

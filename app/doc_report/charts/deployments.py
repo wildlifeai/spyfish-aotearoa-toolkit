@@ -12,6 +12,7 @@ from theme import INGEST_STATUS_COLORS
 from utils import CACHE_TTL_SECONDS
 
 from spyfish.config.base import (
+    NULL_DEPLOYMENT,
     CitSciStatus,
     ExpertStatus,
     IngestStatus,
@@ -36,6 +37,13 @@ def _stage_flags(dep: pd.DataFrame) -> pd.DataFrame:
     out = dep.copy()
     out["ok"] = out["ingest_status"] == IngestStatus.OK
     out["has_video"] = out["video_presence"] == VideoPresence.PRESENT
+    # Present OR archived: archived footage exists and its annotations are
+    # real work. Tapuae made the difference concrete — every one of its 103
+    # expert-annotated deployments is archived, so a funnel keyed on
+    # "present" showed zero expert work for the whole reserve.
+    out["footage_exists"] = out["video_presence"].isin(
+        [VideoPresence.PRESENT, VideoPresence.ARCHIVED]
+    )
     for source in ("ml", "citsci", "expert"):
         out[f"{source}_done"] = out[f"{source}_annotations"].fillna(0) > 0
     return out
@@ -49,13 +57,14 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
     sits beside other charts rather than being the subject.
 
     Each step is a subset of the one above, enforced, not implied, which is
-    why the three annotation tiers are intersected with "Video present" rather
-    than counted over all deployments. Without the intersection a deployment
-    annotated and later archived counts in "ML annotated" but not in "Video
-    present", and a lower tier can overtake the one above it. "Video present"
-    is a proxy for "fully in play" (the strict bound is "not a bad
-    deployment"), and the annotated-then-archived work it hides is real, so
-    the caption below reports it instead of letting it silently vanish.
+    why the three annotation tiers are intersected with "Footage exists"
+    rather than counted over all deployments — without an intersection a
+    lower tier can overtake the one above it. "Exists" means present OR
+    archived: annotation happens while footage is present and survives its
+    archival, so keying the tiers on "present" erased finished work — Tapuae's
+    103 expert-annotated deployments, all archived, showed as zero. What still
+    slips the tiers (annotated but failed ingest, or footage since removed)
+    is reported in the caption below rather than silently vanishing.
 
     The first two tiers are losses rather than progress, and they are separate
     steps because they are separate problems: a bad deployment went wrong in
@@ -73,7 +82,7 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
     bad = df["is_bad_deployment"].fillna(0).astype(bool)
     usable = ~bad
     ingested = usable & df["ok"]
-    with_video = ingested & df["has_video"]
+    footage = ingested & df["footage_exists"]
 
     stages = pd.DataFrame(
         {
@@ -81,7 +90,7 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
                 "All deployments",
                 "Not a bad deployment",
                 "Passed ingest",
-                "Video present",
+                "Footage exists",
                 "ML annotated",
                 "CitSci annotated",
                 "Expert annotated",
@@ -90,10 +99,10 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
                 len(df),
                 int(usable.sum()),
                 int(ingested.sum()),
-                int(with_video.sum()),
-                int((with_video & df["ml_done"]).sum()),
-                int((with_video & df["citsci_done"]).sum()),
-                int((with_video & df["expert_done"]).sum()),
+                int(footage.sum()),
+                int((footage & df["ml_done"]).sum()),
+                int((footage & df["citsci_done"]).sum()),
+                int((footage & df["expert_done"]).sum()),
             ],
         }
     )
@@ -122,18 +131,23 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
             f"recovered. A further **{int((usable & ~df['ok']).sum()):,}** fail "
             f"ingest on their metadata and are recoverable by fixing the "
             f"record. Of what remains, "
-            f"**{int((ingested & ~df['has_video']).sum()):,}** have no footage "
-            f"in S3."
+            f"**{int((ingested & ~df['footage_exists']).sum()):,}** have no "
+            f"footage in S3, and "
+            f"**{int((ingested & df['footage_exists'] & ~df['has_video']).sum()):,}** "
+            f"of the footage that exists is archived in cold storage — its "
+            f"annotations still count in the tiers, but new processing needs "
+            f"a restore first."
         )
         annotated = df["ml_done"] | df["citsci_done"] | df["expert_done"]
-        outside = int((annotated & ~with_video).sum())
+        outside = int((annotated & ~footage).sum())
         if outside:
             st.caption(
                 f"**{outside:,} annotated deployments are not counted in the "
-                "annotation tiers**: their video has since been archived or "
-                "removed, or their record failed ingest. The work exists, "
-                "the funnel only counts deployments still fully in play. The "
-                "Deployments view breaks these out."
+                "annotation tiers**: their footage has since been removed, "
+                "their record failed ingest, or the deployment is flagged "
+                "bad. The work exists; the funnel only counts deployments "
+                "whose footage is still held. The Deployments view breaks "
+                "these out."
             )
 
 
@@ -573,9 +587,16 @@ def render_annotation_detail(dep: pd.DataFrame) -> None:
     if maxn.empty:
         st.info(f"No annotations found for {selected}.")
         return
-    # A null species is an absence record — the source reviewed the footage
-    # and saw nothing. Label it rather than showing an empty cell.
-    maxn["scientific_name"] = maxn["scientific_name"].fillna("(nothing seen)")
+    # An absence record — the source reviewed the footage and saw nothing.
+    # Reads straight from get_maxn_summary, so it sees the raw sentinel (new
+    # rows) or NULL (pre-convention rows); label both rather than showing the
+    # sentinel string or an empty cell.
+    maxn["scientific_name"] = (
+        maxn["scientific_name"]
+        .replace(NULL_DEPLOYMENT, "(nothing seen)")
+        .fillna("(nothing seen)")
+    )
+    maxn["time_of_max"] = maxn["time_of_max"].replace(NULL_DEPLOYMENT, "—")
 
     st.dataframe(
         maxn[

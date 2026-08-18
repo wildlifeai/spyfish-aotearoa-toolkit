@@ -19,27 +19,35 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from ecology_data import PROTECTED, UNPROTECTED
+from ecology_data import OTHER_PROTECTION, PROTECTED, UNPROTECTED, protection_group
 from theme import protection_color_map, species_color_map
 
 from spyfish.config.wrapper import config
 
-from ..charting import protection_dashes, source_coverage_note, style
-from ..data import protection_rank as _prot_rank
-from ..data import real_species
+from ..charting import (
+    group_colors,
+    group_dashes,
+    protection_dashes,
+    source_coverage_note,
+    style,
+    top_n_slider,
+)
+from ..data import effort_per, real_species
 from ..layout import section
 
 # Protected / Unprotected come from `ecology_data.protection_group`, which is
 # driven by `config.protected_statuses`, the same definition the MPA view's
 # trend uses, so the two views cannot classify one deployment on opposite
 # sides of the comparison. Anything unrecognised is left out rather than
-# guessed at, because guessing wrong here invents the finding.
-GROUP_COLOURS = {PROTECTED: "#0B3D6B", UNPROTECTED: "#D96C3F"}
+# guessed at, because guessing wrong here invents the finding. Colour and dash
+# come from the shared convention in `charting`, so this view and the MPA
+# trends cannot disagree about which side is which.
+GROUP_COLOURS = group_colors()
 # Shape as well as colour, so protection is readable without relying on hue:
 # circle inside an MPA, square outside. Matches the reserve-effect chart on
 # the Experiments page.
 GROUP_SYMBOLS = {PROTECTED: "circle", UNPROTECTED: "square"}
-GROUP_DASHES = {PROTECTED: "solid", UNPROTECTED: "dot"}
+GROUP_DASHES = group_dashes()
 
 
 def render_protection_boxes(comparable: pd.DataFrame) -> None:
@@ -77,7 +85,6 @@ def render_protection_boxes(comparable: pd.DataFrame) -> None:
 def render_species_by_site(
     picked: pd.DataFrame,
     all_species: pd.DataFrame,
-    common: dict,
     all_species_mode: bool,
 ) -> None:
     """Where the chosen species are seen, and how much.
@@ -90,16 +97,25 @@ def render_species_by_site(
     """
     st.markdown("**Where these species are seen**")
     if all_species_mode:
+        # "All species combined" made a degenerate heatmap: one column whose
+        # every cell tends toward 100%, since almost every annotated deployment
+        # records SOMETHING. Break out the most frequently seen species
+        # instead, which is the question the chart is for.
+        top = picked.groupby("scientific_name")["drop_id"].nunique().nlargest(12).index
+        picked = picked[picked["scientific_name"].isin(top)].copy()
+        picked["Species"] = (
+            picked["display_name"]
+            if "display_name" in picked.columns
+            else picked["scientific_name"]
+        )
         st.caption(
-            "Select species above to break this down. It currently shows every "
-            "species combined, which is a site summary rather than a species one."
+            "No species selected above, so this shows the **12 most frequently "
+            "seen species**. Pick species above to choose your own."
         )
 
     # Denominator is every annotated deployment at the site, not just those
     # recording the species, so a blank cell means "looked and did not see it".
-    deps_per_site = (
-        all_species.groupby("site_id")["drop_id"].nunique().rename("deployments")
-    )
+    deps_per_site = effort_per(all_species, "site_id", "deployments")
     grid = (
         picked.groupby(["site_id", "Species"])
         .agg(seen=("drop_id", "nunique"), mean_maxn=("maxn", "mean"))
@@ -129,6 +145,17 @@ def render_species_by_site(
     site_order = sorted(grid["site_id"].unique(), reverse=True)
     species_order = sorted(grid["Species"].unique())
 
+    # The deployment count rides on the site label — "SITE (n)" — rather than
+    # in a third aligned panel: neither a bar chart nor a one-column heatmap
+    # keeps its rows level with these heatmaps (each chart's bottom margin is
+    # sized by its own x labels), and a count inside the label cannot drift.
+    deps_by_site = grid.drop_duplicates("site_id").set_index("site_id")["deployments"]
+    # Compact on the axis — "SLI_012 (2)" — with the words in the hover: the
+    # hovertemplates below spell out what the bracketed number means.
+    label_of = {s: f"{s} ({int(n)})" for s, n in deps_by_site.items()}
+    grid = grid.assign(Site=grid["site_id"].map(label_of))
+    site_order = [label_of[s] for s in site_order]
+
     height = max(320, 22 * grid["site_id"].nunique())
     left, right = st.columns(2)
 
@@ -137,12 +164,12 @@ def render_species_by_site(
         fig = px.density_heatmap(
             grid,
             x="Species",
-            y="site_id",
+            y="Site",
             z="Frequency",
             histfunc="max",
             color_continuous_scale=["#EAF2FB", "#0B3D6B"],
             range_color=[0, 1],
-            category_orders={"site_id": site_order, "Species": species_order},
+            category_orders={"Site": site_order, "Species": species_order},
         )
         style(
             fig,
@@ -151,6 +178,10 @@ def render_species_by_site(
         )
         fig.update_xaxes(title=None)
         fig.update_yaxes(title=None)
+        fig.update_traces(
+            hovertemplate="Site (annotated deployments): %{y}<br>%{x}<br>"
+            "Seen in %{z:.0%} of them<extra></extra>"
+        )
         st.plotly_chart(fig, key="species_by_site_freq")
         st.caption(
             "Share of that site's annotated deployments recording the species. "
@@ -163,11 +194,11 @@ def render_species_by_site(
         fig = px.density_heatmap(
             grid,
             x="Species",
-            y="site_id",
+            y="Site",
             z="mean_maxn",
             histfunc="max",
             color_continuous_scale=["#EAF3EC", "#1B7F4B"],
-            category_orders={"site_id": site_order, "Species": species_order},
+            category_orders={"Site": site_order, "Species": species_order},
         )
         style(
             fig,
@@ -176,6 +207,10 @@ def render_species_by_site(
         )
         fig.update_xaxes(title=None)
         fig.update_yaxes(title=None)
+        fig.update_traces(
+            hovertemplate="Site (annotated deployments): %{y}<br>%{x}<br>"
+            "Mean MaxN when seen: %{z:.2f}<extra></extra>"
+        )
         st.plotly_chart(fig, key="species_by_site_maxn")
         st.caption(
             "Mean MaxN across the deployments that recorded it. **One colour "
@@ -186,13 +221,19 @@ def render_species_by_site(
 
     st.caption(
         "A blank cell is a site that was annotated and did not record the "
-        "species, which is a real absence rather than a gap. The two answer "
-        "different questions, and they disagree usefully: a species can be seen "
-        "almost everywhere in ones and twos, or rarely but in numbers."
+        "species, which is a real absence rather than a gap. The two heatmaps "
+        "answer different questions, and they disagree usefully: a species can "
+        "be seen almost everywhere in ones and twos, or rarely but in numbers. "
+        "**The number after each site name is its annotated deployments** — "
+        "the denominator behind that row. A share resting on two deployments "
+        "is far less certain than one resting on forty."
     )
 
     with st.expander("The numbers behind this"):
-        table = grid.rename(
+        # `Site` (the labelled axis value) is dropped in favour of the plain
+        # site_id: the table has a real column for the deployment count, so
+        # the label's annotation would repeat it.
+        table = grid.drop(columns="Site").rename(
             columns={
                 "site_id": "Site",
                 "seen": "Deployments seen in",
@@ -249,13 +290,15 @@ INDICATORS = {
 }
 
 
-def _real_species(per_species: pd.DataFrame) -> pd.DataFrame:
-    """Drop the detector's placeholder classes."""
-    return per_species[~per_species["scientific_name"].isin(config.non_species_classes)]
+def render_species_over_time(
+    per_species: pd.DataFrame, common: dict, with_sites: bool = True
+) -> tuple:
+    """Per-species trends, opening on the indicator species.
 
-
-def render_species_over_time(per_species: pd.DataFrame, common: dict) -> None:
-    """Per-species trends, opening on the indicator species."""
+    Returns `(picked, all_species_mode)` so a caller can render
+    `render_species_by_site` separately when `with_sites=False` — the front
+    page does, to put the site map between the two.
+    """
     section("Species over time")
     st.caption(
         "Abundance for chosen species by survey year, inside an MPA against "
@@ -263,11 +306,11 @@ def render_species_over_time(per_species: pd.DataFrame, common: dict) -> None:
         "is read as a signal of condition rather than as one more count."
     )
 
-    real = _real_species(per_species)
+    real = real_species(per_species)
     real = real[real["survey_year"].notna()]
     if real.empty:
         st.info("No species annotations with a survey year.")
-        return
+        return None, False
 
     available = sorted(real["scientific_name"].unique())
     chosen = st.multiselect(
@@ -321,14 +364,10 @@ def render_species_over_time(per_species: pd.DataFrame, common: dict) -> None:
     classified = per_species[
         per_species["Group"].notna() & per_species["survey_year"].notna()
     ]
-    deps_per_year = (
-        classified.groupby([classified["survey_year"].astype("Int64"), "Group"])[
-            "drop_id"
-        ]
-        .nunique()
-        .rename("deployments")
-        .reset_index()
-        .rename(columns={"survey_year": "Year"})
+    deps_per_year = effort_per(
+        classified.assign(Year=classified["survey_year"].astype("Int64")),
+        ["Year", "Group"],
+        "deployments",
     )
 
     totals = (
@@ -390,8 +429,10 @@ def render_species_over_time(per_species: pd.DataFrame, common: dict) -> None:
         "one busy deployment, whereas a species is either present or not."
     )
 
-    st.divider()
-    render_species_by_site(picked, per_species, common, all_species_mode)
+    if with_sites:
+        st.divider()
+        render_species_by_site(picked, per_species, all_species_mode)
+    return picked, all_species_mode
 
 
 def render_reserve_effect(per_species: pd.DataFrame, common: dict) -> None:
@@ -413,7 +454,7 @@ def render_reserve_effect(per_species: pd.DataFrame, common: dict) -> None:
         "stronger colour means a bigger difference."
     )
 
-    real = _real_species(per_species)
+    real = real_species(per_species)
     real = real[real["Group"].notna()]
     if real.empty:
         st.info("No classified deployments to compare.")
@@ -556,13 +597,7 @@ def render_detection_rate(df: pd.DataFrame) -> None:
             .values
         )
 
-        top_n = st.slider(
-            "Show top N species",
-            5,
-            max(5, len(rates)),
-            min(40, len(rates)),
-            key="rep_det_topn",
-        )
+        top_n = top_n_slider("Show top N species", len(rates), 40, "rep_det_topn")
         rates = rates.nlargest(top_n, "pct_seen").sort_values(
             "pct_seen", ascending=True
         )
@@ -614,9 +649,22 @@ def render_detection_rate(df: pd.DataFrame) -> None:
     # ── Inside vs outside reserve view ──────────────────────────────────────
     # Denominators come from df_full so reviewed-but-empty deployments count;
     # the seen/rate side uses the named-species frame.
-    df_full = df_full.copy()
-    df_full["reserve"] = df_full["protection_status"].apply(
-        lambda p: "inside" if _prot_rank(p) <= 1 else "outside"
+    df_full = df_full.assign(reserve=protection_group(df_full["protection_status"]))
+    partial = int((df_full["reserve"] == OTHER_PROTECTION).sum())
+    df_full = df_full[df_full["reserve"].isin([PROTECTED, UNPROTECTED])]
+    if partial:
+        st.caption(
+            f"{partial:,} annotation rows are left out of this split: a partial "
+            "or unclear protection regime is neither the reserve nor its "
+            "control. They are still in the programme-wide view above."
+        )
+    if df_full.empty:
+        st.warning("No deployments sit clearly inside or outside a reserve.")
+        return
+    # The rest of this chart was written against these two literals; mapping
+    # here keeps the classification in one place without rewriting the chart.
+    df_full["reserve"] = df_full["reserve"].map(
+        {PROTECTED: "inside", UNPROTECTED: "outside"}
     )
     df = df_full[df_full["scientific_name"].notna()]
 
@@ -657,12 +705,11 @@ def render_detection_rate(df: pd.DataFrame) -> None:
     spread["abs_diff"] = (spread["inside"] - spread["outside"]).abs()
     spread["max_pct"] = spread[["inside", "outside"]].max(axis=1)
 
-    top_n = st.slider(
+    top_n = top_n_slider(
         "Show top N species",
-        5,
-        max(5, len(spread)),
-        min(25, len(spread)),
-        key="rep_det_topn_io",
+        len(spread),
+        25,
+        "rep_det_topn_io",
         help="Ranked by max detection rate across the two protection classes.",
     )
     ordering = spread.sort_values("max_pct", ascending=True).index.tolist()
@@ -676,7 +723,12 @@ def render_detection_rate(df: pd.DataFrame) -> None:
         y="display_name",
         color="reserve",
         barmode="group",
-        color_discrete_map={"inside": "#1976D2", "outside": "#EF5350"},
+        # The shared group pair, keyed to this chart's lowercase categories:
+        # "inside" is the protected side, "outside" the unprotected one.
+        color_discrete_map={
+            "inside": GROUP_COLOURS[PROTECTED],
+            "outside": GROUP_COLOURS[UNPROTECTED],
+        },
         orientation="h",
         category_orders={
             "display_name": species_order,
@@ -905,12 +957,11 @@ def render_cooccurrence(df: pd.DataFrame) -> None:
         st.warning(f"Need ≥ 2 species each observed at ≥ {min_deps} deployments.")
         return
 
-    top_n = st.slider(
+    top_n = top_n_slider(
         "Show top N species (by occurrence)",
-        5,
-        max(5, df["display_name"].nunique()),
-        min(25, df["display_name"].nunique()),
-        key="rep_co_topn",
+        df["display_name"].nunique(),
+        25,
+        "rep_co_topn",
     )
     top_species = species_counts[species_counts.index.isin(keep)].nlargest(top_n).index
     df = df[df["display_name"].isin(top_species)]
@@ -946,9 +997,17 @@ def render_cooccurrence(df: pd.DataFrame) -> None:
         zmax=1,
         aspect="auto",
         labels={"x": "Species B", "y": "Species A", "color": "Co-occurrence"},
-        height=max(400, len(order) * 22 + 120),
+        # Row budget plus a fixed allowance for the angled x labels: Plotly
+        # auto-expands the bottom margin to fit them, and that expansion comes
+        # out of the plot area — at 22px/row the labels were most of the chart
+        # and the heatmap itself was a strip.
+        height=max(480, len(order) * 30 + 260),
     )
-    fig.update_xaxes(tickangle=-60)
+    # A tick per species, forced. Plotly silently thins categorical ticks when
+    # rows get tight — at top-11 it showed six labels — and a heatmap row
+    # without its name is unreadable. `dtick=1` walks the category indices.
+    fig.update_xaxes(tickangle=-60, tickmode="linear", dtick=1)
+    fig.update_yaxes(tickmode="linear", dtick=1)
     style(fig, margin={"l": 10, "r": 10, "t": 10, "b": 10})
     st.plotly_chart(fig, use_container_width=True)
 
@@ -957,6 +1016,64 @@ def render_cooccurrence(df: pd.DataFrame) -> None:
     top_pairs.columns = ["Species A", "Species B", "Co-occurrence"]
     st.markdown("**Top 15 co-occurring species pairs**")
     st.dataframe(top_pairs, hide_index=True)
+
+
+def render_species_depth(df: pd.DataFrame, dep: pd.DataFrame) -> None:
+    """The depth range each species has been recorded over.
+
+    The easy version of the species-by-depth question: one box per species
+    across the depths of the deployments that recorded it. Depth lives on the
+    deployments table, not the annotations, so it is merged on drop_id here.
+    """
+    section("Depth")
+    depths = dep[["drop_id", "depth"]].copy()
+    depths["depth"] = pd.to_numeric(depths["depth"], errors="coerce")
+    depths = depths.dropna(subset=["depth"]).rename(columns={"depth": "dep_depth"})
+    if depths.empty:
+        st.info("No deployments in this selection carry a recorded depth.")
+        return
+
+    # One point per (deployment, species): the question is where the species
+    # occurs, so a deployment counts once however many intervals saw it.
+    seen = real_species(df[df["scientific_name"].notna()])
+    seen = seen.drop_duplicates(["drop_id", "display_name"]).merge(
+        depths, on="drop_id", how="inner"
+    )
+    if seen.empty:
+        st.info("No annotated deployments in this selection carry a depth.")
+        return
+
+    st.caption(
+        f"The depths each species has been recorded at — one marker per "
+        f"deployment that saw it, box = the middle half. Depth is recorded on "
+        f"**{depths['drop_id'].nunique():,} of {dep['drop_id'].nunique():,} "
+        f"deployments** in the current selection; the rest cannot appear here."
+    )
+
+    top = seen["display_name"].value_counts().head(15).index
+    plot = seen[seen["display_name"].isin(top)]
+    order = (
+        plot.groupby("display_name")["dep_depth"].median().sort_values().index.tolist()
+    )
+    fig = px.box(
+        plot,
+        x="dep_depth",
+        y="display_name",
+        orientation="h",
+        points="all",
+        category_orders={"display_name": order},
+        labels={"dep_depth": "Depth (m)"},
+        height=max(360, 30 * len(order) + 120),
+    )
+    fig.update_traces(marker={"size": 5, "opacity": 0.55}, line={"width": 1.5})
+    style(fig, legend=False)
+    fig.update_yaxes(title=None)
+    st.plotly_chart(fig, key="species_depth")
+    st.caption(
+        "Top 15 species by occurrence, ordered by median depth. A wide range "
+        "partly reflects being recorded often — rarely seen species have not "
+        "had the chance to show their full range."
+    )
 
 
 def render_species_accumulation(df: pd.DataFrame) -> None:
@@ -1275,11 +1392,7 @@ def render_species_abundance(df, df_context, effort_view) -> None:
             .sum()
             .reset_index()
         )
-        group_effort = (
-            effort_view.groupby("protection_status")["drop_id"]
-            .nunique()
-            .reset_index(name="effort")
-        )
+        group_effort = effort_per(effort_view, "protection_status", "effort")
         grouped = grouped.merge(group_effort, on="protection_status", how="left")
         grouped["mean_maxn"] = grouped["maxn"] / grouped["effort"].clip(lower=1)
 

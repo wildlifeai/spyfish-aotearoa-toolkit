@@ -45,6 +45,13 @@ def _clean_protection_status(value) -> str:
     text = " ".join(str(value or "").split())
     if not text or text.lower() == "nan":
         return ""
+    # Case-insensitive match against the canonical list first, so any casing of
+    # a known status stores as the one spelling without an alias entry per
+    # variant. The alias map is left for genuine synonyms, where the source
+    # words differ rather than just their case.
+    canonical = {known.lower(): known for known in config.known_protection_statuses}
+    if text.lower() in canonical:
+        return canonical[text.lower()]
     return config.protection_status_aliases.get(text.lower(), text)
 
 

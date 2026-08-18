@@ -38,11 +38,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from spyfish.biigle.upload_frames import (
-    find_or_create_volume_and_add_frames,
-    upload_coco_annotations_to_biigle,
-    upload_frames_to_s3,
-)
+from spyfish.biigle.upload_frames import upload_to_survey_volume
 from spyfish.config.base import MlStatus
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
@@ -50,10 +46,11 @@ from spyfish.extraction.extract_frames import (
     build_coco_from_raw_csv,
     extract_frames_from_selections,
 )
-from spyfish.extraction.select_frames import blind_selections, select_frames
-
-SURVEY_VOLUME_NAME_TEMPLATE = "{survey_id}. Training frames"
-
+from spyfish.extraction.select_frames import (
+    select_frames,
+    upsert_selections,
+    write_blind_selections,
+)
 
 # ── ML-driven frame selection ────────────────────────────────────────────────
 
@@ -98,23 +95,6 @@ def _per_frame_csv_name(drop_id: str, annotation_type: Optional[str] = None) -> 
 # ── Inference ────────────────────────────────────────────────────────────────
 
 
-def load_inference_model(annotation_type: Optional[str] = None):
-    """Load the configured pipeline model into memory.
-
-    Centralised here so survey runs can load once at the top of the loop and
-    pass the loaded instance through `process_drop → run_inference_to_csv`,
-    avoiding ~1-3s of per-drop reload (weights + GPU init) overhead.
-
-    Single-drop CLI runs let `run_inference_to_csv` lazy-load instead.
-    """
-    from ultralytics import YOLO
-
-    kind = annotation_type or config.training_extraction_annotation_type
-    model_path = config.get_pipeline_model(kind)
-    logging.info(f"loading {kind} pipeline model: {model_path.name}")
-    return YOLO(str(model_path))
-
-
 def _frame_records(drop_id: str, paths: list, times: list) -> list:
     """COCO image records for already-extracted frames.
 
@@ -149,24 +129,25 @@ def _frame_records(drop_id: str, paths: list, times: list) -> list:
     ]
 
 
-def run_inference_on_paths(drop_id: str, paths: list, times: list, model=None) -> Path:
+def run_inference_on_paths(drop_id: str, paths: list, times: list) -> Path:
     """Run the configured model over already-extracted frames.
 
     Only the --test-frames path needs this: with no full-video detections, the
     frames themselves are the only thing to run the model over.
     """
-    from spyfish.ml.run_inference import predict_on_frame_paths
+    from spyfish.ml.run_inference import (
+        get_cached_pipeline_model,
+        predict_on_frame_paths,
+    )
 
     kind = config.training_extraction_annotation_type
-    if model is None:
-        model = load_inference_model(annotation_type=kind)
     out_csv = Path(paths[0]).parent / _per_frame_csv_name(drop_id, kind)
     logging.info(f"{drop_id}: running '{kind}' inference over {len(paths)} frame(s)")
     return predict_on_frame_paths(
         frame_paths=[Path(p) for p in paths],
         timestamps=times,
         output_csv=out_csv,
-        model=model,
+        model=get_cached_pipeline_model(kind),
         fps=None,
     )
 
@@ -174,100 +155,7 @@ def run_inference_on_paths(drop_id: str, paths: list, times: list, model=None) -
 # ── Selections ───────────────────────────────────────────────────────────────
 
 
-def write_blind_selections(
-    drop_id: str, output_path: Path, n_frames: Optional[int] = None
-) -> pd.DataFrame:
-    """Selections CSV built without consulting the model, the --test-frames path.
-
-    Produces the same CSV `select_frames` does, so everything downstream is
-    shared; only where the timestamps came from differs.
-    """
-    deployment = DatabaseManager().get_deployment(drop_id)
-    if deployment is None:
-        raise ValueError(f"{drop_id}: not found in deployments DB")
-    start = deployment.get("sampling_start")
-    end = deployment.get("sampling_end")
-    if start is None or end is None:
-        raise ValueError(
-            f"{drop_id}: missing sampling window (start={start}, end={end})"
-        )
-
-    n = n_frames or config.training_extraction_n_frames
-    df = blind_selections(
-        drop_id=drop_id,
-        sampling_start=float(start),
-        sampling_end=float(end),
-        taken_times=pd.Series(dtype=float),
-        spacing=config.frame_strategy["temporal_spacing_seconds"],
-        n=n,
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_path, index=False)
-    logging.info(f"{drop_id}: {len(df)} blind selection(s) → {output_path.name}")
-    return df
-
-
-def upsert_selections(
-    prior: Optional[pd.DataFrame], fresh: pd.DataFrame
-) -> pd.DataFrame:
-    """Merge `fresh` into the prior pass's selections, keyed on timestamp.
-
-    Biigle volumes APPEND rather than replace, so a second pass over a drop adds
-    frames to the volume. A selections CSV that got clobbered would then no
-    longer describe what the volume holds. Upserting keeps it a true record of
-    every frame ever sent for this drop, with `SelectionReason` distinguishing
-    which pass each came from.
-
-    `prior` must be captured BEFORE the selection step runs: both selection
-    functions write `fresh` to the selections CSV themselves, so reading the
-    file here would always see `fresh` and the merge would keep nothing.
-    """
-    if prior is None or prior.empty:
-        return fresh
-    key = config.csv_clip_max_time_column
-    kept = prior[~prior[key].round(3).isin(fresh[key].round(3))]
-    merged = pd.concat([kept, fresh], ignore_index=True).sort_values(key)
-    if len(kept):
-        logging.info(
-            f"Selections upsert: kept {len(kept)} selection(s) from an earlier "
-            f"pass, added {len(fresh)}."
-        )
-    return merged.reset_index(drop=True)
-
-
 # ── Biigle upload ────────────────────────────────────────────────────────────
-
-
-def upload_to_survey_volume(drop_id: str, frame_paths: list, coco: dict) -> int:
-    """Upload a drop's frames + COCO to its SURVEY-level Biigle volume.
-
-    The only part of this module that is genuinely training-specific: a
-    survey-pooled volume and prefix rather than the per-drop ones the expert
-    path uses. Everything before it is shared.
-    """
-    survey_id = config.get_survey_id_from_drop(drop_id)
-    s3_prefix = config.get_training_frames_s3_prefix(survey_id)
-    frames_df = pd.DataFrame({"FramePath": [str(p) for p in frame_paths]})
-    # Names are relative to the survey dir, so each carries its
-    # {drop}/frames/ segment and S3 mirrors the local layout.
-    file_names = upload_frames_to_s3(
-        frames_df, s3_prefix, relative_to=config.deployment_data_dir / survey_id
-    )
-    if not file_names:
-        raise RuntimeError(f"{drop_id}: no frames uploaded to S3, aborting Biigle.")
-
-    volume_name = SURVEY_VOLUME_NAME_TEMPLATE.format(survey_id=survey_id)
-    volume_id, filename_to_id = find_or_create_volume_and_add_frames(
-        volume_name=volume_name,
-        s3_frames_prefix=s3_prefix,
-        file_names=file_names,
-        media_type="image",
-    )
-    upload_coco_annotations_to_biigle(
-        volume_id, coco, filename_to_biigle_id=filename_to_id
-    )
-    logging.info(f"{drop_id}: frames in Biigle volume {volume_id} ({volume_name})")
-    return volume_id
 
 
 # ── Orchestration ────────────────────────────────────────────────────────────
@@ -288,7 +176,6 @@ def process_drop(
     *,
     force: bool = False,
     no_upload: bool = False,
-    model=None,
     test_frames: bool = False,
 ) -> DropResult:
     """One drop: select -> extract -> COCO -> upload to the survey volume.
@@ -316,7 +203,16 @@ def process_drop(
             fresh = write_blind_selections(drop_id, selections_path)
         else:
             raw_csv = require_ml_raw_csv(drop_id)
-            fresh = select_frames(str(raw_csv), str(selections_path), drop_id)
+            # Training frames become labels, not a reported abundance figure,
+            # so a drop with no sampling_end assumes the expected deployment
+            # duration rather than losing its blind frames. The expert-review
+            # path deliberately raises instead.
+            fresh = select_frames(
+                str(raw_csv),
+                str(selections_path),
+                drop_id,
+                allow_fallback_window=True,
+            )
         merged = upsert_selections(prior, fresh)
         merged.to_csv(selections_path, index=False)
     except Exception as e:
@@ -329,6 +225,7 @@ def process_drop(
             str(config.get_video_path(drop_id)),
             str(raw_csv) if raw_csv else "",
             write_coco=not test_frames,
+            coco_target="training",
         )
         # Filter failed extractions row-wise so FramePath and its timestamp
         # stay paired, dropping paths alone would shift every later frame's
@@ -341,13 +238,16 @@ def process_drop(
         logging.error(f"{drop_id}: extraction failed, {e}")
         return DropResult(drop_id=drop_id, ok=False, stage="extract", error=str(e))
 
-    coco_path = config.get_coco_annotations_path(drop_id)
+    # target="training": this COCO describes the survey volume's blind-selected
+    # frames, which are a different image set from the review path's ML-peak
+    # frames. Sharing one filename let whichever ran last erase the other.
+    coco_path = config.get_coco_annotations_path(drop_id, target="training")
     if test_frames:
         # No full-video detections exist, so the model runs over the extracted
         # frames and the COCO is built from that.
         try:
             times = [float(t) for t in ok_rows[config.csv_clip_max_time_column]]
-            frame_csv = run_inference_on_paths(drop_id, paths, times, model=model)
+            frame_csv = run_inference_on_paths(drop_id, paths, times)
             coco = build_coco_from_raw_csv(
                 str(frame_csv), _frame_records(drop_id, paths, times)
             )
@@ -412,7 +312,6 @@ def process_survey(
     # costs 1-3s of disk + GPU init each, which compounds badly across
     # hundreds of drops. process_drop accepts model=None when called from the
     # single-drop CLI path; here we pre-load and pass it through.
-    model = load_inference_model()
 
     logging.info(f"{survey_id}: processing {len(drops)} drop(s)")
     results: List[DropResult] = []
@@ -423,7 +322,6 @@ def process_survey(
                 drop_id,
                 force=force,
                 no_upload=no_upload,
-                model=model,
                 test_frames=test_frames,
             )
         )

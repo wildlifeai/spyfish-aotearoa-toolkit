@@ -57,6 +57,12 @@ class BiigleConfig(BaseConfig):
         return get_required(self.biigle_section, "done_labels", "biigle")
 
     @property
+    def genus_level_label_pattern(self) -> str:
+        """Regex for genus-level expert IDs ("Conger sp") accepted at sync
+        without a registry entry — see config.yaml for the rationale."""
+        return get_required(self.biigle_section, "genus_level_label_pattern", "biigle")
+
+    @property
     def biigle_require_done_label(self) -> bool:
         """When True, --biigle-sync gates on the Done-label whole-file check.
         When False, every volume awaiting sync is ingested (project membership
@@ -97,6 +103,32 @@ class BiigleConfig(BaseConfig):
         return int(
             get_required(self.biigle_section, "substrate_label_tree_id", "biigle")
         )
+
+    @property
+    def biigle_workflow_label_tree_id(self) -> int:
+        """Label-tree ID whose labels track annotator progress, not sightings.
+
+        "Done Volume", "In progress", "Nothing here", "Scale bar". Membership
+        here means the row must not become a scientific name, with the
+        exception of `biigle_workflow_tree_fish_label_ids` below."""
+        return int(
+            get_required(self.biigle_section, "workflow_label_tree_id", "biigle")
+        )
+
+    @property
+    def biigle_workflow_tree_keep_labels(self) -> dict:
+        """Workflow-tree label id → the class it becomes.
+
+        An expert marking a fish they could not identify to species has made a
+        real observation; dropping it because its label lives in the workflow
+        tree would lose it. Bait is kept for the same reason — it never counts
+        towards abundance, but it is a labelled fish and so is training data."""
+        return {
+            int(k): str(v)
+            for k, v in get_required(
+                self.biigle_section, "workflow_tree_keep_labels", "biigle"
+            ).items()
+        }
 
     @property
     def request_timeout_secs(self) -> int:

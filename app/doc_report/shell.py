@@ -118,10 +118,89 @@ FILTER_KEYS = (
 )
 
 
+# Query-param names for the shareable filter URL. Short and singular because
+# they are typed and read by people: `?reserve=X&reserve=Y&years=2018-2024`.
+_QP_RESERVES = "reserve"
+_QP_YEARS = "years"
+_QP_SOURCE = "source"
+
+
 def _reset_filters() -> None:
     """Drop every filter key so the next run seeds them from the data again."""
     for key in FILTER_KEYS:
         st.session_state.pop(key, None)
+    for key in (_QP_RESERVES, _QP_YEARS, _QP_SOURCE):
+        if key in st.query_params:
+            del st.query_params[key]
+
+
+def _adopt_url_filters() -> None:
+    """Seed the filters from the URL, once per session.
+
+    A pasted link opens with its filters already applied. Once only: after
+    this the widgets own the values and `_mirror_filters_to_url` keeps the URL
+    following them, so a stale URL cannot fight later clicks.
+
+    An absent param is no opinion, not a reset. Streamlit strips the query
+    string every time the nav switches page, so an empty URL must never clear
+    a live selection — that is also why adoption cannot simply run every time.
+    """
+    if st.session_state.get("_url_filters_adopted"):
+        return
+    st.session_state["_url_filters_adopted"] = True
+    qp = st.query_params
+    reserves = qp.get_all(_QP_RESERVES)
+    if reserves:
+        # Not validated against the data here: the widget seed drops names the
+        # data does not hold, and the mirror rewrites the URL from what
+        # survived.
+        st.session_state["report_reserves"] = reserves
+    years = qp.get(_QP_YEARS)
+    if years:
+        try:
+            lo, hi = (int(part) for part in years.split("-", 1))
+            st.session_state["report_years"] = (lo, hi)
+        except ValueError:
+            pass  # a hand-mangled URL is ignored, not an error
+    source = qp.get(_QP_SOURCE) or ""
+    # Case-insensitive: the choices are capitalised ("Expert") but a URL is as
+    # often typed as pasted, and ?source=expert should mean the obvious thing.
+    match = next(
+        (c for c in report_data.SOURCE_CHOICES if c.lower() == source.lower()),
+        None,
+    )
+    if match:
+        st.session_state["report_source"] = match
+
+
+def _mirror_filters_to_url(year_range, bounds, reserves: list, source: str) -> None:
+    """Write the current filters into the URL, so the view can be shared.
+
+    Re-asserted on every build because a page switch rewrites the URL to the
+    new page's path and drops the query string with it. Only non-default
+    values are written, so an untouched page keeps a clean URL, and writes
+    are skipped when the URL already agrees, so reruns do not spam the
+    browser history.
+    """
+    qp = st.query_params
+
+    def _sync(key: str, wanted: list) -> None:
+        if qp.get_all(key) != wanted:
+            if wanted:
+                qp[key] = wanted
+            elif key in qp:
+                del qp[key]
+
+    _sync(_QP_RESERVES, list(reserves))
+    non_default_years = bounds and year_range and tuple(year_range) != tuple(bounds)
+    _sync(
+        _QP_YEARS,
+        [f"{year_range[0]}-{year_range[1]}"] if non_default_years else [],
+    )
+    _sync(
+        _QP_SOURCE,
+        [source] if source != report_data.BEST_AVAILABLE else [],
+    )
 
 
 def build_context(cols) -> dict:
@@ -170,6 +249,10 @@ def build_context(cols) -> dict:
     st.session_state.setdefault("report_years", bounds)
     st.session_state.setdefault("report_reserves", [])
     st.session_state.setdefault("report_source", report_data.BEST_AVAILABLE)
+
+    # After the defaults, before the widget seeds: a pasted URL overrides the
+    # defaults, and the widgets then seed from what it said.
+    _adopt_url_filters()
 
     # Each widget is seeded into its own key ONCE and then left alone. Passing
     # `value=` / `default=` / `index=` on every run is what caused the slider to
@@ -276,6 +359,8 @@ def build_context(cols) -> dict:
             on_click=_reset_filters,
             help="Reset the year, MPA and source filters to their defaults.",
         )
+    _mirror_filters_to_url(year_range, bounds, reserves, source)
+
     # Not filtered to ingested-only. Hiding excluded deployments would flatter
     # every coverage number on the page, so they stay in and the front page
     # explains what they are.
@@ -509,17 +594,35 @@ def render_home(ctx: dict) -> None:
     # `protection_group` is the shared, config-driven bucketing, so this and
     # the Species view cannot disagree about which deployments count as
     # protected.
-    from ecology_data import protection_group
+    from ecology_data import PROTECTED, UNPROTECTED, protection_group
 
     protection_means = {}
     protection_counts = {}
     if not ann.empty:
         per_species = report_data.species_maxn(ann)
-        meta = ann[["drop_id", "protection_status"]].drop_duplicates("drop_id")
+        # survey_year and site_id ride along for the base charts further down,
+        # which reuse this frame.
+        meta = ann[
+            ["drop_id", "protection_status", "survey_year", "site_id"]
+        ].drop_duplicates("drop_id")
         per_species = per_species.merge(meta, on="drop_id", how="left")
         per_species["Group"] = protection_group(per_species["protection_status"])
-        per_dep = per_species.groupby(["drop_id", "Group"])["maxn"].sum().reset_index()
-        grouped = per_dep[per_dep["Group"].notna()].groupby("Group")["maxn"]
+        # Richness, not summed MaxN: adding a snapper to a school of sweep
+        # gives a number with no meaning (the MPA view says as much), so the
+        # headline compares species per deployment instead. `real_species`
+        # drops the generic and unidentified classes — a deployment carrying
+        # only those says nothing about richness and leaves the mean — while
+        # absence records (null species) keep theirs in at zero, since
+        # `nunique` ignores NaN. Protected against unprotected only; partial
+        # regimes are their own group and belong in neither mean.
+        per_dep = (
+            report_data.real_species(per_species)
+            .loc[lambda f: f["Group"].isin([PROTECTED, UNPROTECTED])]
+            .groupby(["drop_id", "Group"])["scientific_name"]
+            .nunique()
+            .reset_index(name="richness")
+        )
+        grouped = per_dep.groupby("Group")["richness"]
         protection_means = grouped.mean().round(1).to_dict()
         protection_counts = grouped.count().to_dict()
 
@@ -556,12 +659,16 @@ def render_home(ctx: dict) -> None:
     for slot, group in ((2, "Protected"), (3, "Unprotected")):
         value = protection_means.get(group)
         kpis[slot].metric(
-            f"MaxN {group.lower()}",
+            f"Species/dep {group.lower()}",
             "—" if value is None else f"{value:.1f}",
-            help=f"Mean total MaxN per annotated deployment {'inside' if group == 'Protected' else 'outside'} "
-            f"an MPA, across {protection_counts.get(group, 0):,} "
-            f"deployments. Worth following up, not quoting: deployments "
-            f"are not evenly spread across sites, years or effort.",
+            help=f"Mean distinct species recorded per annotated deployment "
+            f"{'inside' if group == 'Protected' else 'outside'} an MPA, "
+            f"across {protection_counts.get(group, 0):,} deployments. "
+            f"Generic detections (fish, bait) and the unidentified bucket "
+            f"are not counted as species; a reviewed deployment with "
+            f"nothing seen counts as zero. Worth following up, not "
+            f"quoting: deployments are not evenly spread across sites, "
+            f"years or effort.",
         )
 
     st.write("")
@@ -604,6 +711,113 @@ def render_home(ctx: dict) -> None:
         from .pipeline import _stage_flags, render_funnel
 
         render_funnel(_stage_flags(dep), compact=True)
+
+    # ── The base comparisons, from the same functions as the Species view ────
+    # The front page answers the first questions a reader arrives with, in
+    # this order: how are species doing over the years, where has the
+    # surveying happened, where is each species seen, and does protection make
+    # a difference. Reusing the views' own chart functions (on the same
+    # per_species frame the KPIs above rest on) means home and the full views
+    # cannot disagree; the links say where the full versions live.
+    species_page = PAGES.get(("Reporting", "Species"))
+    mpa_page = PAGES.get(("Reporting", "MPA"))
+    if not ann.empty:
+        from ecology_data import load_common_names
+
+        from .charts._map import gate_notice, site_scatter, site_skeleton
+        from .charts.species import (
+            render_reserve_effect,
+            render_species_by_site,
+            render_species_over_time,
+        )
+        from .site_data import filtered_site_frames, render_map_gate
+
+        common_names = load_common_names()
+
+        # 1. Species over the years. `with_sites=False` holds back its
+        # companion occurrence heatmap so the map can sit between them.
+        st.divider()
+        picked, all_species_mode = render_species_over_time(
+            per_species, common_names, with_sites=False
+        )
+        if species_page is not None:
+            st.page_link(
+                species_page,
+                label="Full version on the Species view: adds detection rates, "
+                "frequency vs abundance and co-occurrence",
+            )
+
+        # 2. The site map, behind the same lock as every view of coordinates.
+        # Bubble size is species richness — not summed MaxN, which adds
+        # snapper to sweep; the per-species abundance bubbles live on the MPA
+        # view the link points to.
+        st.divider()
+        st.subheader("Site map")
+        show_coords = render_map_gate()
+        site = filtered_site_frames(ctx)
+        if gate_notice(site["effort_view"], show_coords):
+            rich = (
+                report_data.real_species(site["df_context"])
+                .groupby("site_id")["scientific_name"]
+                .nunique()
+                .reset_index(name="species")
+            )
+            sites_geo = site_skeleton(site["effort_view"], rich)
+            if sites_geo.empty:
+                st.info("No sites in this selection carry coordinates.")
+            else:
+                # A floor, so a surveyed site where nothing was identified
+                # stays a visible dot instead of vanishing at size zero.
+                sites_geo["size"] = sites_geo["species"].clip(lower=0.4)
+                fig = site_scatter(
+                    sites_geo,
+                    size="size",
+                    hover_name="site_name",
+                    hover_data={
+                        "site_id": True,
+                        "species": True,
+                        "region": True,
+                        "size": False,
+                        "latitude": False,
+                        "longitude": False,
+                    },
+                )
+                st.plotly_chart(fig, use_container_width=True, key="home_site_map")
+                st.caption(
+                    f"{len(sites_geo):,} surveyed sites in the current "
+                    "selection, bubble size = species richness (distinct real "
+                    "species recorded). A small dot is a site surveyed with "
+                    "nothing identified yet."
+                )
+        if mpa_page is not None:
+            st.page_link(
+                mpa_page,
+                label="MPA view: the same map with per-species abundance "
+                "bubbles and diversity metrics",
+            )
+
+        # 3. Where each species is seen, and how much.
+        if picked is not None:
+            st.divider()
+            render_species_by_site(picked, per_species, all_species_mode)
+            if species_page is not None:
+                st.page_link(
+                    species_page,
+                    label="On the Species view this pairs with the species "
+                    "picker above it",
+                )
+
+        # 4. Protection, per species: the slope chart rather than the box
+        # plots — each species' mean MaxN outside connected to its mean
+        # inside, so the direction of every line is the effect.
+        st.divider()
+        render_reserve_effect(per_species, common_names)
+        if species_page is not None:
+            st.page_link(
+                species_page,
+                label="Full comparison on the Species view: distributions, "
+                "summary table, and what was left out and why",
+            )
 
     st.divider()
     st.subheader("Views")

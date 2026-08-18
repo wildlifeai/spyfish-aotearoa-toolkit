@@ -285,46 +285,63 @@ These Operations views supersede the earlier standalone `⚙️_Deployment_Manag
 
 | Page | Purpose |
 | ---- | ------- |
-| `🧪_Experiments.py` | Read-only ecological sandbox — experiments grouped by category (reserve effect / programme overview / species deep-dive / source quality / distribution). Global filters at the top (source, year range, reserves) apply to every experiment. See "Experiments architecture" below. |
 | `📊_Model_Metrics.py` | ML training results (mAP, per-class metrics, confusion matrix) |
 | `📺_View_Deployment_Videos.py` | Video player for individual deployments |
 | `_advanced/🐚_Mussel_Insights.py` | "Dashboard test" — unreleased dashboard concepts, gated on `TEST_DASHBOARD_PASSWORD` |
 | `_archive/ML_vs_Expert.py` | Pre-rebuild comparison page kept until the rebuilt equivalent is verified against it |
-| `0_🆘_Error_-_Inform_Kalindi.py` | Dependency-free support page (imports only `streamlit`); registered so `/support` resolves but hidden from the nav — the sidebar contact note is the way in. |
+| `0_🆘_Support.py` | Dependency-free support page (imports only `streamlit`); registered so `/support` resolves but hidden from the nav — the sidebar contact note is the way in. |
 
 **In development:** `_advanced/🪨_Substrate_Cover.py` — usable but numbers and layout still moving.
 
 Species names are displayed as `"Common name (Scientific name)"` via the species registry (`spyfish/config/species.py`, sourced from `process_files/training/class_map.json`). Species without a common name fall back to scientific name only.
 
-The shared data layer lives in `app/ecology_data.py`: the cached loaders (`load_maxn`, `load_sites`, `load_common_names`, `search_species_annotations`) and the identity/enrichment helpers (`add_drop_id_columns`, `join_site_metadata`). The report's `doc_report/data.py` and the Experiments page both import from it — single source of truth for loading + enrichment. Shared visual conventions (colors, protection-status ordering) live in `app/theme.py`.
+The shared data layer lives in `app/ecology_data.py`: the cached loaders (`load_maxn`, `load_sites`, `load_common_names`, `search_species_annotations`) and the identity/enrichment helpers (`add_drop_id_columns`, `join_site_metadata`). The report's `doc_report/data.py` imports from it — single source of truth for loading + enrichment. Shared visual conventions (colors, protection-status ordering) live in `app/theme.py`.
 
-**Experiments architecture (`🧪_Experiments.py`):**
+**Report architecture (`app/doc_report/`):** three layers, so a change to what a
+page says and a change to how a chart looks are never the same edit.
 
-The page loads MaxN data + sites + class_map once, enriches it (parses `drop_id` → `reserve_code` / `site_id` / `survey_year`, joins `sites.protection_status`, attaches `display_name`), then renders three global filter widgets at the top: source picker (with per-source deployment-count labels: `expert (1049 deps)`), year-range slider, and reserve multiselect.
+| Layer | Holds | Files |
+| ----- | ----- | ----- |
+| data | loading, filtering, aggregation (`species_maxn`, `deployment_maxn`, `experiments_frame`, `arrival_and_peak`) | `data.py`, `site_data.py` |
+| chart | one function per chart, taking the frame it draws | `charts/*.py` |
+| view | which questions, in what order, from which frame | `shell.py` + one module per view |
 
-Two filtered dataframes are passed to every experiment via a `ctx` dict:
+Two shared modules: `charting.py` (every Plotly figure goes through `style()`, so
+`PLOT_LAYOUT` and the legend/dash conventions apply everywhere) and `layout.py`
+(section anchors plus the chip strip, both rendered into slots in the sticky
+filter header).
 
-- `df` — year/reserve filters + single-source filter applied. Used by most experiments.
-- `df_multi` — year/reserve filters only; all sources retained. Used by **Calibration** and **Disagreement**, which by nature need both sources for every comparison point.
+The `🧪_Experiments.py` sandbox was retired on 2026-08-17 once its charts had
+been ported into the report — detection rate, frequency vs abundance,
+co-occurrence and accumulation to Species; diversity, composition and reserve
+trends to MPA; leaderboard and year trend to Sites; calibration to Operations ·
+Annotations; bait arrival to Reporting · Annotations, rebuilt there as arrival
+*and* MaxN time. `click_to_filter` is a Streamlit-API demo rather than a
+finding — click a site and everything below re-filters — and sits at the foot
+of Sites as an example to be judged: if the interaction is useful the pattern
+belongs on Sites and MPA properly, and if not it goes. Git history holds the
+page at `app/pages/_advanced/🧪_Experiments.py`.
 
-`ctx` also carries the project-wide `protection_status → colour` map (blues for protected, warm for unprotected) and the loaded `sites` / `common_names`.
+**Protection is three groups, not two** (`reporting.protected_statuses` /
+`unprotected_statuses` in `config.yaml`, applied by
+`ecology_data.protection_group`). Exactly one status counts as protected (Type I
+MPA) and one as unprotected (No protection); every partial or unclear regime —
+high protection area, Type II MPA, taiapure, mataitai, fisheries closures,
+seafloor protection — is **Other**, 487 of 3,064 deployments. Inside/outside
+comparisons use the two named groups and state how many deployments they left
+out; charts that show the class rather than a comparison keep every status.
+Before this there were two classifiers, and they disagreed: config counted High
+Protection Area and Type II MPA as protected while the charts' own substring
+ranker read them as outside, so one deployment sat on opposite sides of the
+reserve comparison depending on which chart was open. Pinned by
+`tests/unit/test_report_data.py`, including that an upstream rename lands in
+Other rather than joining a side.
 
-| Category | Experiment | Question answered |
-| -------- | ---------- | ----------------- |
-| Reserve effect | Reserve effect (slope) | Does protection help each species? Up-sloping line = stronger inside reserve. |
-| Reserve effect | Heatmap | Which sites have which species, grouped by protection status (vertical divider). |
-| Reserve effect | Year trend | Year-on-year MaxN per site for a chosen species. |
-| Programme overview | Detection rate | What % of deployments saw each species (common / intermediate / rare). |
-| Programme overview | Composition | Top-N species relative abundance per reserve (stacked bar). |
-| Programme overview | Diversity | Shannon / Simpson / Evenness per reserve. |
-| Programme overview | Leaderboard | Top sites by Sum / Mean / Species richness. |
-| Programme overview | Accumulation | Cumulative species discovered vs deployments surveyed (resampled, 95% CI). |
-| Species deep-dive | Bait arrival | Distribution of `time_of_max_seconds` per species (violin). |
-| Species deep-dive | Freq × abundance | Hanski plot: each species classified as core / patchy / transient / incidental by median lines. |
-| Species deep-dive | Co-occurrence | Species × species heatmap; cell = min-normalised intersection. |
-| Source quality | Calibration | ML vs Expert scatter with R², slope, mean bias, MAE. |
-| Source quality | Disagreement | |MaxN_A − MaxN_B| heatmap per (drop, species). |
-| Distribution | Box plot | Full distribution of reserve effect (complements the slope chart). |
+Non-species classes (`fish`, `Fish: final`, `Fish: review required`,
+`To review`) merge into one `Unidentified` bucket named in the same config
+block. Kept where animals are counted, dropped where species are: it is N
+unknown species under one label, so counting it as one both understates richness
+and puts a meaningless row in every co-occurrence matrix.
 
 ---
 
@@ -488,6 +505,8 @@ graph TB
 
 All three are stored in the same `annotations` table. The `annotated_by` field contains `'citsci'` or `'expert'` for those sources, and the **model name** (e.g. `cfd_binary_water_20260301`) for ML annotations — so model versioning is preserved per-record in the `external_id` column.
 
+**Absence convention — `NULL_DEPLOYMENT`.** A review that finds nothing is a result, not a missing row: it writes one record with `scientific_name = NULL_DEPLOYMENT` (`"NULL DEPLOYMENT"`, a sentinel in `spyfish/config/base.py`), `max_interval = 0` and the sentinel in `time_of_max` too (display field; the numeric `time_of_max_seconds` stays NULL). That makes "reviewed, nothing seen" distinguishable from "this source never looked", which has no rows at all. A sentinel rather than SQL NULL because NULL vanishes from `GROUP BY`/`IN` and `NULL = NULL` is never true — a correlated-subquery bug in `get_maxn_summary` silently dropped every NULL-species absence record until it was made null-safe (`IS`). All three sources write it via the shared `null_deployment_row()` builder in `annotation_manager.py`: `_ingest_ml_annotations` (zero-detection runs, model-scoped external_id), `ingest_zooniverse_annotations` (all-NOTHINGHERE reviews), and BIIGLE sync (empty finished reviews, volume-scoped external_id so `clear_synced` replaces it on re-sync). Dashboards map the sentinel to NaN at their load boundary (`ecology_data.load_maxn`, `doc_report/data.load_annotations`) so species aggregations skip it while the deployment still counts in denominators; only write the sentinel when the source genuinely asserts absence — a blank field in an export means "no data", not "zero" (see the legacy placeholder incident under `--legacy-experts`).
+
 **Expert review model:** Experts aim to review approximately **~10 frames per deployment** (or at survey level). If the ML + citsci signal looks wrong, a closer per-frame review can be triggered. This keeps expert effort tractable at ~1,000 deployments/year while still producing ground-truth labels for model retraining.
 
 **Volunteer data shape — what's in Zooniverse exports.** Three facts to know when working with the legacy classification CSVs or the live Panoptes API:
@@ -523,8 +542,8 @@ marine-buv/   (production, DOC-managed)
     │       │   ├── clips/                      # 10s MP4 clips for Zooniverse
     │       │   ├── frames/                     # JPEG frames (Zooniverse + BIIGLE disk 134)
     │       │   ├── qa_frames/                  # ML-annotated frames with boxes for QA
-    │       │   └── training_frames/            # Bootstrap training JPEGs + raw CSV + COCO JSON
-    │       └── training_frames/                # Survey-level S3 prefix flat across drops (BIIGLE disk 134)
+    │       │   └── training_frames/            # LEGACY. Pre-2026-08 bootstrap artefacts; still read by _IMAGE_SOURCE_DIRS
+    │       └── training_frames/                # LEGACY flat S3 prefix. Volumes created before 2026-08 point here and keep working (Biigle fixes a volume's url at creation). New survey volumes point at the SURVEY dir and carry {drop}/frames/ in the filename
     ├── models/                                 # YOLO weights
     └── training/                               # Retraining results
 ```
@@ -558,8 +577,8 @@ deployment_data/{SurveyID}/{DropID}/
   clips/                                 10s MP4 clips (Zooniverse)
   frames/                                JPEG frames (Zooniverse + BIIGLE disk 134)
   qa_frames/                             JPEG frames with ML boxes drawn (for review)
-  training_frames/                       Bootstrap-extraction artefacts (extract_training_frames):
-    {DropID}__frame_{t:.3f}s.jpg           N back-loaded JPEGs (default N=10)
+  training_frames/                       LEGACY (pre-2026-08). New runs write frames/ instead:
+    {DropID}__frame_{t:.3f}s.jpg           JPEGs from the old bootstrap extractor
     {DropID}_{kind}_raw.csv                YOLO detections from training_extraction.annotation_type
     {DropID}_coco_annotations_for_biigle.json
                                            COCO sidecar uploaded with the JPEGs to Biigle
@@ -703,7 +722,7 @@ annotations exist for source X on drop D
    ⇒ deployments.<X>_status = '<X>_complete' for drop D
 ```
 
-After computing per-drop counts from `spyfish_annotations.db` and writing them to the deployments table, it advances the matching section status for any drop that gained annotations. Implementation uses `bulk_update_section_status()` (one `UPDATE` per source, single transaction) and **bypasses the state machine** — data presence overrides intent, so a drop with `expert_skipped` AND `expert_annotations > 0` becomes `expert_complete`. Drops already at COMPLETE are left alone (idempotent). The all-NOTHINGHERE case (zero observations after full citsci review) needs explicit advancement because the count-based rule can't see it; `ingest_zooniverse_annotations` handles this via a direct `bulk_update_section_status` call in the empty-CSV branch.
+After computing per-drop counts from `spyfish_annotations.db` and writing them to the deployments table, it advances the matching section status for any drop that gained annotations. Implementation uses `bulk_update_section_status()` (one `UPDATE` per source, single transaction) and **bypasses the state machine** — data presence overrides intent, so a drop with `expert_skipped` AND `expert_annotations > 0` becomes `expert_complete`. Drops already at COMPLETE are left alone (idempotent). The all-NOTHINGHERE case (zero observations after full citsci review) needs no special handling anymore: an empty review writes a `NULL_DEPLOYMENT` row (see the absence convention in §5), so its count is 1 and the same data-presence rule advances it as any other completion.
 
 Every ingest path (`legacy_extract`, `ingest_zooniverse_annotations`, `_ingest_ml_annotations`, future BIIGLE sync, future bootstrap orchestrator) calls `sync_annotation_counts(drops)` at the end and gets status advancement for free. **Future ingest paths should follow the same pattern** — write annotations to the annotations DB, then call `sync_annotation_counts` with the affected drops. No manual status maintenance in the ingest path.
 
@@ -1068,9 +1087,9 @@ Sequenced by dependency, not assigned dates.
 - Marine reserve monitoring reports and report cards generated automatically from deployments with `expert_status = complete` or `reporting_status = complete`
 - BIIGLE substrate and size review parsing (same pipeline, new annotation type)
 - ✅ DOC report (`app/doc_report/`): two-section shell (Reporting / Operations) with shared filters and context dict — supersedes the earlier standalone Health Dashboard, Deployment Management, Error Review, and Species Search pages. Some views still to build (Reporting: Surveys, Deployments; Operations: Sites, Species).
-- ✅ Ecological experiments page (`🧪_Experiments.py`): experiments across reserve effect, programme overview, species deep-dive, source quality, and distribution. Global filters (source / year / reserves) apply to all experiments via a shared `ctx` dict.
+- ✅ Ecological experiments, first prototyped on a sandbox page and since folded into the report's own views (see "Report architecture").
 - ✅ Species search as a Reporting view (`doc_report/species_search.py`): per-species observation lookup using the report's shared filters.
-- Time-series visualisations of species abundance by marine reserve — foundation in place via Experiments page; dedicated DOC-facing page remaining
+- Time-series visualisations of species abundance by marine reserve — in the report as Reporting · MPA (`Trends`, one line per reserve per side of the boundary) and Reporting · Species (`Species over time`); a dedicated DOC-facing export remains
 
 ---
 
@@ -1095,6 +1114,8 @@ Classification parsing is fully wired into `run_pipeline.py --zooniverse-sync` (
 6. `ingest_zooniverse_annotations` → advance to `citsci_complete`
 
 **Historical backfill (`--legacy-zooniverse`):** reads classification + subjects CSVs from `process_files/zooniverse/legacy_classifications/` (configured via `paths.legacy.zooniverse`). Legacy filename resolver handles DMY/YMD date-pattern filenames, `_NEW` upload-suffix normalisation, and year-fuzzy matching for surveys where the Zooniverse filename date differs from the DB date by days or weeks. See `claude_docs/todo.md` resolver audit for unresolvable stems (pre-standard 2011–12 format, surveys not yet ingested). Companion admin flag `--legacy-experts` ingests the legacy expert annotation CSV from S3 — both are off the happy path and called explicitly.
+
+**Legacy expert placeholders.** The legacy CSV is a database export that wrote the literal string `"NULL"` into every data field (ScientificName, TimeOfMax, MaxInterval) for deployments that had no expert annotations — a "no data" marker, not "reviewed and saw nothing". Pandas reads `"NULL"` as missing, so an earlier ingest turned 34 of these into absence records and advanced their drops to `expert_complete`, wrongly suppressing real citsci data on 5 of them under expert-wins. `parse_legacy_rows` now skips all-NULL rows (a row with *any* of the three data fields present is kept), includes the skipped drops in the count sync so stale counts recount to zero, and demotes placeholder drops stranded at `expert_complete` back to `expert_pending` when no expert rows exist from any path. Re-running `--legacy-experts` is the whole repair — every step is idempotent.
 
 **What is built:**
 - Per-subject-set API fetch (not bulk project sweep) — retirement status is the gate, no timestamp cursor needed
@@ -1376,12 +1397,29 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 | ---------------------------------- | ------- | -------------------------------------------------------------------------- |
 | `clip_length`                      | 10.0 s  | Duration of each extracted clip                                            |
 | `clip_cap`                         | 180     | Max clips per video (180 × 10s = full 30-min video)                        |
-| `force_binary_strategy`            | false   | If true, always use binary strategy regardless of species count            |
-| `frame_multiplier`                 | 2       | Doubles BIIGLE frame count and halves temporal spacing for denser coverage |
+| `force_binary_strategy`            | false   | CLIP selection only, and **due for removal** — frame selection already has no binary/multiclass fork, because one class is the per-species case with N=1. The binary model is a species model with one species |
+| `min_frames_per_drop`              | 10      | Floor, never a ceiling; blind frames top up to it                          |
 | `binary_strategy.maxn_export`      | 30      | Clips at peak fish-count moments                                           |
 | `binary_strategy.confusing_export` | 60      | High count + low confidence clips                                          |
 | `binary_strategy.empty_export`     | 10      | Clips with zero detections (false negative check)                          |
 | `binary_strategy.start_export`     | 3       | Clips from first 2 minutes (deployment health check)                       |
+
+#### `extraction.frame_strategy` — FRAME selection buckets
+
+Clips keep `binary_strategy` / `multiclass_strategy` above; frames use one per-species set. Allocation is by marginal information — what an expert label tells us that we don't already know. Measurements behind the numbers are in `claude_docs/todo.md` ("Frame selection: one budget, several buckets").
+
+| Key                        | Default | Effect                                                                                             |
+| -------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
+| `per_species_maxn`         | 2       | Peak frames per species. Mandatory for counting: no peak frame = no MaxN for that species at all    |
+| `per_species_confusing`    | 1       | Frames ranked by detections in the ambiguous band (`confidence_threshold` → `maxn_confidence_threshold`) — seen but never counted |
+| `fish_bands`               | 3       | Frames spanning the catch-all class's box-diagonal range. `fish` is not one species but N unknown ones; self-limiting when boxes are uniform |
+| `blind_export`             | 3       | ALWAYS taken, never filler. Every other bucket is model-chosen, so these are the only frames that can reveal a fish it never detected |
+| `start_export`             | 1       | Deployment health check, measured from `sampling_start`                                             |
+| `spacing_divisor`          | 2       | Divides spacing only; quotas untouched                                                             |
+| `same_frame_seconds`       | 1.0     | ACROSS classes: two picks closer than this are one moment, so one JPEG serves both                 |
+| `temporal_spacing_seconds` | 30      | WITHIN a class: detection-count autocorrelation was 0.15 at 10s and 0.00 by 60s                     |
+
+Yields 22–37 frames per deployment (mean 29) across six real species-model drops; species count is the driver, not detection density.
 
 
 ### Zooniverse (`zooniverse` section)
@@ -1389,7 +1427,7 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 
 | Key                  | Effect                                                                  |
 | -------------------- | ----------------------------------------------------------------------- |
-| `project_id`         | Upload target project                                                   |
+| `project_id`         | Upload target project — **14054, spyfish-aotearoa main** (single target) |
 | `source_project_ids` | List of projects to fetch classifications from (main + EY clone etc.)   |
 | `size_limit_mb`      | CRF is calibrated to stay under this per clip (~12 MB Zooniverse limit) |
 | `health_check_count` | Evenly-spaced clips when MaxN CSV is empty (no detections)              |
@@ -1542,25 +1580,48 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 
 ### `spyfish/extraction/select_frames.py` — Frame selection (for BIIGLE)
 
-`**select_frames(raw_csv, output_csv, drop_id)**`: Same MaxN/confusing/start strategy as clips, at frame resolution. Applies `frame_multiplier` for denser BIIGLE coverage.
+The one selector both the expert path (`--biigle-upload`) and the survey-volume path use. Reads the ML raw CSV, applies `extraction.frame_strategy`, writes the selections CSV that extraction consumes.
+
+`**select_frames(raw_csv, output_csv, drop_id)**`: entry point for ML-driven selection. No binary/multiclass fork — a single-class drop is the per-species case with N=1.
+
+`**_select_frames_with_strategy(...)**`: the buckets, in value order — fish size bands, then per-species peaks, then uncertainty, then start. Spacing is **within a class** (`temporal_spacing_seconds`), not across: two frames of one species 10s apart show the same individual, while two different classes at the same instant are one image serving both. Blocking across classes starved the catch-all bucket to zero on real data.
+
+`**collapse_peaks(peaks, counts, spacing)**`: merges peaks that can share one frame *without losing any species' count*, checked both directions against the per-frame count table. A naive merge of two species peaking 1s apart undercounted one of them by 44% on a real drop.
+
+`**size_band_timestamps(counts, species, n_bands, spacing, metric="diag")**`: bands the catch-all class by box **diagonal** `√(w²+h²)`. Not aspect ratio — the camera looks down, so in-plane rotation is free and aspect encodes heading, not shape. Not area — rotation-sensitive for elongated animals. Measured diagonal spread was 4.1× for `fish` vs 1.8–2.7× for named species, the signature of a mixed bucket.
+
+`**blind_selections(...)**`: evenly-spaced frames chosen without consulting the model — the only ones that can surface a fish it never detected. `spread_timestamps(power=1.0)` for an even spread; `power=2.0` back-loads toward `sampling_end` for bait-attraction density.
+
+**Blind frames are mandatory, and a missing sampling window is fatal to expert review.** `blind_export` (default 3) is taken **always**, topped up further if the ML buckets left the drop short of `min_frames_per_drop`. Treating them as filler meant a detection-dense drop got none, which is backwards — that is exactly where checking what the model missed matters most.
+
+Both blind selection and the strategy need `sampling_start` and `sampling_end`. A drop missing `sampling_start` has always raised. A drop missing **`sampling_end`** used to log a warning and skip blind frames, which is the dangerous case: the run succeeds, a volume appears, an expert reviews it, and nothing anywhere records that the review contained only ML-nominated moments and so **could not have revealed a missed fish**. ~41% of deployments (1 255 of 3 064) have a null `sampling_end`, so this was primed to affect ~995 `ingest_status=ok` drops.
+
+`select_frames(..., allow_fallback_window=False)` now splits the two paths by what the frames become:
+
+| Path | Missing `sampling_end` | Why |
+|---|---|---|
+| Expert review (`--biigle-upload`) | **raises** | The output is a reported abundance figure and scarce expert time. A silently weaker review is worse than no review. |
+| Training (`extract_training_frames`) | falls back to `deployment_validation.buv_video_duration_seconds` (1800), warns | The output is training labels. An approximate window beats losing the blind frames entirely. |
+
+`**write_blind_selections / upsert_selections**`: the `--test-frames` selections CSV, and the timestamp-keyed merge that keeps the CSV describing everything ever sent to a volume (Biigle appends rather than replaces).
 
 ---
 
-### `spyfish/ml/training/extract_training_frames.py` — Standalone training-data bootstrap
+### `spyfish/ml/training/extract_training_frames.py` — Survey-volume upload
 
-CLI tool, not invoked from `run_pipeline.py`. Pulls N frames per drop directly from S3 via cv2 byte-range seeking (no full-video download), runs the configured detector for pre-annotation, and uploads to a survey-level Biigle volume. Used to seed an annotation campaign when there isn't enough labeled data to retrain. See §18 "Bootstrapping training data" for the design narrative.
+CLI tool, not invoked from `run_pipeline.py`. Selects frames, extracts them, builds a COCO and uploads to a **survey-level** Biigle volume. Since the 2026-08 consolidation it shares every stage with `--biigle-upload` except the destination — selection, extraction and COCO all come from `extraction/`, and this module holds only the survey-volume wiring plus the CLI.
 
-`**process_drop(drop_id, *, force=False, no_upload=False, model=None)**`: Full lifecycle for one drop — extract → infer → upload → DB write — with auto-resume from on-disk artefacts. `_try_load_from_disk` checks `training_frames/` for existing JPGs (parses timestamps from filenames, reads dims from one JPG) and the matching `_raw.csv` per current annotation_type config; the function then skips whichever stages are already done.
+`**process_drop(drop_id, *, force=False, no_upload=False, test_frames=False)**`: select → extract → COCO → upload → DB write. The two modes differ only in the first step:
+- **default** — `require_ml_raw_csv` reads the detections `--ml` produced (a `FileNotFoundError` naming `--ml` if absent), then the shared `select_frames` writes the selections CSV.
+- **`--test-frames`** — `write_blind_selections` picks timestamps without consulting the model, so no `--ml` prerequisite and no video download; the model then runs over just the extracted frames (`run_inference_on_paths`) to build the COCO.
 
-`**process_survey(survey_id, *, force=False, no_upload=False)**`: Iterates `process_drop` over every eligible drop in a survey (must have `video_presence='present'` AND `sampling_start` AND `sampling_end`); pre-loads the YOLO model once. Continues past per-drop failures, writing a timestamped `training_frames_failures_{YYYYMMDD_HHMMSS}.csv` next to the survey's training-frames area.
+`**process_survey(survey_id, *, force=False, no_upload=False, test_frames=False)**`: iterates `process_drop` over every eligible drop (needs `video_presence='present'`, `sampling_start`, `sampling_end`). Continues past per-drop failures, writing a timestamped `training_frames_failures_{YYYYMMDD_HHMMSS}.csv`.
 
-`**extract_frames_for_drop(drop_id, *, n_frames=None, force=False)**`: Single `cv2.VideoCapture` open over a presigned S3 URL, N seeks at quadratic-back-loaded timestamps in `[sampling_start, sampling_end]`. Returns an `ExtractionResult` (paths, timestamps, fps, image dims, output dir).
+`**require_ml_raw_csv(drop_id)**`: locates `{drop_id}_{model_stem}_raw.csv`. Video download, inference, MaxN and status all belong to `--ml`; an earlier version re-ran inference here, duplicating `MLRunner` while skipping its `process_maxn` and status advance.
 
-`**run_inference_to_csv(extraction, *, model=None, ...)**`: Batched `model.predict()` across all frames in one call (amortises GPU dispatch). Writes `{drop_id}_{annotation_type}_raw.csv` in the same schema as `ml.run_inference` so `build_coco_from_raw_csv` consumes it without modification.
+Selection helpers (`write_blind_selections`, `upsert_selections`) live in `extraction/select_frames.py`; `upload_to_survey_volume` lives in `biigle/upload_frames.py` beside its per-drop sibling `create_biigle_volume`. The selections CSV **upserts on timestamp** rather than overwriting, because Biigle volumes append — a clobbered CSV would stop describing what the volume holds.
 
-`**upload_drop_to_survey_volume(extraction, raw_csv_path)**`: Builds COCO, uploads JPGs to `get_training_frames_s3_prefix(survey_id)` (idempotent), calls `find_or_create_volume_and_add_frames` (returns volume_id + filename→biigle_id map), pushes annotations via the map (skipping the per-drop full image fetch).
-
-CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass DB and on-disk skips), `--no-upload` (stop after inference).
+CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass DB skip), `--no-upload` (stop before S3/Biigle), `--test-frames` (skip ML, sample blind).
 
 ---
 
@@ -1602,7 +1663,11 @@ CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass 
 
 ### `spyfish/validation/data_validator.py` — Data quality
 
-`**DataValidator`**: Applies rules from `config.yaml` (`validation_rules` section). Rule types: `required`, `unique`, `formats` (regex), `foreign_keys`, `relationships`, `value_range`. All errors go to `validation_errors` table and are visible in Streamlit.
+`**DataValidator`**: Applies rules from `config.yaml` (`validation_rules` section). Rule types: `required`, `unique`, `formats` (regex), `foreign_keys`, `multi_foreign_keys`, `relationships`, `value_range`, `one_of`.
+
+`multi_foreign_keys` exists because a plain foreign key is an `isin` between two columns of the same name, which cannot check either reserve reference: `LinkToMarineReserve` holds comma-joined names for a site between two areas, and the DropID's three-letter prefix is a code embedded in a longer string. The rule takes a `separator` (split the cell) or an `extract` regex (pull the code out) and checks each part against a named column of another dataset. Both were unchecked until 2026-08-18 — the `reserves` rules were entirely empty, so `Marine Reserves.csv` was downloaded and ignored. An unknown area name is now an error rather than a new marine reserve with its own row in every per-area chart. Note what NOT to check: comparing the DropID prefix to the embedded SiteID prefix gives 24 false positives, because a survey legitimately visits another reserve's sites.
+
+`one_of` checks a categorical column against its allowed list and distinguishes the two failure modes, because they need different fixes: a value that differs from an allowed one only in case or spacing is a *spelling* problem, and one that matches nothing is a new category. ProtectionStatus uses it — an unrecognised status does not raise anywhere, it silently falls into `Other` and leaves the reserve comparison without a word. Known statuses also normalise case-insensitively at ingest (`_clean_protection_status`), so any casing of a known value stores as the one spelling. All errors go to `validation_errors` table and are visible in Streamlit.
 
 ---
 
@@ -1679,29 +1744,37 @@ The retrain run prints these markers to the log — scan them to confirm the pip
 sbatch spyfish/ml/training/train_job.sl
 ```
 
-### Bootstrapping training data — `extract_training_frames`
+### Survey-level frame upload — `extract_training_frames`
 
-Standalone CLI for seeding an annotation campaign when there isn't yet enough labeled data to retrain (early phase of a new species or new survey area). Pulls N frames per drop directly from S3 via cv2 byte-range seeking — **no full-video download** — runs the configured detector for pre-annotation, and uploads to a survey-level Biigle volume for expert annotation.
+Standalone CLI that puts a whole survey's review frames into one Biigle volume. Shares its selection, extraction and COCO code with `--biigle-upload`; only the destination differs.
 
 ```bash
 python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV
 python -m spyfish.ml.training.extract_training_frames --drop-id  KSF_20240124_BUV_KSF_085_01
-python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV --no-upload   # dry run
-python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV --force       # bypass skips
+python -m spyfish.ml.training.extract_training_frames --survey-id KSF_20240124_BUV --no-upload    # dry run
+python -m spyfish.ml.training.extract_training_frames --drop-id  <DROP> --test-frames             # no ML needed
 ```
 
-**Per-drop flow.** N back-loaded timestamps in `[sampling_start, sampling_end]` (`_quadratic_timestamps`, density biased toward the end where bait-attracted fish density peaks; N from `training_extraction.n_frames`, default 10) → cv2 over presigned S3 URL → batched YOLO predict (model from `config.get_pipeline_model(training_extraction.annotation_type)`, `binary` or `species`) → COCO build (reuses `build_coco_from_raw_csv`) → S3 upload at `get_training_frames_s3_prefix(survey_id)` (flat per-survey prefix; filenames carry the drop_id) → Biigle volume `"{survey_id} — Training frames"` (created on first drop, appended to thereafter) → annotation push → write `training_biigle_volume_id` to the deployment row.
+**Per-drop flow.** `select_frames` over the drop's ML raw CSV (see §"Frame selection") → selections CSV (upserted) → `extract_frames_from_selections` writes JPEGs to `{drop}/training_frames/` and builds the COCO → S3 upload → survey volume, created on the first drop and appended to thereafter → annotation push → `training_biigle_volume_id` on the deployment row.
 
-**Per-survey volumes, not per-drop.** Annotators reviewing one inbox per drop across 30+ drops would face 30 inboxes. One survey-level volume = one inbox + one set of label-tree decisions. Per-drop traceability lives in the embedded drop_id in every filename.
+**Volume filename convention — the per-drop path lives in the filename.** Biigle resolves an image as `volume.url + "/" + filename`, and a volume's `url` is fixed at creation. So a survey-pooled volume points at the **survey directory** and each file is named with its per-drop path:
 
-**Auto-resume.** Re-running on a survey after any partial failure (rate-limit, killed process) resumes automatically — no flag, no manifest. `process_drop` checks state in this order:
+```
+volume.url   disk-134://process_files/deployment_data/{survey}/
+filename     {drop}/training_frames/{drop}__frame_<secs>s.jpg
+```
 
-1. `training_biigle_volume_id` set in DB → skip the drop entirely.
-2. `training_frames/{drop_id}__frame_*.jpg` + matching `_raw.csv` on disk → skip extract + inference, go straight to upload.
-3. JPGs but no raw CSV → re-run inference, then upload.
-4. Nothing → full pipeline.
+That keeps one layout everywhere: S3 mirrors local, so `prepare_training_data`'s `_IMAGE_SOURCE_DIRS` walk of `{drop}/training_frames/` works against either. `get_training_frames_s3_prefix(survey_id)` returns the survey dir, and `upload_frames_to_s3(..., relative_to=...)` produces names relative to it.
 
-Filenames round-trip the timestamp losslessly (`{drop_id}__frame_{t:.3f}s.jpg`), so timestamps are recovered by parsing names; image dimensions come from one `cv2.imread` of the first JPG. `--force` bypasses both the DB skip and the on-disk reuse.
+Volumes created before this convention point straight at `{survey}/training_frames` and hold bare basenames. **They keep working and cannot be converted** — changing the layout would mean rewriting every image's filename, and moving the files would 404 every existing annotation's image. Both conventions therefore exist in production simultaneously, and anything parsing a Biigle frame filename must read either: use `biigle_to_yolo.drop_id_from_frame_filename`, which takes the basename before splitting on `__frame_`. A bare `split("__frame_")[0]` returns the whole leading path on a nested name, producing drop_ids that match no deployment — silent data loss, covered by `tests/unit/test_biigle_filename_conventions.py`.
+
+**COCO files are scoped by workflow.** `config.get_coco_annotations_path(drop_id, target)` — `""` for the expert-review path, `"training"` here. The two workflows select *different* frames from the same drop (review takes ML detection peaks at fractional timestamps, training takes blind evenly-spaced ones), so a COCO is only meaningful against the image set it was built for. Before the split both wrote one filename and whichever extractor ran last destroyed the other's record of what the model predicted — and an upload could push one workflow's boxes at the other's images, where every filename join misses and the annotations vanish with no error.
+
+**`--test-frames`** replaces the first step with an even spread of timestamps chosen without the model, then runs the detector over just those frames. No `--ml` prerequisite, no video download — the fast way to eyeball a deployment or produce training data before a model exists.
+
+**Per-survey volumes, not per-drop.** One inbox and one set of label-tree decisions per survey, rather than 30+. Per-drop traceability lives in the drop_id embedded in every filename.
+
+**Re-runs.** `training_biigle_volume_id` set in the DB skips the drop; `--force` bypasses it. Biigle volumes append rather than replace, so re-running adds frames rather than duplicating a volume, and the selections CSV upserts to stay a true record of everything ever sent for that drop.
 
 **Biigle call pattern.** `find_or_create_volume_and_add_frames` returns `(volume_id, filename_to_biigle_id)` populated from `add_files_to_volume`'s response. `upload_coco_annotations_to_biigle` accepts the map and skips a per-drop full `get_volume_images` fetch — that fetch was the dominant rate-limit-burner because the volume's image count grows with every drop and the helper does ~N concurrent GETs. Net per-survey cost dropped from O(K²) image fetches (K = drops processed) to O(n_frames) (only on the first-drop-of-fresh-volume case). A defensive fallback fires `get_volume_images` once if the map is incomplete — handles partial-state retries where files were already registered in the volume from a prior crashed run.
 

@@ -325,6 +325,7 @@ def extract_frames_from_selections(
     video_path: str,
     raw_csv_path: str,
     write_coco: bool = True,
+    coco_target: str = "",
 ) -> pd.DataFrame:
     """
     Extract one clean JPEG per row in the selections CSV at the exact MaxN peak frame,
@@ -349,6 +350,11 @@ def extract_frames_from_selections(
             COCO themselves, e.g. the Zooniverse → BIIGLE path, where the ML
             raw CSV has no detections at the volunteer-selected timestamps and
             ``rerun_inference_on_extracted_frames`` writes the COCO instead.
+        coco_target: Workflow scope for the COCO filename, passed straight to
+            ``config.get_coco_annotations_path``. Default "" is the
+            expert-review COCO; the training-frame extractor passes "training"
+            so its blind-selected frame set cannot overwrite the review path's
+            ML-peak frame set (they describe different images for the same drop).
 
     Returns:
         selections_df with 'FramePath' column added.
@@ -470,7 +476,7 @@ def extract_frames_from_selections(
 
     if write_coco:
         coco = build_coco_from_raw_csv(raw_csv_path, deduped_records)
-        coco_path = config.get_coco_annotations_path(drop_id)
+        coco_path = config.get_coco_annotations_path(drop_id, target=coco_target)
         coco_path.parent.mkdir(parents=True, exist_ok=True)
         with open(coco_path, "w") as f:
             json.dump(coco, f, indent=2)

@@ -22,6 +22,7 @@ from ecology_data import (
 )
 from utils import CACHE_TTL_SECONDS
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.config.wrapper import config
 from spyfish.database.connection import connect_readonly
 
@@ -56,6 +57,10 @@ def load_annotations() -> pd.DataFrame:
             "time_of_max_seconds, confidence_agreement FROM annotations",
             conn,
         )
+    # NULL_DEPLOYMENT rows record "reviewed, nothing seen". As NaN they keep
+    # working with every notna/groupby path; isna() finds exactly these rows,
+    # since a source that never reviewed a drop has no rows at all.
+    df.loc[df["scientific_name"] == NULL_DEPLOYMENT, "scientific_name"] = pd.NA
     return add_display_names(
         join_site_metadata(add_drop_id_columns(df), load_sites()),
         load_common_names(),
@@ -278,6 +283,20 @@ def unify_unidentified(frame: pd.DataFrame) -> pd.DataFrame:
     if "display_name" in out.columns:
         out.loc[is_other, "display_name"] = label
     return out
+
+
+def effort_per(frame: pd.DataFrame, keys, name: str = "analysed") -> pd.DataFrame:
+    """Distinct deployments per key — the denominator every rate divides by.
+
+    Eight charts used to derive this individually, with three different
+    zero-handling policies between them. One definition, so "per deployment"
+    cannot mean different things on neighbouring charts. `keys` is a column
+    name or list of names; the count comes back as column `name`.
+
+    Division stays with the caller (`.clip(lower=1)` on the denominator is the
+    house rule), because what is being divided differs per chart.
+    """
+    return frame.groupby(keys)["drop_id"].nunique().reset_index(name=name)
 
 
 def real_species(frame: pd.DataFrame) -> pd.DataFrame:

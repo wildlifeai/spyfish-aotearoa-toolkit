@@ -28,6 +28,9 @@ import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 from ecology_data import (  # noqa: E402
+    OTHER_PROTECTION,
+    PROTECTED,
+    UNPROTECTED,
     pielou,
     protection_group,
     shannon,
@@ -35,31 +38,35 @@ from ecology_data import (  # noqa: E402
 )
 from theme import (  # noqa: E402
     NEUTRAL,
-    PROTECTION_COLORS,
     protection_color_map,
     protection_sort_key,
 )
 
 from spyfish.config.wrapper import config  # noqa: E402
 
-from ..charting import source_coverage_note, style  # noqa: E402
-from ..data import protection_rank as _prot_rank  # noqa: E402
-from ..data import real_species  # noqa: E402
+from ..charting import (  # noqa: E402
+    group_colors,
+    group_dashes,
+    protection_dashes,
+    source_coverage_note,
+    style,
+)
+from ..data import effort_per, real_species  # noqa: E402
 from ..layout import section  # noqa: E402
+from ._map import gate_notice, site_skeleton  # noqa: E402
 
 # The two sides of a reserve boundary, named once so the aggregation, the
-# table and the line dashes cannot disagree about what they are called.
-INSIDE = "Inside reserve"
-OUTSIDE = "Outside"
-SIDE_DASHES = {
-    INSIDE: "solid",
-    OUTSIDE: "dot",
-    "Inside ÷ outside": "solid",
-}  # noqa: E402
+# table and the line dashes cannot disagree about what they are called. The
+# dash and colour conventions come from `charting`, shared with the Species
+# view; the ratio line is its own metric and gets its own entry.
+INSIDE = PROTECTED
+OUTSIDE = UNPROTECTED
+PARTIAL = OTHER_PROTECTION
+SIDE_DASHES = {**group_dashes(), "Inside ÷ outside": "solid"}
 from ..site_data import _fit_zoom, split_reserve_rows  # noqa: E402
 
 
-def render_protection_status(df, embedded: bool = False) -> None:
+def render_protection_status(df) -> None:
     """Deployments per protection class, strongest protection first.
 
     Horizontal, in a half-width column. The class names are long ("Type I MPA
@@ -68,18 +75,12 @@ def render_protection_status(df, embedded: bool = False) -> None:
     size. `category_orders` on a horizontal bar maps top-down, so listing the
     classes strongest-first puts the strongest protection at the top.
 
-    `embedded` drops the section heading and the caption. Beside the By MPA
-    table it is one half of a row, not a section of its own, and a full heading
-    inside a column read as a section nested in a section.
+    Only rendered embedded beside the By MPA table, so it draws a bold line
+    header rather than a section heading: it is one half of a row, not a
+    section of its own, and a full heading inside a column read as a section
+    nested in a section.
     """
-    if embedded:
-        st.markdown("**Deployments by protection status**")
-    else:
-        section("By protection status")
-        st.caption(
-            "Protection class of the area each site sits in, from the site "
-            "metadata. Darker blues are stronger protection; warm is none."
-        )
+    st.markdown("**Deployments by protection status**")
 
     prot = (
         df.groupby("protection_status")["drop_id"]
@@ -98,7 +99,7 @@ def render_protection_status(df, embedded: bool = False) -> None:
         color_discrete_map=protection_color_map(prot["protection_status"]),
         category_orders={"protection_status": prot["protection_status"].tolist()},
         text="deployments",
-        height=340 if embedded else 460,
+        height=340,
     )
     fig_prot.update_traces(
         marker_cornerradius=4, textposition="outside", cliponaxis=False
@@ -112,9 +113,9 @@ def render_protection_status(df, embedded: bool = False) -> None:
 
 
 def render_by_mpa(
-    df: pd.DataFrame, effort_view: pd.DataFrame, protection_source=None
+    df: pd.DataFrame, effort_view: pd.DataFrame, protection_source: pd.DataFrame
 ) -> None:
-    """Per-MPA rollup: sites, deployments analysed, species and mean MaxN."""
+    """Per-MPA rollup: sites, deployments analysed, species and richness."""
     # ── Per-reserve rollup ────────────────────────────────────────────────────────
 
     st.caption(
@@ -123,37 +124,43 @@ def render_by_mpa(
         "reserve holds, not how the programme divides up."
     )
 
+    # Species per deployment, not mean MaxN: the old column summed MaxN across
+    # species before dividing, exactly the snapper-plus-rock-lobster number the
+    # caption below the populations panel refuses. Richness counts only real
+    # species (the generic and unidentified classes are N unknowns wearing one
+    # label), summed per deployment then divided by the analysed count, so a
+    # deployment where nothing was identified still weighs the mean down.
+    split_df = real_species(split_reserve_rows(df))
     reserve_rows = (
-        split_reserve_rows(df)
-        .groupby("reserve")
-        .agg(
-            sites=("site_id", "nunique"),
-            species=("scientific_name", "nunique"),
-            total_maxn=("maxn", "sum"),
-        )
+        split_df.groupby("reserve")
+        .agg(sites=("site_id", "nunique"), species=("scientific_name", "nunique"))
         .reset_index()
+    )
+    rich_sum = (
+        split_df.groupby(["reserve", "drop_id"])["scientific_name"]
+        .nunique()
+        .groupby("reserve")
+        .sum()
+        .reset_index(name="rich_sum")
     )
     # Effort per reserve comes from the deployments table, not from the sightings, so
     # a reserve where nothing was seen still shows its analysed count rather than
     # vanishing from the table.
-    reserve_effort = (
-        split_reserve_rows(effort_view)
-        .groupby("reserve")["drop_id"]
-        .nunique()
-        .reset_index(name="analysed")
+    reserve_effort = effort_per(split_reserve_rows(effort_view), "reserve")
+    reserve_rows = (
+        reserve_rows.merge(rich_sum, on="reserve", how="left")
+        .merge(reserve_effort, on="reserve", how="outer")
+        .fillna({"sites": 0, "species": 0, "rich_sum": 0, "analysed": 0})
     )
-    reserve_rows = reserve_rows.merge(reserve_effort, on="reserve", how="outer").fillna(
-        {"sites": 0, "species": 0, "total_maxn": 0, "analysed": 0}
-    )
-    reserve_rows["mean_maxn"] = reserve_rows["total_maxn"] / reserve_rows[
+    reserve_rows["species_per_dep"] = reserve_rows["rich_sum"] / reserve_rows[
         "analysed"
     ].clip(lower=1)
-    reserve_rows = reserve_rows.sort_values("mean_maxn", ascending=False)
+    reserve_rows = reserve_rows.sort_values("species_per_dep", ascending=False)
 
-    # Protection class beside the table, not a mean-MaxN bar chart: the table
-    # already carries `mean_maxn`, so ranking it again would say the same thing
-    # twice. Protection is the one thing about an area the table cannot show.
-    protection_source = effort_view if protection_source is None else protection_source
+    # Protection class beside the table, not another ranking chart: the table
+    # already carries `species_per_dep`, so ranking it again would say the same
+    # thing twice. Protection is the one thing about an area the table cannot
+    # show.
     res_left, res_right = st.columns([1, 1])
     with res_left:
         st.markdown("**Per reserve**")
@@ -167,16 +174,18 @@ def render_by_mpa(
                 "sites": st.column_config.NumberColumn("Sites"),
                 "analysed": st.column_config.NumberColumn("Analysed"),
                 "species": st.column_config.NumberColumn("Species"),
-                "mean_maxn": st.column_config.NumberColumn("Mean MaxN", format="%.2f"),
+                "species_per_dep": st.column_config.NumberColumn(
+                    "Species/dep", format="%.1f"
+                ),
             },
-            column_order=["reserve", "sites", "analysed", "species", "mean_maxn"],
+            column_order=["reserve", "sites", "analysed", "species", "species_per_dep"],
         )
         st.caption(
             "**Analysed** is the deployment count each mean rests on. A reserve "
             "with two analysed drops is far less certain than one with forty."
         )
     with res_right:
-        render_protection_status(protection_source, embedded=True)
+        render_protection_status(protection_source)
 
 
 def render_mpa_populations(
@@ -195,9 +204,7 @@ def render_mpa_populations(
     # here rather than passed in: the Site detail table on the Sites page builds
     # the same frame from the same `effort_view`, and one definition in two
     # places is safer than a shared argument that either caller could change.
-    site_effort = (
-        effort_view.groupby("site_id")["drop_id"].nunique().reset_index(name="analysed")
-    )
+    site_effort = effort_per(effort_view, "site_id")
     # ── Map (gated) ───────────────────────────────────────────────────────────────
 
     st.divider()
@@ -210,10 +217,10 @@ def render_mpa_populations(
     )
 
     # Indicator species come from config (reporting.indicator_species), intersected
-    # with what is present so the default is never empty.
-    present = df_context.loc[
-        ~df_context["scientific_name"].isin(config.non_species_classes)
-    ]
+    # with what is present so the default is never empty. `real_species` also
+    # keeps the unidentified bucket out of the picker: it is N unknown species
+    # wearing one label, not a species to map.
+    present = real_species(df_context)
     sci_to_display = (
         present.dropna(subset=["display_name"])
         .drop_duplicates("scientific_name")
@@ -282,27 +289,53 @@ def render_mpa_populations(
     # ── Indicator species over time, protected vs unprotected ────────────────────
 
     trend_subject = sci_to_display[map_sci] if map_sci else measure_label
-    st.markdown(f"#### {trend_subject} over time, inside vs outside protection")
-    st.caption(
-        "Protected covers "
-        + ", ".join(config.protected_statuses)
-        + ". Partial regimes (Mataitai, Taiapure, seafloor-only) count as unprotected "
-        "because they do not restrict the take of these species. Deployments "
-        "whose protection status is not recorded are left out of both lines."
+    st.markdown(f"#### {trend_subject} over time, by protection")
+    # Per-status is the default: which regime a line belongs to is the first
+    # question readers ask of this chart. The binary inside-vs-outside stays
+    # for the report's central protected-against-unprotected comparison.
+    by_status = (
+        st.radio(
+            "Lines",
+            ["Each protection status", "Inside vs outside"],
+            horizontal=True,
+            key="map_trend_lines",
+            help="**Inside vs outside** is the report's central comparison: "
+            "protected against unprotected, partial regimes excluded from "
+            "both. **Each protection status** keeps every recorded regime as "
+            "its own line — solid means protected, dashed partial, dotted "
+            "unprotected.",
+        )
+        == "Each protection status"
     )
+    if by_status:
+        st.caption(
+            "One line per recorded protection status. Deployments whose "
+            "status is not recorded are grouped as 'Not recorded'. Lines "
+            "resting on few deployments swing hard — hover for the number "
+            "behind each point."
+        )
 
-    # The shared bucketing (config.protected_statuses; unknown → None), so this
-    # trend and the Species view's comparison classify every deployment the
-    # same way.
-    protection_class = protection_group
+        def protection_class(status):
+            return status.fillna("Not recorded")
+
+    else:
+        st.caption(
+            "Protected covers "
+            + ", ".join(config.protected_statuses)
+            + ". Partial regimes (Mataitai, Taiapure, seafloor-only) count as "
+            "unprotected because they do not restrict the take of these "
+            "species. Deployments whose protection status is not recorded are "
+            "left out of both lines."
+        )
+        # The shared bucketing (config.protected_statuses; unknown → None), so
+        # this trend and the Species view's comparison classify every
+        # deployment the same way.
+        protection_class = protection_group
 
     trend_effort = effort_view.copy()
     trend_effort["protection"] = protection_class(trend_effort["protection_status"])
-    effort_by_year = (
-        trend_effort.dropna(subset=["survey_year"])
-        .groupby(["survey_year", "protection"])["drop_id"]
-        .nunique()
-        .reset_index(name="analysed")
+    effort_by_year = effort_per(
+        trend_effort.dropna(subset=["survey_year"]), ["survey_year", "protection"]
     )
 
     trend_src = df_context.dropna(subset=["survey_year"]).copy()
@@ -317,7 +350,7 @@ def render_mpa_populations(
         )
         y_title = "Mean MaxN per analysed deployment"
     else:
-        real = trend_src[~trend_src["scientific_name"].isin(config.non_species_classes)]
+        real = real_species(trend_src)
         per_year = real.groupby(["survey_year", "protection", "scientific_name"])[
             "maxn"
         ].sum()
@@ -333,10 +366,22 @@ def render_mpa_populations(
     # line rather than being closed up, a compressed axis silently implies continuous
     # monitoring that did not happen.
     years_present = sorted(effort_by_year["survey_year"].dropna().unique())
+    # Which lines the grid holds: the two sides, or every status with either a
+    # measurement or effort — a status surveyed but never sighted still gets a
+    # line of real zeros rather than vanishing.
+    classes = (
+        sorted(
+            set(measured["protection"].dropna())
+            | set(effort_by_year["protection"].dropna()),
+            key=protection_sort_key,
+        )
+        if by_status
+        else ["Protected", "Unprotected"]
+    )
     if years_present:
         full_years = range(int(min(years_present)), int(max(years_present)) + 1)
         grid = pd.MultiIndex.from_product(
-            [list(full_years), ["Protected", "Unprotected"]],
+            [list(full_years), classes],
             names=["survey_year", "protection"],
         ).to_frame(index=False)
         trend = grid.merge(
@@ -364,19 +409,22 @@ def render_mpa_populations(
             markers=True,
             # Dotted for unprotected everywhere in the report, as on the Species
             # view: colour alone carries the comparison only for readers who see
-            # it, and these two lines are the report's central claim.
+            # it, and these two lines are the report's central claim. The
+            # per-status grouping reads dash and colour from the shared helpers
+            # so "solid = protected" still holds.
             line_dash="protection",
-            line_dash_map={"Protected": "solid", "Unprotected": "dot"},
-            color_discrete_map={
-                "Protected": PROTECTION_COLORS["Type I MPA (Marine Reserve)"],
-                "Unprotected": PROTECTION_COLORS["No protection"],
-            },
+            line_dash_map=(protection_dashes(classes) if by_status else group_dashes()),
+            color_discrete_map=(
+                protection_color_map(classes) if by_status else group_colors()
+            ),
             hover_data={"analysed": True},
             height=400,
         )
-        fig_trend.update_traces(
-            line={"width": 2}, marker={"size": 9}, connectgaps=False
-        )
+        # Connected across unsurveyed years: surveys run on a 1–2 year cadence,
+        # so a gap year is the rhythm of the programme, not missed monitoring.
+        # The markers still show exactly which years were surveyed, and hover
+        # carries the deployment count behind each point.
+        fig_trend.update_traces(line={"width": 2}, marker={"size": 9}, connectgaps=True)
         style(
             fig_trend,
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.04, "title": None},
@@ -385,9 +433,11 @@ def render_mpa_populations(
         fig_trend.update_xaxes(title=None, dtick=1)
         st.plotly_chart(fig_trend, use_container_width=True)
         st.caption(
-            "Every year in the range is on the axis; gaps are years with no analysed "
-            "deployments in that protection class. Hover for the number of "
-            "deployments behind each point."
+            "Every year in the range is on the axis. Markers are the years "
+            "actually surveyed for that protection class — the line between "
+            "them bridges unsurveyed years (surveys run on a 1–2 year "
+            "cadence), it does not mean continuous monitoring. Hover for the "
+            "number of deployments behind each point."
         )
 
     st.divider()
@@ -397,19 +447,7 @@ def render_mpa_populations(
     # padlock at the foot of the page.
     section("Site map")
 
-    if not show_coords:
-        st.info(
-            "🔒 The map is hidden. Enable **Show map** in the sidebar and enter the "
-            "password to view site positions.\n\n"
-            "Site coordinates are withheld because BUV sites are baited and placed "
-            "where fish aggregate, a map of them joined to abundance would function "
-            "as a fishing guide, and for rare species as a poaching aid."
-        )
-    elif "latitude" not in df.columns:
-        st.warning(
-            "Coordinates are not in the database yet, run `--ingest` to populate them."
-        )
-    else:
+    if gate_notice(df, show_coords):
         # Name the subject on the map itself, by the time you have scrolled here the
         # radio is off-screen, and an unlabelled bubble map says nothing about which
         # animal it describes.
@@ -418,14 +456,7 @@ def render_mpa_populations(
         # not the chosen species was seen there. Built from df_context (all filters
         # except species) so switching the radio never changes which sites exist,
         # only how big their bubbles are.
-        site_geo = (
-            df_context.dropna(subset=["latitude", "longitude"])
-            .drop_duplicates("site_id")[
-                ["site_id", "region", "protection_status", "latitude", "longitude"]
-            ]
-            .merge(site_effort, on="site_id", how="left")
-        )
-        site_geo["analysed"] = site_geo["analysed"].fillna(0)
+        site_geo = site_skeleton(df_context, site_effort, cols=("region",))
 
         if map_sci:
             per_site = (
@@ -439,10 +470,8 @@ def render_mpa_populations(
             mapped["value"] = mapped["total_maxn"] / mapped["analysed"].clip(lower=1)
         else:
             # Diversity is computed from summed MaxN per species at each site, with
-            # the generic classes dropped first.
-            real = df_context[
-                ~df_context["scientific_name"].isin(config.non_species_classes)
-            ]
+            # the generic and unidentified classes dropped first.
+            real = real_species(df_context)
             counts = real.groupby(["site_id", "scientific_name"])["maxn"].sum()
             fn = DIVERSITY_MEASURES[diversity_name]
             scores = (
@@ -871,11 +900,15 @@ def render_reserve_trends(df: pd.DataFrame) -> None:
         st.warning("No data after filters.")
         return
 
+    # Richness first, and therefore the default: total MaxN sums across
+    # species, so one schooling species dominates it — kept as an explicit
+    # "all species summed" option for the within-reserve time comparison,
+    # where the species mix partially cancels, but not as the headline.
     metric_choice = st.radio(
         "Metric",
         [
-            "Mean MaxN per deployment",
             "Species richness per deployment",
+            "Total MaxN per deployment (all species summed)",
             "Reserve effect ratio (inside ÷ outside)",
             "Flagship species MaxN",
         ],
@@ -932,24 +965,32 @@ def render_reserve_trends(df: pd.DataFrame) -> None:
     # more annotation rows, so AHE (43% inside) read "No protection" while SLI
     # (58% inside) read "Marine Reserve" — the same kind of place, labelled
     # oppositely, and liable to flip when the year filter moved.
-    df["_side"] = df["protection_status"].apply(
-        lambda p: INSIDE if _prot_rank(p) <= 1 else OUTSIDE
-    )
-
-    if metric_choice == "Mean MaxN per deployment":
-        series = (
-            df.groupby(["reserve_code", "survey_year", "_side"])
-            .apply(_agg_total_maxn_per_dep, include_groups=False)
-            .reset_index(name="metric")
+    df = df.assign(_side=protection_group(df["protection_status"]))
+    partial = int((df["_side"] == PARTIAL).sum())
+    df = df[df["_side"].isin([INSIDE, OUTSIDE])]
+    if partial:
+        st.caption(
+            f"{partial:,} annotation rows are left out: a partial or unclear "
+            "protection regime is neither the reserve nor its control."
         )
-        y_title = "Mean MaxN per deployment"
-    elif metric_choice == "Species richness per deployment":
+    if df.empty:
+        st.warning("No deployments sit clearly inside or outside a reserve.")
+        return
+
+    if metric_choice == "Species richness per deployment":
         series = (
             df.groupby(["reserve_code", "survey_year", "_side"])
             .apply(_agg_richness_per_dep, include_groups=False)
             .reset_index(name="metric")
         )
         y_title = "Mean species per deployment"
+    elif metric_choice == "Total MaxN per deployment (all species summed)":
+        series = (
+            df.groupby(["reserve_code", "survey_year", "_side"])
+            .apply(_agg_total_maxn_per_dep, include_groups=False)
+            .reset_index(name="metric")
+        )
+        y_title = "Mean total MaxN per deployment (all species)"
     elif metric_choice == "Reserve effect ratio (inside ÷ outside)":
         by_side = (
             df.groupby(["reserve_code", "survey_year", "_side"])
@@ -1151,10 +1192,11 @@ def render_inside_share(df) -> None:
         st.info("No annotations in this selection.")
         return
 
-    sided = df.assign(
-        Side=df["protection_status"].apply(
-            lambda p: INSIDE if _prot_rank(p) <= 1 else OUTSIDE
-        )
+    # All three groups here, unlike the comparisons: this chart describes how
+    # the surveying was spread, and the partial-regime deployments are part of
+    # that picture even though no comparison can use them.
+    sided = df.assign(Side=protection_group(df["protection_status"])).dropna(
+        subset=["Side"]
     )
     per_reserve = (
         sided.groupby(["reserve_code", "Side"])["drop_id"]
@@ -1162,10 +1204,12 @@ def render_inside_share(df) -> None:
         .unstack("Side")
         .fillna(0)
     )
-    for column in (INSIDE, OUTSIDE):
+    for column in (INSIDE, OUTSIDE, PARTIAL):
         if column not in per_reserve.columns:
             per_reserve[column] = 0
-    per_reserve["total"] = per_reserve[INSIDE] + per_reserve[OUTSIDE]
+    per_reserve["total"] = (
+        per_reserve[INSIDE] + per_reserve[OUTSIDE] + per_reserve[PARTIAL]
+    )
     per_reserve = per_reserve[per_reserve["total"] > 0]
     if per_reserve.empty:
         st.info("No annotated deployments in this selection.")
@@ -1174,7 +1218,7 @@ def render_inside_share(df) -> None:
     per_reserve = per_reserve.sort_values("share_inside")
 
     long = (
-        per_reserve[[INSIDE, OUTSIDE]]
+        per_reserve[[INSIDE, OUTSIDE, PARTIAL]]
         .reset_index()
         .melt(id_vars="reserve_code", var_name="Side", value_name="Deployments")
     )
@@ -1187,9 +1231,9 @@ def render_inside_share(df) -> None:
         barmode="stack",
         category_orders={
             "reserve_code": per_reserve.index.tolist(),
-            "Side": [INSIDE, OUTSIDE],
+            "Side": [INSIDE, OUTSIDE, PARTIAL],
         },
-        color_discrete_map={INSIDE: "#0B3D6B", OUTSIDE: "#D96C3F"},
+        color_discrete_map=group_colors(),
         text="Deployments",
         height=max(280, 26 * len(per_reserve) + 120),
     )
@@ -1201,8 +1245,9 @@ def render_inside_share(df) -> None:
     table = per_reserve.reset_index().rename(
         columns={
             "reserve_code": "Reserve",
-            INSIDE: "Inside",
-            OUTSIDE: "Outside",
+            INSIDE: "Protected",
+            OUTSIDE: "Unprotected",
+            PARTIAL: "Other",
             "total": "Total",
             "share_inside": "Share inside",
         }
@@ -1210,7 +1255,16 @@ def render_inside_share(df) -> None:
     table["Share inside"] = table["Share inside"] * 100
     with st.expander("The numbers behind this"):
         st.dataframe(
-            table[["Reserve", "Inside", "Outside", "Total", "Share inside"]],
+            table[
+                [
+                    "Reserve",
+                    "Protected",
+                    "Unprotected",
+                    "Other",
+                    "Total",
+                    "Share inside",
+                ]
+            ],
             hide_index=True,
             width="stretch",
             column_config={

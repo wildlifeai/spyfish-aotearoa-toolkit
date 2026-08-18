@@ -6,7 +6,33 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.config.wrapper import config
+
+
+def null_deployment_row(
+    drop_id: str, annotated_by: str, external_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """The absence record: this source reviewed the deployment and saw nothing.
+
+    One shape for every writer (ML zero-detection, citsci all-NOTHINGHERE,
+    empty BIIGLE review), so the convention cannot drift between sources.
+    `scientific_name` and `time_of_max` carry the NULL_DEPLOYMENT marker —
+    display fields, where a blank would read as missing data. The numeric
+    fields stay honest numbers: the count for "nothing seen" IS zero, and
+    there is no timestamp or confidence to report.
+    """
+    return {
+        "drop_id": drop_id,
+        "scientific_name": NULL_DEPLOYMENT,
+        "time_of_max": NULL_DEPLOYMENT,
+        "time_of_max_seconds": None,
+        "max_interval": 0,
+        "annotated_by": annotated_by,
+        "interval_annotation": "",
+        "confidence_agreement": None,
+        "external_id": external_id,
+    }
 
 
 class AnnotationDatabaseManager:

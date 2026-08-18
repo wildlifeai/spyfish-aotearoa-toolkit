@@ -2,7 +2,8 @@
 Tests for ML annotation ingestion — the null-row convention.
 
 A deployment where inference completed with zero detections must still leave
-a record in the annotations DB: one null-species row with max_interval=0,
+a record in the annotations DB: one NULL_DEPLOYMENT sentinel row with
+max_interval=0,
 matching the convention expert reviews use. "ML ran and found nothing" has to
 be distinguishable from "ML never ran".
 """
@@ -10,6 +11,7 @@ be distinguishable from "ML never ran".
 import pandas as pd
 import pytest
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations
@@ -48,7 +50,7 @@ def test_zero_detections_writes_null_row(ann_db):
 
     rows = ann_db.get_annotations_for_drop(DROP, "ml")
     assert len(rows) == 1
-    assert rows[0]["scientific_name"] is None
+    assert rows[0]["scientific_name"] == NULL_DEPLOYMENT
     assert rows[0]["max_interval"] == 0
     assert rows[0]["external_id"] == MODEL
 
@@ -77,7 +79,7 @@ def test_rerun_with_zero_detections_replaces_real_rows(ann_db):
 
     rows = ann_db.get_annotations_for_drop(DROP, "ml")
     assert len(rows) == 1
-    assert rows[0]["scientific_name"] is None
+    assert rows[0]["scientific_name"] == NULL_DEPLOYMENT
     assert rows[0]["max_interval"] == 0
 
 
@@ -93,4 +95,4 @@ def test_null_row_scoped_to_model(ann_db):
     rows = ann_db.get_annotations_for_drop(DROP, "ml")
     by_model = {r["external_id"]: r for r in rows}
     assert by_model[other_model]["scientific_name"] == "Pagrus auratus"
-    assert by_model[MODEL]["scientific_name"] is None
+    assert by_model[MODEL]["scientific_name"] == NULL_DEPLOYMENT

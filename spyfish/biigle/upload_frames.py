@@ -16,10 +16,10 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 
 from spyfish.biigle.biigle_handler import BiigleHandler
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
-from spyfish.utils import load_species_labels
 
 # ── Step 1: S3 upload ────────────────────────────────────────────────────────
 
@@ -101,6 +101,13 @@ def upload_frames_to_s3(
         f"(total {len(uploaded)}/{len(frame_paths)}) → '{s3_prefix}'"
     )
     return uploaded
+
+
+# Volume names are the ID alone. The project says whether it is training or
+# review, and the ID says whether it is a survey or a drop, so a suffix only
+# ate characters in a UI that truncates.
+SURVEY_VOLUME_NAME_TEMPLATE = "{survey_id}"
+DROP_VOLUME_NAME_TEMPLATE = "{drop_id}"
 
 
 # ── Find-or-create-and-append: idempotent survey-level volume management ─────
@@ -279,7 +286,7 @@ def create_biigle_volume(
 
     handler = BiigleHandler()
     s3_url = handler.build_s3_url(s3_frames_prefix)
-    volume_name = f"{drop_id}. ML frames"
+    volume_name = DROP_VOLUME_NAME_TEMPLATE.format(drop_id=drop_id)
 
     logging.info(
         f"Creating Biigle image volume '{volume_name}' "
@@ -414,11 +421,14 @@ def upload_coco_annotations_to_biigle(
 
     # Routing sources, in precedence order:
     #   1. config.label_mapping, explicit per-species override
-    #   2. species_labels.csv, full BIIGLE label tree (~175 species)
+    #   2. the species registry, which owns every name → BIIGLE label id
     #   3. 'bait' class → default_bait_label_id
     #   4. Fallback → label_id (default_fish_label_id), with a warning
+    #
+    # The registry keys both the bare scientific name and the label tree's
+    # "Common - Scientific" form, so either spelling of a class resolves.
     label_mapping = config.label_mapping or {}
-    species_tree = load_species_labels().name_to_label_id
+    species_tree = species_registry().name_to_biigle_label_id()
     unmatched: Counter = Counter()
 
     # Build the Biigle bulk payload
@@ -592,3 +602,35 @@ def upload_frames_to_biigle(
         upload_coco_annotations_to_biigle(volume_id, coco)
 
     return volume_info
+
+
+def upload_to_survey_volume(drop_id: str, frame_paths: list, coco: dict) -> int:
+    """Upload a drop's frames + COCO to its SURVEY-level Biigle volume.
+
+    The only part of this module that is genuinely training-specific: a
+    survey-pooled volume and prefix rather than the per-drop ones the expert
+    path uses. Everything before it is shared.
+    """
+    survey_id = config.get_survey_id_from_drop(drop_id)
+    s3_prefix = config.get_training_frames_s3_prefix(survey_id)
+    frames_df = pd.DataFrame({"FramePath": [str(p) for p in frame_paths]})
+    # Names are relative to the survey dir, so each carries its
+    # {drop}/frames/ segment and S3 mirrors the local layout.
+    file_names = upload_frames_to_s3(
+        frames_df, s3_prefix, relative_to=config.deployment_data_dir / survey_id
+    )
+    if not file_names:
+        raise RuntimeError(f"{drop_id}: no frames uploaded to S3, aborting Biigle.")
+
+    volume_name = SURVEY_VOLUME_NAME_TEMPLATE.format(survey_id=survey_id)
+    volume_id, filename_to_id = find_or_create_volume_and_add_frames(
+        volume_name=volume_name,
+        s3_frames_prefix=s3_prefix,
+        file_names=file_names,
+        media_type="image",
+    )
+    upload_coco_annotations_to_biigle(
+        volume_id, coco, filename_to_biigle_id=filename_to_id
+    )
+    logging.info(f"{drop_id}: frames in Biigle volume {volume_id} ({volume_name})")
+    return volume_id
