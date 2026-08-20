@@ -105,6 +105,17 @@ def prepare_from_annotations(
                 f"were not found in loaded annotations (stale entries?): {sorted(stale)}"
             )
 
+    canon = config.training_species_canonicalization
+    if canon:
+        mapped = df["ScientificName"].isin(canon.keys())
+        if mapped.any():
+            logging.info(
+                f"Canonicalized {int(mapped.sum())} MaxN row(s) across "
+                f"{df.loc[mapped, 'ScientificName'].nunique()} synonym name(s) "
+                f"({sorted(df.loc[mapped, 'ScientificName'].unique())})."
+            )
+            df["ScientificName"] = df["ScientificName"].map(lambda n: canon.get(n, n))
+
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
 
@@ -114,14 +125,28 @@ def prepare_from_annotations(
 # ---------------------------------------------------------------------------
 
 
+def canonicalize_species(name: str) -> str:
+    """Map synonym / hierarchy-split species names to their canonical class.
+
+    The map lives in config.yaml (training.species_canonicalization) and merges
+    names for the same animal, family/species splits ('Chelidonichthys kumu'
+    -> 'Triglidae') and nomenclature drift ('Pseudocaranx dentex' ->
+    'Pseudocaranx georgianus'), BEFORE any counting, flooring, or class-list
+    building. Names not in the map pass through unchanged.
+    """
+    return config.training_species_canonicalization.get(name, name)
+
+
 def _build_id_remap(
     src_class_map_path: Path,
     unified_names: List[str],
     fallback_species: str = "fish",
 ) -> Dict[int, Optional[int]]:
     """Build {old_id: new_id} by decoding the source map to species names, then
-    looking each up in `unified_names`. Species missing from `unified_names`
-    redirect to `fallback_species` if present, otherwise map to None (dropped).
+    looking each up in `unified_names`. Names are canonicalized first so
+    synonym classes collapse into one unified id. Species missing from
+    `unified_names` redirect to `fallback_species` if present, otherwise map
+    to None (dropped).
     """
     src_map = species_registry(
         class_map_path=src_class_map_path
@@ -129,7 +154,7 @@ def _build_id_remap(
     unified_ids = {name: idx for idx, name in enumerate(unified_names)}
     fallback_id = unified_ids.get(fallback_species)
     return {
-        old_id: unified_ids.get(species, fallback_id)
+        old_id: unified_ids.get(canonicalize_species(species), fallback_id)
         for old_id, species in src_map.items()
     }
 
@@ -274,7 +299,7 @@ def discover_extra_drops(
                             drop_species.add(id_to_name[cid])
 
         extras.append(drop_id)
-        species_set.update(drop_species)
+        species_set.update(canonicalize_species(s) for s in drop_species)
 
     if extras:
         logging.info(
@@ -526,8 +551,17 @@ def copy_split_files(
     """
     img_out = output_dir / "images" / split_name
     lbl_out = output_dir / "labels" / split_name
-    img_out.mkdir(parents=True, exist_ok=True)
-    lbl_out.mkdir(parents=True, exist_ok=True)
+    # Rebuild each split dir from scratch. Without this, symlinks from earlier
+    # assemblies survive re-runs (mkdir(exist_ok=True) + "if not exists" links
+    # only ever add), and links whose source was later deleted turn into
+    # dangling entries that the dataset validator counts but training crashes
+    # on mid-epoch (FileNotFoundError, seen 2026-08-21 with removed
+    # extra_no_survey_id volumes). The dirs hold only copies/symlinks generated
+    # here, so wiping loses nothing.
+    for out in (img_out, lbl_out):
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True, exist_ok=True)
 
     if image_index is None:
         image_index = _build_image_index(images_dir)
@@ -572,6 +606,22 @@ def copy_split_files(
 
             n_images += 1
             n_labels += 1
+
+    # Belt-and-braces: a symlink whose source chain breaks between indexing and
+    # here (or a source that is itself a dangling link) would crash training
+    # mid-epoch; drop it now, loudly, together with its label twin.
+    if symlink:
+        dangling = [p for p in img_out.iterdir() if not p.exists()]
+        for p in dangling:
+            p.unlink()
+            (lbl_out / f"{p.stem}.txt").unlink(missing_ok=True)
+            n_images -= 1
+            n_labels -= 1
+        if dangling:
+            logging.warning(
+                f"copy_split_files [{split_name}]: removed {len(dangling)} dangling "
+                f"image link(s) whose source no longer exists, e.g. {dangling[0].name}"
+            )
 
     log_fn = logging.warning if (n_images == 0 and drop_ids) else logging.info
     log_fn(

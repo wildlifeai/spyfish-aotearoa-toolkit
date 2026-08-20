@@ -777,7 +777,14 @@ def download_training_volume_labels(
         # collides with the expert MaxN-review export and isn't mistaken for it.
         # Header-only for fully-empty drops so discover_extra_drops still sees it.
         raw_path = config.get_biigle_training_raw_csv_path(drop_id)
-        slice_df = drop_df if drop_df is not None else pd.DataFrame(columns=report_cols)
+        slice_df = (
+            drop_df.copy() if drop_df is not None else pd.DataFrame(columns=report_cols)
+        )
+        # Stamp the source volume so the split can resolve
+        # training.force_train_biigle_volumes to drop ids offline. CSVs written
+        # before this column existed simply never match a forced volume;
+        # re-download with --force to stamp them.
+        slice_df["volume_id"] = volume_id
         slice_df.to_csv(raw_path, index=False)
 
         # Positives → YOLO boxes. convert_annotations_to_yolo writes one .txt per

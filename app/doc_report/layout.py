@@ -11,14 +11,14 @@ So these chips navigate rather than filter. Each one is an anchor link to a
 heading further down the page; every section stays rendered, and the strip is a
 table of contents you can also scroll past.
 
-**Slots.** The chips and any view-specific filters belong in the sticky header
-with the report-wide filters, one band of chrome, one thing that stays put as
-you scroll. But the header is drawn by `shell.render` *before* the view runs,
-and only the view knows its own section titles and its own filters. So the
-shell creates two empty containers inside the header and registers them here;
-`chips()` and `extra_filters()` render into those containers whenever the view
-gets round to calling them. Streamlit places output by container, not by call
-order, so the strip lands in the header even though it is asked for later.
+**Slots.** The chips sit on the title row of the sticky header, and a view's
+own filters go to the sidebar under the shared ones. But the header and the
+sidebar filter block are drawn by `shell.render` *before* the view runs, and
+only the view knows its own section titles and its own filters. So the shell
+creates two empty containers and registers them here; `chips()` and
+`extra_filters()` render into those containers whenever the view gets round to
+calling them. Streamlit places output by container, not by call order, so the
+strip lands in the header even though it is asked for later.
 
 Anchors are explicit, not Streamlit's auto-slug. The auto-slug is derived from
 the heading text, so "Bad / excluded deployments per MPA" and any heading with
@@ -46,46 +46,8 @@ def set_slots(chips_container, filters_container) -> None:
     _SLOTS["filters"] = filters_container
 
 
-# The header's grid: the title on the left, then a filter region divided into
-# four equal slots. Every row in the band, shared filters, a view's own
-# filters, the chip strip, is laid out against these numbers, so every filter
-# on the page is exactly the same width and every row starts at the same x.
-#
-# The reset button takes the fourth slot of the first row rather than a narrow
-# column of its own. A narrow column would make that row's slots a different
-# width from every other row's, which is the thing this grid exists to prevent.
-# Widen TITLE_W to give the page heading and the reset button more room; the
-# filter region shrinks to match, since only the ratio between the two matters.
-TITLE_W = 1.9
-FILTER_W = 4.76
-FILTER_SLOTS = 4
-SLOT_W = FILTER_W / FILTER_SLOTS
-
-
-def header_columns(count: int = FILTER_SLOTS) -> list:
-    """A header row: the title-width spacer, then `count` equal filter slots.
-
-    The first element is the spacer (or the title itself, on the first row).
-    """
-    return st.columns([TITLE_W] + [SLOT_W] * count, vertical_alignment="bottom")
-
-
-# Left edge of the filter region, as a share of the header's width. Streamlit
-# divides a column row by subtracting a fixed 16px gap per boundary and then
-# splitting what is left by the ratios, so the first filter starts at
-# `(W - 4*16) * TITLE_W/total + 16`, which is `TITLE_W/total` of the full width
-# plus about 2px. Close enough to write as a `calc()`, and stable at any width.
-_FILTER_X = f"calc({TITLE_W / (TITLE_W + FILTER_W):.4%} + 2px)"
-
 _CHIP_CSS = """
 <style>
-  .st-key-section_chips {
-    padding-left: __FILTER_X__;
-    /* The header's rows are pulled tight against each other; the chips are the
-       one row that is not a filter, so they get air above them to read as a
-       separate thing rather than as a fourth control. */
-    padding-top: .55rem;
-  }
   /* Streamlit hands the strip's element container a height measured before the
      pills exist, so the box stays 11px tall while the chips inside it stand
      26px, and the overflow hangs through the header's bottom edge and over
@@ -105,10 +67,13 @@ _CHIP_CSS = """
   /* Flex, not a line of inline-blocks. An inline-block sits on the text
      baseline, so a pill taller than its line box hangs below it, the chips
      overflowed the header and the band's bottom edge cut through them. As flex
-     items they are measured by their own height, and the row grows to fit. */
+     items they are measured by their own height, and the row grows to fit.
+     Right-justified: the chips share the title row and hang off its right
+     edge, so a short strip does not leave a hole next to the title. */
   .st-key-section_chips [data-testid="stMarkdownContainer"] p {
     display: flex;
     flex-wrap: wrap;
+    justify-content: flex-end;
     gap: .2rem .3rem;
     margin: 0;
   }
@@ -148,9 +113,7 @@ _CHIP_CSS = """
     visibility: hidden;
   }
 </style>
-""".replace(
-    "__FILTER_X__", _FILTER_X
-)
+"""
 
 # Measures the sticky header, filters, chips and any view-specific filters,
 # and republishes its height as a CSS custom property.
@@ -216,12 +179,6 @@ def chips(titles: list[str]) -> None:
 
     slot = _SLOTS["chips"] or st.container(key="section_chips")
     with slot:
-        # Indented by CSS rather than by a spacer column. A spacer looks like
-        # the obvious answer but drifts: Streamlit subtracts a fixed 16px gap
-        # between every pair of columns before dividing the rest by the ratios,
-        # so a two-column row and a five-column row of the same ratios do not
-        # start at the same x. Every row would begin a few pixels further in
-        # than the one above it.
         st.markdown(
             " ".join(f"[{title}](#{slug(title)})" for title in titles),
             unsafe_allow_html=True,
@@ -230,24 +187,20 @@ def chips(titles: list[str]) -> None:
 
 @contextmanager
 def extra_filters(count: int = 3):
-    """Yield `count` columns in the header for a view's own filters.
+    """Yield `count` sidebar containers for a view's own filters.
 
-    Sites has three filters the other views do not (species, region, protection
-    status). Rendered in place they sat in the page, scrolled away with it, and
-    put a row of widgets between the chips and the first chart. Here they land
-    in the header under the shared filters, in the same right-hand region and
-    on the same grid.
+    The shared filters live in the sidebar, so a view's extras go directly
+    under them rather than in a band of their own on the page. The slot is the
+    container `shell.render` created there; the fallback (a view rendered
+    outside the shell) still lands in the sidebar rather than mid-page.
 
-    Yields only the filter columns, the spacer that aligns them is created
-    here, so a caller never has to know about it.
+    Yields a list so existing callers written against header columns
+    (`with filter_cols[0]:`) keep working unchanged — in the sidebar the
+    "columns" simply stack.
     """
-    slot = _SLOTS["filters"] or st.container(key="view_filters")
+    slot = _SLOTS["filters"] or st.sidebar.container(key="view_filters")
     with slot:
-        # Always the full four slots, however many the caller wants: the unused
-        # ones stay empty so three filters here sit under the first three above
-        # rather than stretching to fill the row.
-        columns = header_columns()
-        yield columns[1 : count + 1]
+        yield [st.container() for _ in range(count)]
 
 
 def section(title: str, **kwargs) -> None:

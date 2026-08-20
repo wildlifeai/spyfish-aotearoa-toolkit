@@ -186,11 +186,11 @@ def split_reserve_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filtered_site_frames(ctx: dict | None = None) -> dict:
-    """Frames for a caller that does not own the Sites page filters.
+    """Frames filtered by the report-wide sidebar filters.
 
-    Sites has three filters of its own (species, region, protection status) that
-    live in its `render`. A caller outside this page has only the report-wide
-    filters, so those three are left empty here rather than being invented.
+    Species is deliberately left out: the panels these frames feed carry their
+    own species picker, and `df_context` is the species-UNfiltered denominator
+    ("deployments where nothing was seen" is measured against it).
     """
     # Locked by default; unlocked per session via `render_map_gate` (the
     # sidebar control on the MPA view). Never hardcode True here, coordinates
@@ -202,14 +202,17 @@ def filtered_site_frames(ctx: dict | None = None) -> dict:
     )
     filters = dict(
         years=(ctx or {}).get("years"),
-        regions=[],
+        regions=(ctx or {}).get("regions") or [],
         reserves=(ctx or {}).get("reserves") or [],
-        protections=[],
+        protections=(ctx or {}).get("protections") or [],
     )
     df_context = apply_filters(df_all, **filters)
     return {
         "df_context": df_context,
         "effort_view": apply_filters(effort_all, **filters),
         "show_coords": show_coords,
+        # Not applied to the frames (see the docstring), but passed along so
+        # panels with their own species picker can honour the shared filter.
+        "species": (ctx or {}).get("species") or [],
         **filters,
     }

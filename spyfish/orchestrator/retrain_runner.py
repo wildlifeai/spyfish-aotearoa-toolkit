@@ -27,7 +27,11 @@ from spyfish.ml.training.prepare_training_data import (
     print_assembled_summary,
     print_per_drop_species_inventory,
 )
-from spyfish.ml.training.split_data import balance_val_drops, split_data
+from spyfish.ml.training.split_data import (
+    balance_val_drops,
+    force_train_drops_from_volumes,
+    split_data,
+)
 from spyfish.ml.training.train import run_training_pipeline
 
 
@@ -260,7 +264,7 @@ def run_retraining(
     )
 
     # 6. Split. Extras participate in the survey-aware split alongside MaxN
-    # drops so `force_val_drops` / `force_train_drops` and the per-survey
+    # drops so forced-train volumes and the per-survey
     # val_pct apply to them too. Canonical-ID extras (BNP_*, SLI_*, TUH_*) group
     # with their real survey; volume_<id> extras group under UNKNOWN_SURVEY.
     # Without forcing, the splitter pulls ~val_pct of each group into val,
@@ -277,8 +281,10 @@ def run_retraining(
             candidate_drops=candidate_drops,
             val_pct=config.training_val_balance_pct,
             tolerance=config.training_val_balance_tolerance,
-            force_val=config.training_force_val_drops,
-            force_train=config.training_force_train_drops,
+            force_train=force_train_drops_from_volumes(
+                config.training_force_train_biigle_volumes
+            ),
+            overshoot_weight=config.training_val_balance_overshoot_weight,
         )
     else:
         train_drops, val_drops, test_drops = split_data(

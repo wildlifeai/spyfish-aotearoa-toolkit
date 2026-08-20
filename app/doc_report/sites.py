@@ -22,7 +22,6 @@ from ecology_data import (  # noqa: E402
     load_effort,
     load_sites,
 )
-from theme import protection_sort_key  # noqa: E402
 
 from .charts.sites import (  # noqa: E402
     render_click_to_filter,
@@ -44,9 +43,9 @@ from .site_data import (  # noqa: E402
 def render(ctx: dict | None = None) -> None:
     """Render the whole Sites view.
 
-    `ctx` is accepted for interface parity with the other tabs and is not
-    read yet. Sites still owns its filters, which are richer than the
-    page-level ones. Folding them together is a later step.
+    Year, MPA, region and protection status arrive via `ctx` from the shared
+    sidebar block; species is this view's own picker (rendered into the
+    sidebar via `extra_filters`).
     """
     # Above this view's own filters, so the strip sits directly under the
     # report-wide filter band on every view rather than after a row of widgets
@@ -85,29 +84,13 @@ def render(ctx: dict | None = None) -> None:
 
     df_all = best_per_drop_species(df_all)
 
-    # Survey year and Marine reserve come from the report-wide filter on the
-    # title row, so they are not repeated here. Species, Region and Protection
-    # status are specific to this view.
+    # Year, MPA, region and protection status come from the shared sidebar
+    # block; species is this view's own picker below (the shared species
+    # filter was retired in favour of on-page pickers).
     year_range = (ctx or {}).get("years")
     reserves = (ctx or {}).get("reserves") or []
-
-    # Into the sticky header, in the same right-hand region and on the same
-    # grid as the report-wide filters directly above them, with the chips
-    # underneath. All six filters read as one block.
-    with extra_filters(3) as filter_cols:
-        with filter_cols[0]:
-            all_species = sorted(df_all["display_name"].dropna().unique())
-            species = st.multiselect("Species", all_species, default=[])
-
-        with filter_cols[1]:
-            all_regions = sorted(r for r in df_all["region"].dropna().unique() if r)
-            regions = st.multiselect("Region", all_regions, default=[])
-
-        with filter_cols[2]:
-            all_prot = sorted(
-                df_all["protection_status"].dropna().unique(), key=protection_sort_key
-            )
-            protections = st.multiselect("Protection status", all_prot, default=[])
+    regions = (ctx or {}).get("regions") or []
+    protections = (ctx or {}).get("protections") or []
 
     _filters = dict(
         years=year_range, regions=regions, reserves=reserves, protections=protections
@@ -119,6 +102,17 @@ def render(ctx: dict | None = None) -> None:
     # much larger number.
     df_context = apply_filters(df_all, **_filters)
     effort_view = apply_filters(effort_all, **_filters)
+
+    # This view's species picker, rendered into the sidebar under the shared
+    # filters. Options come from the already-filtered frame, so it never
+    # offers a species with no rows behind it under the current selection.
+    with extra_filters(1) as filter_cols:
+        with filter_cols[0]:
+            species = st.multiselect(
+                "Species (Sites view)",
+                sorted(df_context["display_name"].dropna().unique()),
+                default=[],
+            )
 
     df = df_context
     if species:

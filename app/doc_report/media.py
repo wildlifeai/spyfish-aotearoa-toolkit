@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from theme import NEUTRAL
 
-from .charting import style
+from .charting import style, year_axis
 from .charts.deployments import render_deployment_browser, render_exports
 from .layout import chips, section
 
@@ -275,6 +275,7 @@ def render(ctx: dict) -> None:
                 height=340,
                 legend=dict(orientation="h", y=1.12, x=0, title_text=""),
             )
+            year_axis(fig)
             st.plotly_chart(fig, key="media_year")
 
     st.divider()

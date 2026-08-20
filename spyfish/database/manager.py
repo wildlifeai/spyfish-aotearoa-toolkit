@@ -658,6 +658,27 @@ class DatabaseManager:
             )
             return [row["drop_id"] for row in cursor.fetchall()]
 
+    def get_survey_ml_status_summary(self, survey_id: str) -> Dict[str, List[str]]:
+        """Map ml_status -> [drop_id, ...] for every deployment in `survey_id`.
+
+        Used by survey-scoped ML runs to report why drops were not picked up
+        (still pending arrival, already complete, errored, ...).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                r"""
+                SELECT drop_id, ml_status FROM deployments
+                WHERE drop_id LIKE ? || '\_%' ESCAPE '\'
+                ORDER BY drop_id
+                """,
+                (survey_id,),
+            )
+            summary: Dict[str, List[str]] = {}
+            for row in cursor.fetchall():
+                summary.setdefault(row["ml_status"], []).append(row["drop_id"])
+            return summary
+
     def get_deployments_eligible(
         self,
         section: str,

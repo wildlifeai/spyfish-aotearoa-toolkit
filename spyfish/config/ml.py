@@ -235,6 +235,16 @@ class MLConfig(BaseConfig):
         )
 
     @property
+    def training_val_balance_overshoot_weight(self) -> float:
+        """Penalty per box a candidate val drop carries beyond any species'
+        deficit; makes the selector prefer the smallest drop that covers a need."""
+        return float(
+            get_required(
+                self.training_config, "val_balance_overshoot_weight", "training"
+            )
+        )
+
+    @property
     def local_training_dir(self) -> Path:
         return self.project_root / get_required(
             self.training_config, "local_training_dir", "training"
@@ -263,31 +273,36 @@ class MLConfig(BaseConfig):
         return self._parse_drop_ids_from_file(self.training_excluded_drops_file)
 
     @property
-    def training_force_val_drops_file(self) -> Path:
-        return self.project_root / get_required(
-            self.training_config, "force_val_drops_file", "training"
+    def training_species_canonicalization(self) -> dict:
+        """Synonym / hierarchy-split species-name merges, applied before any
+        counting, balancing, flooring, or class-list building. Maps a label's
+        scientific name to the canonical class name (e.g. 'Chelidonichthys
+        kumu' -> 'Triglidae')."""
+        mapping = dict(
+            get_required(self.training_config, "species_canonicalization", "training")
+            or {}
         )
+        chained = set(mapping) & set(mapping.values())
+        if chained:
+            raise ValueError(
+                "training.species_canonicalization has chained entries "
+                f"(a value is also a key): {sorted(chained)}. "
+                "Map every synonym directly to its final canonical name."
+            )
+        return mapping
 
     @property
-    def training_force_val_drops(self) -> set:
-        """DropIDs to force into the val split (overrides survey-aware donation)."""
-        return self._parse_drop_ids_from_file(self.training_force_val_drops_file)
-
-    @property
-    def training_force_train_drops_file(self) -> Path:
-        return self.project_root / get_required(
-            self.training_config, "force_train_drops_file", "training"
-        )
-
-    @property
-    def training_force_train_drops(self) -> set:
-        """DropIDs to force into the train split (overrides survey-aware donation).
-
-        Useful for bulk-import extras whose box totals would otherwise dominate
-        a small val pool. Force-val wins over force-train when a drop appears in
-        both files.
-        """
-        return self._parse_drop_ids_from_file(self.training_force_train_drops_file)
+    def training_force_train_biigle_volumes(self) -> set:
+        """BIIGLE volume ids whose drops are always placed in train (old-label
+        training volumes whose annotations shouldn't be evaluated against).
+        Resolved to drop ids via the volume_id column in each drop's
+        _biigle_training_raw.csv."""
+        return {
+            int(v)
+            for v in get_required(
+                self.training_config, "force_train_biigle_volumes", "training"
+            )
+        }
 
     @property
     def training_results_dir(self) -> Path:

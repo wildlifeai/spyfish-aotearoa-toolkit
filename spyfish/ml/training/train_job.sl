@@ -4,8 +4,11 @@
 #SBATCH --time=12:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
+# GPU choice (billing weight per GPU-hour in brackets — sinfo TRESBillingWeights):
+#   genoa: l4 [20], pro_6000 [130], h100 [200]; milan: a100 [90]. No a100 in genoa.
+# l4 (24GB) is ample for imgsz=640 batch=16 and the cheapest option.
 #SBATCH --partition=genoa
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=l4:1
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.err
 
@@ -39,6 +42,16 @@ PROJECT_DIR=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit
 source "${VENV}"
 cd "${PROJECT_DIR}"
 mkdir -p slurm_logs
+
+# Ultralytics keeps per-user defaults (runs_dir and friends) in
+# ~/.config/Ultralytics/settings.json, shared by every project on this
+# account. A YOLO call that forgets `project=` writes wherever that file
+# points, which is whatever project first imported ultralytics. A repo-local
+# config dir makes any such fallback land inside this repo instead.
+# The dir must exist BEFORE ultralytics imports: with a missing dir the env
+# var is silently ignored and everything falls back to /tmp.
+export YOLO_CONFIG_DIR="${PROJECT_DIR}/.ultralytics"
+mkdir -p "${YOLO_CONFIG_DIR}"
 
 echo "Starting Spyfish retraining on $(hostname)"
 nvidia-smi || true
