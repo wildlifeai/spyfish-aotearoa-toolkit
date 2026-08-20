@@ -5,7 +5,6 @@ Tests for S3Handler class.
 from unittest.mock import Mock, patch
 
 import pandas as pd
-
 from sftk.s3_handler import S3FileConfig, S3Handler
 
 

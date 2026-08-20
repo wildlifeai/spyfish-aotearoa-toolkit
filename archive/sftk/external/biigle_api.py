@@ -6,7 +6,6 @@ import copy
 
 import requests
 from requests.auth import HTTPBasicAuth
-
 from sftk.common import BIIGLE_API_EMAIL, BIIGLE_API_TOKEN
 
 

@@ -6,7 +6,33 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.config.wrapper import config
+
+
+def null_deployment_row(
+    drop_id: str, annotated_by: str, external_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """The absence record: this source reviewed the deployment and saw nothing.
+
+    One shape for every writer (ML zero-detection, citsci all-NOTHINGHERE,
+    empty BIIGLE review), so the convention cannot drift between sources.
+    `scientific_name` and `time_of_max` carry the NULL_DEPLOYMENT marker —
+    display fields, where a blank would read as missing data. The numeric
+    fields stay honest numbers: the count for "nothing seen" IS zero, and
+    there is no timestamp or confidence to report.
+    """
+    return {
+        "drop_id": drop_id,
+        "scientific_name": NULL_DEPLOYMENT,
+        "time_of_max": NULL_DEPLOYMENT,
+        "time_of_max_seconds": None,
+        "max_interval": 0,
+        "annotated_by": annotated_by,
+        "interval_annotation": "",
+        "confidence_agreement": None,
+        "external_id": external_id,
+    }
 
 
 class AnnotationDatabaseManager:
@@ -121,7 +147,7 @@ class AnnotationDatabaseManager:
         """Clear existing annotations for a given drop + source.
 
         When ``external_id`` is provided, only rows matching that exact
-        external_id are deleted — useful for ML ingestion where each model
+        external_id are deleted, useful for ML ingestion where each model
         writes rows tagged with its own name, and we want a re-run of one
         model to leave other models' rows intact. Without it, every row
         for the (drop_id, annotated_by) pair is cleared.
@@ -229,7 +255,7 @@ class AnnotationDatabaseManager:
         self, drop_id: Optional[str] = None, annotated_by: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Returns the canonical MaxN per drop × species × source — i.e. the peak
+        Returns the canonical MaxN per drop × species × source, i.e. the peak
         max_interval across all time intervals for each combination.
 
         This is the scientific result; contrast with deployments.ml_annotations
@@ -264,7 +290,10 @@ class AnnotationDatabaseManager:
             WHERE {extra_clause}a.id = (
                 SELECT id FROM annotations
                 WHERE drop_id = a.drop_id
-                  AND scientific_name = a.scientific_name
+                  -- IS, not =: null-species rows record "reviewed, nothing
+                  -- seen" and NULL = NULL is never true, so = silently drops
+                  -- every absence record from the summary.
+                  AND scientific_name IS a.scientific_name
                   AND annotated_by = a.annotated_by
                 ORDER BY max_interval DESC, id ASC
                 LIMIT 1

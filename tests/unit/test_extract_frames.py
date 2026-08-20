@@ -6,6 +6,11 @@ import csv
 
 from spyfish.extraction.extract_frames import build_coco_from_raw_csv
 
+# build_coco_from_raw_csv requires every frame record to name its source video
+# (single-video raw CSVs carry no drop_id column, so the record is the only
+# thing scoping the nearest-time lookup).
+DROP_ID = "KSF_20240124_BUV_KSF_085_01"
+
 
 def _write_raw_csv(path, rows):
     """Write a minimal raw inference CSV with the columns build_coco expects."""
@@ -38,6 +43,7 @@ class TestBuildCocoTimeTolerance:
                 "time_of_max": 120.05,  # within default 1.0s tolerance
                 "img_w": 1920,
                 "img_h": 1080,
+                "drop_id": DROP_ID,
             },
             {
                 "image_id": 2,
@@ -45,6 +51,7 @@ class TestBuildCocoTimeTolerance:
                 "time_of_max": 1700.0,  # way outside tolerance
                 "img_w": 1920,
                 "img_h": 1080,
+                "drop_id": DROP_ID,
             },
         ]
 
@@ -76,6 +83,7 @@ class TestBuildCocoTimeTolerance:
                 "time_of_max": 125.0,  # 5s away — outside default, inside 10s
                 "img_w": 1920,
                 "img_h": 1080,
+                "drop_id": DROP_ID,
             },
         ]
 
@@ -107,6 +115,7 @@ class TestBuildCocoTimeTolerance:
                 "time_of_max": 600.0,
                 "img_w": 1920,
                 "img_h": 1080,
+                "drop_id": DROP_ID,
             },
         ]
 

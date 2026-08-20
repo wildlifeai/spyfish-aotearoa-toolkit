@@ -19,9 +19,6 @@ class BiigleConfig(BaseConfig):
 
     @property
     def biigle_project_id(self) -> int:
-        val = os.getenv("BIIGLE_PROJECT_ID")
-        if val:
-            return int(val)
         return int(get_required(self.biigle_section, "project_id", "biigle"))
 
     @property
@@ -40,20 +37,7 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_projects, "done", "biigle.projects"))
 
     @property
-    def biigle_playground_project_id(self) -> int:
-        """Sandbox project for testing — set BIIGLE_PROJECT_ID to point uploads here."""
-        return int(get_required(self.biigle_projects, "playground", "biigle.projects"))
-
-    @property
-    def biigle_training_project_id(self) -> int:
-        """Legacy backup-of-record where training-data uploads land."""
-        return int(get_required(self.biigle_projects, "training", "biigle.projects"))
-
-    @property
     def disk_id(self) -> int:
-        val = os.getenv("BIIGLE_DISK_ID")
-        if val:
-            return int(val)
         return int(get_required(self.biigle_section, "disk_id", "biigle"))
 
     @property
@@ -69,14 +53,14 @@ class BiigleConfig(BaseConfig):
         )
 
     @property
-    def volume_report_type(self) -> int:
-        return int(
-            get_required(self.biigle_section, "volume_report_type_image", "biigle")
-        )
-
-    @property
     def done_labels(self) -> list:
         return get_required(self.biigle_section, "done_labels", "biigle")
+
+    @property
+    def genus_level_label_pattern(self) -> str:
+        """Regex for genus-level expert IDs ("Conger sp") accepted at sync
+        without a registry entry — see config.yaml for the rationale."""
+        return get_required(self.biigle_section, "genus_level_label_pattern", "biigle")
 
     @property
     def biigle_require_done_label(self) -> bool:
@@ -107,6 +91,44 @@ class BiigleConfig(BaseConfig):
     @property
     def default_label_tree_id(self) -> int:
         return int(get_required(self.biigle_section, "default_label_tree_id", "biigle"))
+
+    @property
+    def biigle_substrate_label_tree_id(self) -> int:
+        """Label-tree ID whose labels are CMECS substrate / cover categories.
+
+        Membership in this tree (resolved via the report's `label_id` column)
+        marks an annotation as substrate, measured for percent-cover. This is
+        what separates a substrate LineString from a fish-SIZE LineString, whose
+        label lives in the species tree (or is "Scale bar") instead."""
+        return int(
+            get_required(self.biigle_section, "substrate_label_tree_id", "biigle")
+        )
+
+    @property
+    def biigle_workflow_label_tree_id(self) -> int:
+        """Label-tree ID whose labels track annotator progress, not sightings.
+
+        "Done Volume", "In progress", "Nothing here", "Scale bar". Membership
+        here means the row must not become a scientific name, with the
+        exception of `biigle_workflow_tree_fish_label_ids` below."""
+        return int(
+            get_required(self.biigle_section, "workflow_label_tree_id", "biigle")
+        )
+
+    @property
+    def biigle_workflow_tree_keep_labels(self) -> dict:
+        """Workflow-tree label id → the class it becomes.
+
+        An expert marking a fish they could not identify to species has made a
+        real observation; dropping it because its label lives in the workflow
+        tree would lose it. Bait is kept for the same reason — it never counts
+        towards abundance, but it is a labelled fish and so is training data."""
+        return {
+            int(k): str(v)
+            for k, v in get_required(
+                self.biigle_section, "workflow_tree_keep_labels", "biigle"
+            ).items()
+        }
 
     @property
     def request_timeout_secs(self) -> int:

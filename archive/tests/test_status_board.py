@@ -9,7 +9,6 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-
 from sftk.status_board import StatusBoard, classify_video_status
 
 

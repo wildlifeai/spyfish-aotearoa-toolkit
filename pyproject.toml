@@ -20,6 +20,11 @@ dependencies = [
   "iniconfig==2.1.0",
   "jmespath==1.0.1",
   "numpy==2.2.4",
+  # Core, not optional: run_pipeline.py imports the ML/extraction chain at module
+  # level, so every CLI flag needs these present — including metadata-only ones
+  # like --ingest. ultralytics pulls torch, so a fresh install is ~2-3 GB.
+  "opencv-python>=4.10.0",
+  "ultralytics>=8.3.0",
   "openpyxl>=3.1.5",
   "packaging==24.2",
   "pandas==2.2.3",

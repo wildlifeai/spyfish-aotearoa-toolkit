@@ -47,7 +47,7 @@ def _build_ffmpeg_clip_cmd(
 ) -> List[str]:
     """Builds the ffmpeg command for extracting a single clip.
 
-    Single source of truth for the codec / preset / CRF / audio-strip flags —
+    Single source of truth for the codec / preset / CRF / audio-strip flags,
     both the CRF probe and the main extraction loop call this so they can't
     drift out of sync if a flag is added or changed.
     """
@@ -66,7 +66,7 @@ def _build_ffmpeg_clip_cmd(
         config.ffmpeg_preset,
         "-crf",
         str(crf),
-        "-an",  # strip audio — standard for processed clips
+        "-an",  # strip audio, standard for processed clips
         str(output_path),
     ]
 
@@ -106,7 +106,7 @@ def _probe_crf(
 
     Uses the log₂ relationship between CRF and file size (each +6 CRF ≈ halves size) to
     compute the target CRF in one step rather than trial-and-error. At most two ffmpeg calls.
-    The winning clip stays on disk — the main loop's exists() check skips it.
+    The winning clip stays on disk, the main loop's exists() check skips it.
     """
     size_mb = _extract_clip(video_path, seek_seconds, duration, output_path, base_crf)
     if not output_path.exists():
@@ -122,7 +122,7 @@ def _probe_crf(
         math.ceil(base_crf + 6 * math.log2(size_mb / size_limit_mb)) + 1, 51
     )
     logging.info(
-        f"CRF probe: {size_mb:.1f} MB over limit — recalculating to CRF {target_crf}"
+        f"CRF probe: {size_mb:.1f} MB over limit, recalculating to CRF {target_crf}"
     )
 
     final_size_mb = _extract_clip(
@@ -132,11 +132,11 @@ def _probe_crf(
         if final_size_mb >= size_limit_mb:
             logging.warning(
                 f"CRF probe: still {final_size_mb:.1f} MB at CRF {target_crf} "
-                "(log₂ estimate was approximate) — upload may be rejected by Zooniverse."
+                "(log₂ estimate was approximate), upload may be rejected by Zooniverse."
             )
     else:
         logging.error(
-            f"CRF probe: extraction failed at CRF {target_crf} — upload may be rejected."
+            f"CRF probe: extraction failed at CRF {target_crf}, upload may be rejected."
         )
 
     return target_crf
@@ -178,9 +178,9 @@ def extract_clips_from_selections(
 
     video_duration = _get_video_duration(video_path)
 
-    # Calibrate CRF using the highest-MaxN clip — most fish = most detail = largest file.
+    # Calibrate CRF using the highest-MaxN clip, most fish = most detail = largest file.
     # This gives a conservative (worst-case) CRF for the whole batch.
-    # The loop's exists() check will skip it — extracted exactly once, no waste.
+    # The loop's exists() check will skip it, extracted exactly once, no waste.
     # On re-runs, if the probe clip already exists and is under the limit, skip entirely.
     col = config.csv_max_interval_column
     if col in df.columns and df[col].notna().any():
@@ -204,7 +204,7 @@ def extract_clips_from_selections(
         and probe_path.stat().st_size / (1 << 20) < config.size_limit_mb
     ):
         logging.info(
-            "CRF probe: probe clip already exists and is under limit — skipping probe."
+            "CRF probe: probe clip already exists and is under limit, skipping probe."
         )
         effective_crf = base_crf
     else:

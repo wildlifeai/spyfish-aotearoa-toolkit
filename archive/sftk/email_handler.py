@@ -8,18 +8,28 @@ from dataclasses import dataclass
 from email.header import decode_header
 from email.message import Message
 from typing import Optional
-from sftk.common import IMAP_SERVER, IMAP_PORT, EMAIL_USER, EMAIL_PASS, EMAIL_ARCHIVE_FOLDER_CANDIDATES
+
 from sftk import log_config
+from sftk.common import (
+    EMAIL_ARCHIVE_FOLDER_CANDIDATES,
+    EMAIL_PASS,
+    EMAIL_USER,
+    IMAP_PORT,
+    IMAP_SERVER,
+)
+
 
 @dataclass
 class Email:
     """Dataclass for storing email data."""
+
     subject: str
     sender: str
     to: str
     date: str
     body: str
     attachments: list[str]
+
 
 class EmailHandler(object):
     """
@@ -33,6 +43,7 @@ class EmailHandler(object):
     For more information on IMAP, see the RFC:
     https://datatracker.ietf.org/doc/html/rfc3501.html
     """
+
     _instance = None
     _lock = threading.Lock()
 
@@ -151,7 +162,9 @@ class EmailHandler(object):
 
         if mailbox.lower() not in [m.lower() for m in mailboxes]:
             logging.error(f"Mailbox '{mailbox}' not found.")
-            raise ValueError(f"Mailbox '{mailbox}' not found. Please choose from: {mailboxes}")
+            raise ValueError(
+                f"Mailbox '{mailbox}' not found. Please choose from: {mailboxes}"
+            )
 
         res, mailbox = self.mail.select(mailbox)
         if res != "OK":
@@ -230,16 +243,13 @@ class EmailHandler(object):
         Returns:
             None
         """
-        allowed_flags = [
-            "Seen",
-            "Answered",
-            "Flagged",
-            "Deleted",
-            "Draft",
-            "Recent"
-        ]
+        allowed_flags = ["Seen", "Answered", "Flagged", "Deleted", "Draft", "Recent"]
         # Format to capitalise the first letter and lowercase the rest
-        flags = [f.capitalize() for f in flags] if isinstance(flags, list) else [flags.capitalize()]
+        flags = (
+            [f.capitalize() for f in flags]
+            if isinstance(flags, list)
+            else [flags.capitalize()]
+        )
 
         # Create the flag string
         flag_str = ""
@@ -294,7 +304,6 @@ class EmailHandler(object):
 
         if delete:
             self.set_email_flags(mail_id, "Deleted")
-
 
     @staticmethod
     def format_criteria(*criterion: str) -> str:
@@ -392,7 +401,9 @@ class EmailHandler(object):
         """Extracts plain-text body from an email.message.Message object."""
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition", "")):
+                if part.get_content_type() == "text/plain" and "attachment" not in str(
+                    part.get("Content-Disposition", "")
+                ):
                     return part.get_payload(decode=True).decode(errors="ignore").strip()
         else:
             return msg.get_payload(decode=True).decode(errors="ignore").strip()

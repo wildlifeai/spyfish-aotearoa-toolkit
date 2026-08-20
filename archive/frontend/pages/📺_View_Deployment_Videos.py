@@ -2,7 +2,6 @@ import hmac
 
 import streamlit as st
 from botocore.exceptions import ClientError
-
 from sftk.common import S3_BUCKET
 from sftk.s3_handler import S3Handler
 

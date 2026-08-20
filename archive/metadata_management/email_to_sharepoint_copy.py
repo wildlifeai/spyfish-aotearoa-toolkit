@@ -7,21 +7,19 @@ Functions:
     - append_new_obs_to_csv: Append new observations to a CSV file in S3.
 """
 
+import email
+import imaplib
+import json
+import logging
 import os
 import re
 from io import StringIO
-import logging
-from typing import List, Dict, Tuple
-import imaplib
-import email
-import json
+from typing import Dict, List, Tuple
 
-import pandas as pd
 import boto3
-
-from tqdm import tqdm
+import pandas as pd
 from dotenv import load_dotenv
-
+from tqdm import tqdm
 
 # Set up logging
 logging.basicConfig(

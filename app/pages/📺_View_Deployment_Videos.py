@@ -1,5 +1,5 @@
 import streamlit as st
-from utils import render_contact_note
+from utils import check_password
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
@@ -17,7 +17,7 @@ def get_presigned_url(key: str, expires_in: int = 3600) -> str | None:
 
 
 def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
-    # Lazy-import: PyAV pulls in ffmpeg native libs — keep page cold-start light
+    # Lazy-import: PyAV pulls in ffmpeg native libs, keep page cold-start light
     # for visitors who only watch videos and never click "Extract Clip".
     import logging
     import os
@@ -30,7 +30,7 @@ def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
     # Write to a NamedTemporaryFile rather than BytesIO. `movflags=faststart`
     # makes the mov muxer do a post-write moov-atom shift; some FFmpeg builds
     # error with "[Errno 2] No such file or directory: '<none>'" when that
-    # shift is requested against a file-like object — the muxer needs a real
+    # shift is requested against a file-like object, the muxer needs a real
     # path. Disk round-trip is cheap (~50 MB local SSD).
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
     tmp_path = tmp.name
@@ -39,7 +39,7 @@ def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
         with av.open(video_url) as in_container:
             video_stream = in_container.streams.video[0]
             logging.info(f"clip extract: opened in {time.monotonic() - t_start:.2f}s")
-            # Seek to near start_s via HTTP range requests — doesn't download
+            # Seek to near start_s via HTTP range requests, doesn't download
             # the whole file. PyAV lands on the keyframe immediately preceding
             # start_s.
             t_seek = time.monotonic()
@@ -53,14 +53,14 @@ def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
                 out_stream = out_container.add_stream_from_template(video_stream)
                 # QuickTime rejects HEVC streams with the `hev1` codec tag (its
                 # default in many FFmpeg builds + most GoPro sources) and
-                # accepts `hvc1`. The bitstream itself is identical — only the
+                # accepts `hvc1`. The bitstream itself is identical, only the
                 # 4-byte container tag differs. Browsers/VLC don't care.
                 src_codec = video_stream.codec_context.name
                 if src_codec == "hevc":
                     out_stream.codec_tag = "hvc1"
                 logging.info(
                     f"clip extract: source codec is {src_codec!r}"
-                    f"{' — tagged hvc1 for QuickTime' if src_codec == 'hevc' else ''}"
+                    f"{', tagged hvc1 for QuickTime' if src_codec == 'hevc' else ''}"
                 )
                 # Don't filter packets with pts_s < start_s: seek lands us on
                 # the keyframe immediately preceding start_s, and dropping it
@@ -107,10 +107,9 @@ def extract_clip_bytes(video_url: str, start_s: float, end_s: float) -> bytes:
 
 
 # --- Contact note ---
-# Shared helper (single source of truth in utils.render_contact_note). Rendered
-# first, before any video/S3 logic, so it paints even if the rest of the page
-# errors out — the clip-download path has broken this page before.
-render_contact_note()
+# Rendered by the entrypoint (support.render_contact_note after nav.run()), so
+# it sits at the bottom of the sidebar on every page, this page does not call
+# it itself.
 
 # --- MAIN APP ---
 # --- Streamlit UI ---
@@ -129,7 +128,49 @@ def _presign_into_session_state(key: str, drop_label: str) -> bool:
         return False
     st.session_state["presigned_url"] = ps_url
     st.session_state["presigned_drop_id"] = drop_label
+    # Presigning succeeds for archived objects too — the failure only shows
+    # when the player tries to GET the bytes. Fetch the storage state now so
+    # the page can say "frozen" instead of showing a video box that silently
+    # never plays.
+    try:
+        st.session_state["presigned_storage"] = get_s3_handler().get_object_storage(key)
+    except Exception:  # noqa: BLE001, the note is best-effort, never blocking
+        st.session_state["presigned_storage"] = None
     return True
+
+
+def _render_storage_note() -> None:
+    """Say whether the loaded video is in frozen storage, and what that means.
+
+    The pipeline archives footage to DEEP_ARCHIVE (see `video_presence` =
+    `archived`). Such an object still presigns, but the player cannot read the
+    bytes until a restore completes, so the state is surfaced here rather than
+    discovered as an endlessly-buffering video box.
+    """
+    storage = st.session_state.get("presigned_storage") or {}
+    storage_class = storage.get("storage_class")
+    restore = storage.get("restore") or ""
+    if storage_class in ("DEEP_ARCHIVE", "GLACIER"):
+        if 'ongoing-request="true"' in restore:
+            st.warning(
+                "🧊 This video is in frozen storage and a **restore is in "
+                "progress**. It cannot play yet — deep-archive restores "
+                "typically take up to 12–48 hours. Check back later."
+            )
+        elif 'ongoing-request="false"' in restore:
+            st.info(
+                "🧊 This video lives in frozen storage but a **temporary "
+                "restored copy is available**, so it should play normally. "
+                f"The copy expires: `{restore}`"
+            )
+        else:
+            st.error(
+                "🧊 This video is in **frozen storage (deep archive)**. The "
+                "player below will not work until the footage is restored — "
+                "ask the team to trigger a restore, then allow up to 48 hours."
+            )
+    elif storage_class:
+        st.caption(f"Storage: `{storage_class}` — playable now, no restore needed.")
 
 
 # Shareable links: ?drop_id=ABC123 pre-fills the input and auto-presigns on first
@@ -137,7 +178,19 @@ def _presign_into_session_state(key: str, drop_label: str) -> bool:
 url_drop_id = st.query_params.get("drop_id", "").strip()
 
 # --- Checkbox: Use direct S3 path OR DropID ---
+# Direct-path mode is password-gated: it presigns ANY key in the bucket, which
+# includes the SharePoint metadata CSVs carrying site GPS coordinates, the
+# databases and every process file, read access to the whole bucket for
+# whoever loads the page. DropID mode stays open; it can only reach
+# media/**/*.mp4 via the validated key builder below.
 use_direct_path = st.checkbox("Provide full S3 path instead of DropID")
+if use_direct_path and not check_password("APP_PASSWORD", label="Admin password"):
+    st.info(
+        "Direct S3 paths can reach anything in the bucket, so this mode needs "
+        "the admin password. The DropID field below works without it."
+    )
+    use_direct_path = False
+
 if use_direct_path:
     s3_key = st.text_input("Enter full S3 object path (key)")
     drop_id = s3_key  # fallback label for clip filename
@@ -145,24 +198,26 @@ else:
     drop_id = st.text_input("Provide DropID", value=url_drop_id).strip()
     if drop_id:
         try:
-            config.validate_drop_id(drop_id)
-            survey_id = config.get_survey_id_from_drop(drop_id)
-            s3_key = f"media/{survey_id}/{drop_id}/{drop_id}.mp4"
+            # Validates the DropID (path-traversal guard) and owns the
+            # media/{survey}/{drop}/{drop}.mp4 convention in one place.
+            s3_key = config.get_video_s3_key(drop_id)
         except ValueError as e:
             s3_key = ""
             st.error(str(e))
     else:
         s3_key = ""
 
-# Auto-presign on first arrival via a shared link. Guarded on session_state so we
-# don't re-fire on subsequent reruns; user can still click Generate to refresh
-# the presign if it expires.
+# Auto-presign on first arrival via a shared link. Guarded on WHICH drop is
+# already loaded, not on the mere existence of a presign: session_state
+# persists across pages, so "presigned_url in session_state" left a visitor
+# who had watched video A seeing A play under B's label when they opened a
+# shared ?drop_id=B link. Re-firing for the same drop is still avoided.
 if (
     not use_direct_path
     and url_drop_id
     and drop_id == url_drop_id
     and s3_key
-    and "presigned_url" not in st.session_state
+    and st.session_state.get("presigned_drop_id") != url_drop_id
 ):
     _presign_into_session_state(s3_key, drop_id)
 
@@ -178,6 +233,7 @@ if presigned_url:
     st.subheader("Video preview.")
     st.write("Does the path look ok? (In the future this will check automatically.)")
     st.code(st.session_state.get("presigned_drop_id", ""), language="text")
+    _render_storage_note()
     st.write(
         "The video box will show even when there are issues, so check above/try again later, or raise an issue."
     )
@@ -260,12 +316,12 @@ if presigned_url:
                     end_label = f"{end_min}m{end_sec:02d}s"
                     # Stash the bytes in session_state so the download button
                     # (rendered below, on every run) keeps re-registering the
-                    # media file. st.download_button does NOT inline the data —
+                    # media file. st.download_button does NOT inline the data,
                     # it registers the bytes with Streamlit's MediaFileManager
                     # and hands the browser a /media/<hash>.mp4 URL. That media
                     # file is garbage-collected on any rerun that doesn't
-                    # re-render the button — and clicking the button itself
-                    # triggers a rerun — so a button rendered only inside this
+                    # re-render the button, and clicking the button itself
+                    # triggers a rerun, so a button rendered only inside this
                     # `if` block leaves the browser fetching an already-evicted
                     # file → MediaFileStorageError (the broken page that needed
                     # an app reboot).
@@ -275,7 +331,7 @@ if presigned_url:
                     )
                     st.session_state["clip_drop_id"] = current_drop_id
 
-    # Render the download button on EVERY run — not just the extract run — so the
+    # Render the download button on EVERY run, not just the extract run, so the
     # media file stays registered until the user actually clicks download. Gate it
     # on the clip belonging to the currently-loaded video, so switching drops hides
     # (and frees) a stale clip from a previous deployment.

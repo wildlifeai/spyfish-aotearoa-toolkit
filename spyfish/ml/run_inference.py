@@ -15,7 +15,7 @@ def get_cached_pipeline_model(kind: str):
 
     ``kind`` is ``"species"`` or ``"binary"`` (matches ``config.get_pipeline_model``).
     First call loads weights from disk; subsequent calls reuse the same
-    instance — important on multi-drop batch runs where reloading per
+    instance, important on multi-drop batch runs where reloading per
     drop adds 1–3s of disk + GPU init overhead.
     """
     model_path = config.get_pipeline_model(kind)
@@ -98,7 +98,7 @@ def run_yolo_inference(
 
             # Decode frames with cv2 (exact, unambiguous absolute indexing) but run
             # YOLO in batches. Single-frame predicts pay full Python/pre-process/NMS
-            # overhead per call and leave the GPU idle (~0% util) between them — the
+            # overhead per call and leave the GPU idle (~0% util) between them, the
             # dominant cost on long videos. Batching keeps the GPU fed while the
             # frame index stays the exact absolute `current_frame`, so downstream
             # frame extraction still seeks back pixel-perfectly.
@@ -117,13 +117,15 @@ def run_yolo_inference(
                     agnostic_nms=config.ml_nms_agnostic,
                     verbose=False,
                     project=None,
+                    name="ul_predict",
+                    exist_ok=True,
                     save=False,
                 )
                 for res, frame_idx in zip(results, batch_indices):
                     t_seconds = frame_idx / true_fps
                     for box in res.boxes:
                         x, y, w, h = box.xywh[0].tolist()
-                        # IMPORTANT: store absolute frame_idx, NOT index // stride —
+                        # IMPORTANT: store absolute frame_idx, NOT index // stride,
                         # extraction tools seek back to this exact frame.
                         writer.writerow(
                             [
@@ -177,7 +179,7 @@ def run_yolo_inference(
             _flush_batch()
 
         cap.release()
-        # Atomic promote — only reached if the loop above completed without error.
+        # Atomic promote, only reached if the loop above completed without error.
         Path(tmp_csv).replace(output_csv)
 
         logging.info(f"Inference complete. Output saved to {output_csv}")
@@ -203,7 +205,7 @@ def predict_on_frame_paths(
     Output schema matches `run_yolo_inference`:
     ``frame, time_seconds, class, confidence, x, y, w, h``.
     Output is consumed downstream by ``build_coco_from_raw_csv`` without
-    modification — same shape as the video-inference path.
+    modification, same shape as the video-inference path.
 
     Batched predict (single call across the whole frame list) amortises
     GPU/CPU dispatch overhead vs. per-frame calls.
@@ -218,7 +220,7 @@ def predict_on_frame_paths(
         confidence: Override ``config.confidence_threshold``.
         imgsz: Override ``config.imgsz``.
         fps: Source video fps for synthesising the ``frame`` index column.
-            None → frame=-1 (unknown — used when video isn't re-opened).
+            None → frame=-1 (unknown, used when video isn't re-opened).
     """
     if len(frame_paths) != len(timestamps):
         raise ValueError(
@@ -252,6 +254,8 @@ def predict_on_frame_paths(
         agnostic_nms=config.ml_nms_agnostic,
         verbose=False,
         project=None,
+        name="ul_predict",
+        exist_ok=True,
         save=False,
     )
 
@@ -312,7 +316,7 @@ def merge_raw_csvs_by_iou(
     each frame:
       - All ``primary`` boxes are kept as-is.
       - Each ``fallback`` box is kept only if it does NOT overlap any primary
-        box at IoU >= ``iou_threshold`` — overlap means the primary already
+        box at IoU >= ``iou_threshold``, overlap means the primary already
         described the same fish more specifically.
 
     Result: union of detections, with the more specific label on overlap.
@@ -384,14 +388,14 @@ def rerun_inference_on_extracted_frames(drop_id: str, frames_df) -> None:
     ensemble pass instead.
 
     Two-pass ensemble: species first (specific labels), binary second
-    (high-recall "fish here"). Merged by IoU — species labels win on
+    (high-recall "fish here"). Merged by IoU, species labels win on
     overlap; binary-only boxes stay as ``fish``. This catches fish in
     species the model can't identify (e.g. tarakihi).
 
     Reads ``frames_df`` to discover which JPGs were extracted (paths +
     timestamps), runs the two-pass inference, merges by IoU, then writes
     the COCO once. The extractor must be called with ``write_coco=False``
-    on this path — otherwise this function would be overwriting whatever
+    on this path, otherwise this function would be overwriting whatever
     it wrote.
 
     Lives in ``run_inference.py`` because the dominant work is inference;
@@ -437,7 +441,7 @@ def rerun_inference_on_extracted_frames(drop_id: str, frames_df) -> None:
         output_csv=fresh_raw_csv,
     )
 
-    # Image dimensions: read from the first JPG via cv2 — the extractor
+    # Image dimensions: read from the first JPG via cv2, the extractor
     # already baked rotation into the pixels, so this is what BIIGLE will
     # display against. Saves us threading the dimensions through the caller.
     image_width, image_height = 0, 0
@@ -465,7 +469,7 @@ def rerun_inference_on_extracted_frames(drop_id: str, frames_df) -> None:
     fresh_coco = build_coco_from_raw_csv(str(fresh_raw_csv), frame_records)
     coco_path.write_text(json.dumps(fresh_coco, indent=2))
     logging.info(
-        f"{drop_id}: wrote COCO from fresh inference — "
+        f"{drop_id}: wrote COCO from fresh inference, "
         f"{len(fresh_coco.get('annotations', []))} annotations on "
         f"{len(fresh_coco.get('images', []))} frames."
     )

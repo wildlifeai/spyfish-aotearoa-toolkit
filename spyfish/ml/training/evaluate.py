@@ -1,5 +1,5 @@
 """
-evaluate.py — Evaluate trained YOLO models and optionally promote to production.
+evaluate.py. Evaluate trained YOLO models and optionally promote to production.
 
 Workflow:
   1. Run model.val() on the test split → collect mAP@0.5, precision, recall.
@@ -43,7 +43,7 @@ def _resolve_split(data_yaml: str, requested_split: str) -> str:
     if has_test:
         return "test"
     logging.warning(
-        f"No test split available in {Path(data_yaml).name} — falling back to val. "
+        f"No test split available in {Path(data_yaml).name}, falling back to val. "
         "Note: val was used for early stopping during training, so these metrics "
         "are optimistic (not a held-out evaluation)."
     )
@@ -113,7 +113,7 @@ def evaluate_model(
     }
 
     logging.info(
-        f"Results — mAP@0.5: {result['mAP50']:.4f}  "
+        f"Results, mAP@0.5: {result['mAP50']:.4f}  "
         f"precision: {result['precision']:.4f}  "
         f"recall: {result['recall']:.4f}"
     )
@@ -139,13 +139,12 @@ def compare_with_production(
         (production_metrics, should_promote) where should_promote is True if
         new mAP50 > production mAP50 + min_improvement_pct.
     """
-    training_cfg = config.get_section("training")
-    min_improvement = training_cfg.get("retrain_min_improvement_pct", 2.0) / 100.0
+    min_improvement = config.retrain_min_improvement_pct / 100.0
 
     if not Path(production_model_path).exists():
         logging.warning(
             f"Production model not found at {production_model_path}. "
-            f"Assuming this is the first trained model — promoting automatically."
+            f"Assuming this is the first trained model, promoting automatically."
         )
         return {}, True
 

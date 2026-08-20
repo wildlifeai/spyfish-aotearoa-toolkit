@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pandas as pd
-
 from sftk.common import (
     ERRORS_FILENAME,
     EXPORT_LOCAL,

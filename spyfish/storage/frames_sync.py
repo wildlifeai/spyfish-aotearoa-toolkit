@@ -1,6 +1,6 @@
 """Drop-level frame sync between S3 and local disk.
 
-Pairs with db_sync.py — same shape, scoped to per-drop image folders.
+Pairs with db_sync.py, same shape, scoped to per-drop image folders.
 Use as a retrain preflight on NeSI to materialise image-volume drop
 frames locally before training, or to push freshly-extracted local
 frames up to S3 outside the Biigle upload flow.
@@ -65,7 +65,7 @@ def upload_drop_frames(drop_id: str) -> int:
     local_dir = config.get_frames_dir(drop_id)
 
     if not local_dir.exists():
-        logging.warning(f"  {drop_id}: no local {local_dir} — nothing to upload.")
+        logging.warning(f"  {drop_id}: no local {local_dir}, nothing to upload.")
         return 0
 
     local_files = [p for p in local_dir.iterdir() if p.suffix.lower() in _IMAGE_EXTS]

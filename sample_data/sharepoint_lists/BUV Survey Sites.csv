@@ -1,0 +1,13 @@
+SiteID,LinkToMarineReserve,SiteName,SiteCode,SiteExposure,ProtectionStatus,ProtectionStatusDetails,IsControlSite,ControlToMR01,ControlToMR02,ControlToMR03,TargetedLatitude,TargetedLongitude,geodeticDatum,countryCode
+TSB_001,Testy Beach Marine Reserve,Site 1,1a,Sheltered,Type I MPA (Marine Reserve),,FALSE,,,,-39.6144229,177.8310004,WGS84,NZ
+TSB_002,Testy Beach Marine Reserve,Site 2,2a,Exposed,Type I MPA (Marine Reserve),,FALSE,,,,-39.6302043,177.8355815,WGS84,NZ
+TSB_003,Testy Beach Marine Reserve,Site 3,3a,Exposed,Type I MPA (Marine Reserve),,FALSE,,,,-39.612932,177.8656872,WGS84,NZ
+TSB_004,Testy Beach Marine Reserve,Site 4,4a,Exposed,Type I MPA (Marine Reserve),,FALSE,,,,-39.6163803,177.8312713,WGS84,NZ
+TSB_005,Testy Beach Marine Reserve,Site 5,5a,Exposed,No protection,,TRUE,Testy Beach Marine Reserve,,,-39.6312545,177.8502142,WGS84,NZ
+TSB_006,Testy Beach Marine Reserve,Site 6,6a,Sheltered,No protection,,TRUE,Testy Beach Marine Reserve,,,-39.6175502,177.8586408,WGS84,NZ
+SBY_001,Samply Bay Marine Reserve,Site 1,1a,Sheltered,Type I MPA (Marine Reserve),,FALSE,,,,-46.3305876,171.1906081,WGS84,NZ
+SBY_002,Samply Bay Marine Reserve,Site 2,2a,Sheltered,Type I MPA (Marine Reserve),,FALSE,,,,-46.35859,171.2078637,WGS84,NZ
+SBY_003,Samply Bay Marine Reserve,Site 3,3a,Exposed,Type I MPA (Marine Reserve),,FALSE,,,,-46.3638081,171.1918683,WGS84,NZ
+SBY_004,Samply Bay Marine Reserve,Site 4,4a,Sheltered,Type I MPA (Marine Reserve),,FALSE,,,,-46.3468328,171.2016878,WGS84,NZ
+SBY_005,Samply Bay Marine Reserve,Site 5,5a,Exposed,No protection,,TRUE,Samply Bay Marine Reserve,,,-46.3677134,171.2033671,WGS84,NZ
+SBY_006,Samply Bay Marine Reserve,Site 6,6a,Exposed,No protection,,TRUE,Samply Bay Marine Reserve,,,-46.3677248,171.2003131,WGS84,NZ

@@ -70,7 +70,7 @@ def draw_boxes_on_video_frames(
             logging.warning(f"Could not read video frame {video_frame_num}")
             continue
 
-        # Draw boxes — YOLO xywh format: x,y are CENTER, w,h are width/height
+        # Draw boxes. YOLO xywh format: x,y are CENTER, w,h are width/height
         for _, row in frame_rows.iterrows():
             if row["confidence"] < confidence_threshold:
                 continue

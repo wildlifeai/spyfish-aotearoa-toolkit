@@ -1,5 +1,5 @@
 """
-split_data.py — Survey-distributed, drop-ID-aware train/val/test split.
+split_data.py. Survey-distributed, drop-ID-aware train/val/test split.
 
 Rules:
   - Each DropID is assigned to exactly one split (no leakage).
@@ -50,19 +50,19 @@ def split_drops_by_survey(
     The min-1 floor means any survey large enough to qualify contributes at
     least one drop to val (and to test, when enabled), so small surveys
     aren't silently dropped from evaluation. Singleton surveys go entirely
-    to train — losing the only drop to val would mean a species seen there
+    to train, losing the only drop to val would mean a species seen there
     would never be in train.
 
     Stratification (not leakage) is the reason for grouping by survey: drops
     within one survey can be at very different locations/times, so they're
-    independent samples — leakage is per-DropID, not per-survey. Grouping
+    independent samples, leakage is per-DropID, not per-survey. Grouping
     by survey just ensures val sees a representative spread of survey
     conditions instead of (by random chance) all val drops landing in one
     survey.
 
     Args:
         drop_ids: List of all drop IDs.
-        train_pct: Target fraction (summary printout only — derived from
+        train_pct: Target fraction (summary printout only, derived from
             val_pct/test_pct in the actual algorithm).
         val_pct: Per-survey fraction donated to val.
         test_pct: Per-survey fraction donated to test (0 disables test).
@@ -76,11 +76,11 @@ def split_drops_by_survey(
     force_val = set(force_val_drops or set())
     force_train = set(force_train_drops or set())
 
-    # Overlap is ambiguous — force_val wins (val is the more deliberate choice).
+    # Overlap is ambiguous, force_val wins (val is the more deliberate choice).
     overlap = force_val & force_train
     if overlap:
         logging.warning(
-            f"{len(overlap)} drop(s) appear in BOTH force_val and force_train — "
+            f"{len(overlap)} drop(s) appear in BOTH force_val and force_train, "
             f"force_val wins: {sorted(overlap)}"
         )
         force_train -= overlap
@@ -153,9 +153,9 @@ def split_drops_by_survey(
     logging.info(
         f"\n=== Split summary ===\n"
         f"  Total drops: {total}\n"
-        f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}) — target {train_pct:.0%}\n"
-        f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}) — target {val_pct:.0%}\n"
-        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}) — target {test_pct:.0%}\n"
+        f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}), target {train_pct:.0%}\n"
+        f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}), target {val_pct:.0%}\n"
+        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}), target {test_pct:.0%}\n"
         f"====================\n"
     )
 
@@ -208,7 +208,7 @@ def _per_drop_species_counts(
     """``{drop: Counter(species -> box_count)}`` for the given drops.
 
     Decodes staged-label class IDs straight through ``species_names`` (index ==
-    ID, the same unified ordering ``flatten_and_remap_labels`` wrote) — no
+    ID, the same unified ordering ``flatten_and_remap_labels`` wrote), no
     class_map.json / data.yaml needed, so it can't drift out of sync the way the
     standalone suggester could.
     """
@@ -247,12 +247,12 @@ def balance_val_drops(
 ) -> Tuple[List[str], List[str], List[str]]:
     """Greedy species-balanced val selection (the in-pipeline suggester).
 
-    Picks whole drops into val so each multi-source species reaches ~``val_pct``
-    of its boxes, stopping when even the worst-covered species is within
-    ``tolerance`` of its target. Single-source species (one drop) are train-only
-    — you can't validate a species the model can't also train on. ``force_val``
-    drops are seeded into val; ``force_train`` (and anything they overlap) are
-    never picked. Returns (train, val, []) — no test split.
+     Picks whole drops into val so each multi-source species reaches ~``val_pct``
+     of its boxes, stopping when even the worst-covered species is within
+     ``tolerance`` of its target. Single-source species (one drop) are train-only
+    , you can't validate a species the model can't also train on. ``force_val``
+     drops are seeded into val; ``force_train`` (and anything they overlap) are
+     never picked. Returns (train, val, []), no test split.
     """
     force_val = set(force_val or set())
     force_train = set(force_train or set())
@@ -278,14 +278,23 @@ def balance_val_drops(
     current: Counter = Counter()
     val: List[str] = []
     for d in candidate_drops:
-        if d in force_val and d in per_drop:
+        if d in force_val:
+            # Honor the operator's explicit choice even when no staged labels
+            # were found, falling through would place the drop in train
+            # (train = candidates − val), silently inverting the instruction
+            # and turning it into a background-negative training image.
+            if d not in per_drop:
+                logging.warning(
+                    f"force_val drop {d} has no staged labels, kept in val, "
+                    "but it contributes no boxes; check the staging step."
+                )
+                val.append(d)
+                continue
             val.append(d)
             current.update(per_drop[d])
 
     remaining = {
-        d: c
-        for d, c in per_drop.items()
-        if d not in force_val and d not in force_train
+        d: c for d, c in per_drop.items() if d not in force_val and d not in force_train
     }
     while remaining and target:
         worst = max((target[s] - current[s]) / target[s] for s in target)
@@ -331,12 +340,12 @@ def split_data(
     Run the survey-distributed split and write train/val/test .txt files.
 
     Args:
-        balanced_df: Output of prepare_training_data() — balanced annotations DataFrame.
+        balanced_df: Output of prepare_training_data(), balanced annotations DataFrame.
         images_dir: Directory containing all training JPEG images.
         output_dir: Root output directory.
         seed: Random seed.
         extra_drop_ids: Extras (drops with labels but no MaxN). When provided,
-            they participate in the survey-aware split alongside MaxN drops —
+            they participate in the survey-aware split alongside MaxN drops,
             so force_val_drops / force_train_drops + the per-survey val_pct
             apply to extras too. Volume_<id> extras group under
             UNKNOWN_SURVEY; canonical-ID extras group with their real survey.
@@ -350,7 +359,7 @@ def split_data(
 
     maxn_drops = balanced_df["DropID"].unique().tolist()
     if len(maxn_drops) == 0 and not extra_drop_ids:
-        raise ValueError("No drop IDs found to split — aborting.")
+        raise ValueError("No drop IDs found to split, aborting.")
     all_drop_ids = sorted(set(maxn_drops) | set(extra_drop_ids or []))
 
     train_drops, val_drops, test_drops = split_drops_by_survey(

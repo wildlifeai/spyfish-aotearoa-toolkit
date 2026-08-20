@@ -40,7 +40,7 @@ class MLConfig(BaseConfig):
             raise ValueError(
                 f"ml_inference.confidence_threshold must be in (0, 1]; got {value}. "
                 "A value of 0 disables YOLO's confidence filter, so inference returns "
-                "its full max_det boxes per frame (e.g. 300) — flooding the pipeline "
+                "its full max_det boxes per frame (e.g. 300), flooding the pipeline "
                 "with near-zero-confidence detections. Set a real threshold (e.g. 0.15)."
             )
         return value
@@ -60,14 +60,16 @@ class MLConfig(BaseConfig):
 
     @property
     def ml_nms_iou(self) -> float:
-        """IoU threshold for the post-hoc per-frame box de-duplication in the COCO
-        builder. Boxes overlapping more than this collapse to the highest-conf one."""
+        """IoU threshold passed to YOLO's NMS at inference (``model.predict(iou=...)``).
+        Boxes overlapping more than this collapse to the highest-conf one."""
         return float(get_required(self.ml_inference, "nms_iou", "ml_inference"))
 
     @property
     def ml_nms_agnostic(self) -> bool:
-        """When True, the post-hoc de-dup merges overlapping boxes across classes
-        (a species box and a generic 'fish' box on one animal); False = same-class only."""
+        """Passed to YOLO's NMS at inference (``model.predict(agnostic_nms=...)``).
+        When True, overlapping boxes merge across classes (a species box and a
+        generic 'fish' box on one animal); False = same-class only.
+        """
         return bool(get_required(self.ml_inference, "nms_agnostic", "ml_inference"))
 
     @property
@@ -89,6 +91,17 @@ class MLConfig(BaseConfig):
     @property
     def training_config(self) -> dict:
         return get_required(self._yaml_config, "training", "")
+
+    @property
+    def retrain_min_improvement_pct(self) -> float:
+        """Minimum mAP@0.5 gain (in percentage points) a retrained model must
+        show over production to be promoted. Shared by the evaluate step and
+        the Model Metrics page so the two cannot disagree on the threshold."""
+        return float(
+            get_required(
+                self.training_config, "retrain_min_improvement_pct", "training"
+            )
+        )
 
     @property
     def image_extensions(self) -> tuple:
@@ -125,7 +138,7 @@ class MLConfig(BaseConfig):
 
     @property
     def training_floor_min_images(self) -> int:
-        """Image-count floor — species appearing in fewer distinct frames get merged into 'fish'."""
+        """Image-count floor, species appearing in fewer distinct frames get merged into 'fish'."""
         return int(
             get_required(self.training_config, "class_floor_min_images", "training")
         )
@@ -135,7 +148,7 @@ class MLConfig(BaseConfig):
         """Random seed for reproducible train/val/test splits and per-drop frame filtering.
 
         Set to an integer (default 42) for deterministic, reproducible results
-        across retrain runs — same drops + same labels always produce the same
+        across retrain runs, same drops + same labels always produce the same
         splits and the same frame selections.
 
         Set to `null` in config.yaml for fresh randomness each run (Python uses
@@ -155,7 +168,7 @@ class MLConfig(BaseConfig):
         first (see `training_dominant_species`). Default 60 fits ~20 drops at
         small scale; raise as the dataset grows.
 
-        **Extras (drops under `extra_no_survey_id/`) bypass this cap entirely** —
+        **Extras (drops under `extra_no_survey_id/`) bypass this cap entirely**,
         they're externally curated bulk imports (BIIGLE volume uploads) where
         every annotated frame is high-signal training data; capping them throws
         away expensive expert annotation work.
@@ -183,7 +196,7 @@ class MLConfig(BaseConfig):
         it teaches the detector to suppress false positives. Ultralytics
         recommends ~0–10% of the training set (COCO ≈ 1%). Assembly pools every
         background frame across train drops and subsamples them to hit this
-        ratio — `B = r/(1-r) * P` backgrounds for `P` positive train frames.
+        ratio, `B = r/(1-r) * P` backgrounds for `P` positive train frames.
         0 disables (no backgrounds). The main supplier is the training-frame
         volumes downloaded via `download_training_volume_labels`, where empty
         frames are real no-fish reviews; without this they'd be dropped at
@@ -307,7 +320,7 @@ class MLConfig(BaseConfig):
 
     @property
     def training_extraction_annotation_type(self) -> str:
-        """Which model to run on extracted frames — 'binary' or 'species'.
+        """Which model to run on extracted frames, 'binary' or 'species'.
 
         Resolves to `config.get_pipeline_model(annotation_type)` at runtime.
         """

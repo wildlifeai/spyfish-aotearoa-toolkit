@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -91,12 +92,6 @@ class PathsConfig(BaseConfig):
         return f"{self.sharepoint_root}/{get_required(self.metadata_files, 'legacy_experts_csv', 'paths.metadata.files')}"
 
     @property
-    def test_deployment_metadata_csv(self) -> Path:
-        return self.project_root / get_required(
-            self.paths, "test_deployment_csv", "paths"
-        )
-
-    @property
     def s3_missing_files(self) -> str:
         return f"{self.status_root}/{get_required(self.paths, 'missing_files_filename', 'paths')}"
 
@@ -157,14 +152,6 @@ class PathsConfig(BaseConfig):
         return f"{self.base_dir}/{self._sub('deployment_data')}"
 
     @property
-    def s3_annotations_dir(self) -> str:
-        return f"{self.base_dir}/{self._sub('annotations')}"
-
-    @property
-    def s3_training_output_prefix(self) -> str:
-        return f"{self.base_dir}/{self._sub('training')}/"
-
-    @property
     def species_labels_csv_path(self) -> Path:
         """Biigle label-tree export (``Common - Scientific`` names + label IDs).
 
@@ -209,17 +196,32 @@ class PathsConfig(BaseConfig):
 
     @staticmethod
     def _first_model_file(directory: Path) -> Optional[Path]:
-        """Return the first .pt file in `directory`, or None if the directory
-        doesn't exist or contains no .pt file.
+        """Return the single .pt file in `directory`, or None if there is none.
 
-        Single-file lookups are fine — production workflows keep exactly one
-        promoted model per directory (pipeline_model/ or base_model/).
+        Production workflows keep exactly one promoted model per directory
+        (pipeline_model/ or base_model/), so the usual case is unambiguous.
+
+        Sorted, not `glob()` order: `Path.glob` yields in filesystem order,
+        which differs between machines, so a directory holding two weights
+        files could train against one model locally and a different one on
+        NeSI, with nothing in the logs to say so. A second file is a mistake
+        rather than a choice, so it is logged.
         """
-        if directory.exists():
-            pt_files = list(directory.glob("*.pt"))
-            if pt_files:
-                return pt_files[0]
-        return None
+        if not directory.exists():
+            return None
+        pt_files = sorted(directory.glob("*.pt"))
+        if not pt_files:
+            return None
+        if len(pt_files) > 1:
+            logging.warning(
+                "%s holds %d .pt files (%s); using %s. Keep one promoted model "
+                "per directory.",
+                directory,
+                len(pt_files),
+                ", ".join(p.name for p in pt_files),
+                pt_files[0].name,
+            )
+        return pt_files[0]
 
     def get_pipeline_model(self, kind: str) -> Path:
         """Find a specific pipeline model variant in pipeline_model_dir by filename prefix.
@@ -232,7 +234,7 @@ class PathsConfig(BaseConfig):
         If multiple files match, the most recently modified is returned.
 
         Args:
-            kind: Model variant — must be "binary" or "species".
+            kind: Model variant, must be "binary" or "species".
 
         Raises:
             ValueError: kind is not one of {"binary", "species"}.
@@ -264,7 +266,7 @@ class PathsConfig(BaseConfig):
         For explicit selection between variants, use `get_pipeline_model(kind)`.
 
         Falls back to the first .pt file in the directory if no `species_*.pt`
-        is present — preserves backward compatibility with single-model setups
+        is present, preserves backward compatibility with single-model setups
         that pre-date the binary/species naming convention.
         """
         try:
@@ -284,16 +286,6 @@ class PathsConfig(BaseConfig):
         if path is None:
             raise FileNotFoundError(f"No model file found in {self.base_model_dir}")
         return path
-
-    @property
-    def s3_model_key(self) -> str:
-        return f"{self.base_dir}/models/pipeline_model/{self.pipeline_model_path.name}"
-
-    @property
-    def s3_training_base_model_key(self) -> str:
-        path = self._first_model_file(self.base_model_dir)
-        filename = path.name if path is not None else "model.pt"
-        return f"{self.base_dir}/models/base_model/{filename}"
 
     # ── Orchestrator ────────────────────────────────────────────────────────
 
@@ -316,7 +308,7 @@ class PathsConfig(BaseConfig):
         """Derive SiteID from a validated DropID.
 
         DropID format is ^[A-Z]{3}_\\d{8}_BUV_[A-Z]{3}_\\d{3}_\\d{2}$
-        SiteID is always parts[3:5] — positional, not regex, because the
+        SiteID is always parts[3:5], positional, not regex, because the
         site_id pattern also matches parts of the survey prefix.
         """
         parts = drop_id.split("_")
@@ -341,11 +333,24 @@ class PathsConfig(BaseConfig):
     def get_training_frames_s3_prefix(self, survey_id: str) -> str:
         """S3 prefix for the survey-level training-frames Biigle volume.
 
-        All drops in a survey upload their training frames to the same S3
-        prefix (filenames carry drop_id, so they're unique). This is the
-        URL Biigle's volume points at.
+         This is the URL Biigle's volume points at. It is the SURVEY directory,
+         not a shared frames bucket under it, because Biigle resolves an image
+         as ``volume.url + "/" + filename``, so putting the per-drop segment
+         in the *filename* (``{drop}/frames/{drop}__frame_<secs>s.jpg``) lets
+         one survey-pooled volume span per-deployment directories.
+
+         That keeps a single layout everywhere: S3 mirrors local, and
+         ``prepare_training_data``'s ``_IMAGE_SOURCE_DIRS`` walk (``frames/``
+         and legacy ``training_frames/``) works against either.
+
+         Volumes created before this convention point straight at
+         ``{survey}/training_frames`` and hold bare basenames. They keep working
+        . Biigle fixes a volume's url at creation and resolves images against
+         it, but they cannot be converted in place, since that would mean
+         rewriting every image's filename. Read both via
+         ``biigle_to_yolo.drop_id_from_frame_filename``.
         """
-        return f"{self.s3_deployment_data_dir}/{survey_id}/training_frames/"
+        return f"{self.s3_deployment_data_dir}/{survey_id}/"
 
     def get_video_path(self, drop_id: str) -> Path:
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
@@ -355,10 +360,8 @@ class PathsConfig(BaseConfig):
 
         Format: ``media/{survey_id}/{drop_id}/{drop_id}.mp4``
 
-        Single source of truth for this convention — previously inlined in
-        `orchestrator/ingest.py`, `zooniverse/upload.py`, and the
-        training-frames extractor. Use this method instead of constructing
-        the string inline.
+        Single source of truth for this convention, use this method instead
+        of constructing the string inline.
         """
         validated = self.validate_drop_id(drop_id)
         survey_id = self.get_survey_id_from_drop(validated)
@@ -421,16 +424,44 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_maxn_suffix}"
         )
 
-    def get_coco_annotations_path(self, drop_id: str) -> Path:
-        """COCO JSON of YOLO detections for a drop's selected frames.
+    # Expert substrate percent-cover export (process_substrate). Separate from
+    # the species MaxN export above: substrate is an area-cover statistic, not a
+    # count, and never feeds YOLO/MaxN, so it must not share the MaxN filename.
+    biigle_expert_substrate_suffix = "_biigle_expert_substrate.csv"
 
-        Single source of truth for this filename — written by the frame
-        extractors, rebuilt by the Zooniverse-path inference rerun, and
-        read by ``upload_frames_to_biigle`` before upload.
-        """
+    def get_biigle_expert_substrate_csv_path(self, drop_id: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
-            / f"{self.validate_drop_id(drop_id)}_coco_annotations_for_biigle.json"
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_substrate_suffix}"
+        )
+
+    def get_coco_annotations_path(self, drop_id: str, target: str = "") -> Path:
+        """COCO JSON of YOLO detections for a drop's selected frames.
+
+        `target` scopes the file to the workflow that produced it, mirroring
+        ``get_frames_dir(drop_id, target)``:
+
+          - ``""``          → ``{drop}_coco_annotations_for_biigle.json``
+            The expert-review path: written by ``extract_frames``, rebuilt by
+            the Zooniverse-path inference rerun, read by
+            ``upload_frames_to_biigle``. Those three intentionally share one
+            file, and each rewrite targets the same per-drop review volume.
+          - ``"training"``  → ``{drop}_training_coco_annotations_for_biigle.json``
+            The survey-pooled training path (``extract_training_frames``).
+
+        A COCO is only meaningful against the exact image set it was built
+        for, and the two workflows select DIFFERENT frames from the same drop
+        (review picks ML detection peaks at fractional timestamps; training
+        picks blind evenly-spaced ones). Before this split both wrote the same
+        filename, so whichever ran last silently destroyed the other's record
+        of what the model had predicted, and an upload could push one
+        workflow's boxes at the other's images, where every filename join
+        misses and the annotations vanish without an error.
+        """
+        suffix = f"_{target}" if target else ""
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{suffix}_coco_annotations_for_biigle.json"
         )
 
     _ZOONIVERSE_FRAMES_RAW_SUFFIXES = {
@@ -442,7 +473,7 @@ class PathsConfig(BaseConfig):
     def get_zooniverse_frames_raw_csv_path(self, drop_id: str, kind: str) -> Path:
         """Raw inference CSV for the Zooniverse-frame rerun ensemble.
 
-        ``kind`` is ``"species"``, ``"binary"``, or ``"merged"`` — written
+        ``kind`` is ``"species"``, ``"binary"``, or ``"merged"``, written
         by the two-pass species+binary inference + IoU merge that runs
         on Zooniverse-selected frames before BIIGLE upload.
         """

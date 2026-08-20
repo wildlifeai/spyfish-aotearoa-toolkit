@@ -22,6 +22,9 @@ repos:
     hooks:
     -   id: flake8
         args: ["--ignore=E501, W503, E203, E226"]
+        # Archived code is kept as it stood, so linting it would mean editing
+        # the thing that is meant not to change.
+        exclude: '^(archive/)'
 # -   repo: https://github.com/pre-commit/mirrors-mypy
 #     rev: v1.19.1
 #     hooks:

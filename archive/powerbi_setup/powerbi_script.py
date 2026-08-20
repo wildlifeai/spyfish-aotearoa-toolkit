@@ -10,6 +10,7 @@ env_path = r"C:\Users\USER\anaconda3\envs\powerbi_env\.env"  # FIXME: Update thi
 
 import importlib.util
 import sys
+
 import requests
 
 # Define the URL of the script (using latest main branch)
@@ -34,7 +35,7 @@ try:
 
     # Run with error handling - main() now returns a dictionary of dataframes
     dataframes_dict = kso_to_pbi_module.main(env_path)
-    
+
     # Make all dataframes available to PowerBI by adding them to global scope
     globals().update(dataframes_dict)
 

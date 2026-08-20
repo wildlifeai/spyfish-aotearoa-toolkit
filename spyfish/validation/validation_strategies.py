@@ -15,6 +15,7 @@ Provides simple validation functions and a DatasetValidator class:
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
@@ -355,6 +356,47 @@ def validate_values(
     for value_rule in value_rules:
         col = value_rule["column"]
         rule = value_rule["rule"]
+
+        if rule == "one_of":
+            # A categorical column against its allowed list. Unlike a range
+            # check, the failure here is usually not a wrong value but a NEW
+            # SPELLING of a right one, and that is the case worth naming: an
+            # unrecognised ProtectionStatus does not raise anywhere, it just
+            # falls into "Other" and quietly leaves the reserve comparison.
+            allowed = value_rule.get("allowed", [])
+            if not allowed or col not in df.columns:
+                continue
+            folded = {str(a).strip().lower(): a for a in allowed}
+            values = df[col].dropna()
+            for idx, value in values.items():
+                text = " ".join(str(value).split())
+                if not text or text in allowed:
+                    continue
+                near = folded.get(text.lower())
+                if near is not None:
+                    message = (
+                        f"'{col}' is '{value}', which differs from '{near}' only "
+                        "in case or spacing. One spelling per category, or it "
+                        "renders as two."
+                    )
+                else:
+                    message = (
+                        f"'{col}' is '{value}', which is not a recognised value. "
+                        f"Allowed: {', '.join(map(str, allowed))}."
+                    )
+                if tracker is not None and dataset_name is not None:
+                    tracker.mark_row_as_error(idx, dataset_name)
+                errors.append(
+                    create_error(
+                        message=message,
+                        error_source=ErrorSource.VALUE_OUT_OF_RANGE.value,
+                        column_name=col,
+                        relevant_column_value=value,
+                        file_name=file_name,
+                    )
+                )
+            continue
+
         if rule != "value_range":
             continue
 
@@ -404,6 +446,104 @@ def _is_replicate_mismatch_only(actual: str, expected: str) -> bool:
     if len(actual) != len(expected) or len(actual) < 2:
         return False
     return actual[:-2] == expected[:-2] and actual[-2:] != expected[-2:]
+
+
+def validate_multi_value_foreign_keys(
+    df: pd.DataFrame,
+    rules: Dict[str, Any],
+    all_validation_rules: Dict[str, Any],
+    tracker: Optional[CleanRowTracker] = None,
+    dataset_name: Optional[str] = None,
+) -> List[ErrorChecking]:
+    """Foreign keys for columns holding several comma-joined values.
+
+    `validate_foreign_keys` is an `isin` between two columns of the same name.
+    That cannot check `LinkToMarineReserve`: a site between two areas carries
+    "Tonga Island, Horoirangi" in one cell, and the reserve list names the same
+    areas in a differently named column (`Title`). Under a plain foreign key
+    every multi-reserve site fails, so the check was simply never configured
+    and the column has gone unchecked since the list existed.
+
+    Configured per dataset as::
+
+        multi_foreign_keys:
+          - column: "LinkToMarineReserve"      # in this file, comma-joined
+            target: "reserves"                 # another validation dataset
+            target_column: "Title"             # the authoritative names
+            separator: ","
+
+    A name that is not in the target is a real error: the reporting groups
+    every deployment by these names, so a typo silently becomes a new marine
+    reserve with its own row in every per-area chart.
+    """
+    errors: List[ErrorChecking] = []
+    source_file = normalize_file_name(rules.get("file_name", ""))
+
+    for spec in rules.get("multi_foreign_keys", []):
+        column = spec["column"]
+        target_name = spec["target"]
+        target_column = spec["target_column"]
+        separator = spec.get("separator", ",")
+        # `extract` pulls the value out of a larger one — the three-letter
+        # reserve code at the front of a DropID, say — so the same check covers
+        # both "this cell lists several names" and "this cell contains one".
+        extract = spec.get("extract")
+
+        target_rules = all_validation_rules.get(target_name) or {}
+        target_df = target_rules.get("dataset", pd.DataFrame())
+        if column not in df.columns or target_df.empty:
+            continue
+        if target_column not in target_df.columns:
+            errors.append(
+                create_error(
+                    message=(
+                        f"Reference check skipped: '{target_column}' not found in "
+                        f"'{target_name}'"
+                    ),
+                    error_source=ErrorSource.MISSING_COLUMN.value,
+                    column_name=column,
+                    file_name=source_file,
+                )
+            )
+            continue
+
+        known = {
+            str(value).strip()
+            for value in target_df[target_column].dropna()
+            if str(value).strip()
+        }
+        target_file = normalize_file_name(target_rules.get("file_name", ""))
+
+        for index, cell in df[column].dropna().items():
+            if extract:
+                found = re.match(extract, str(cell))
+                if not found:
+                    continue
+                parts = [found.group(1)]
+            else:
+                parts = str(cell).split(separator)
+            unknown = [
+                part.strip()
+                for part in parts
+                if part.strip() and part.strip() not in known
+            ]
+            if not unknown:
+                continue
+            if tracker is not None and dataset_name is not None:
+                tracker.mark_row_as_error(index, dataset_name)
+            errors.append(
+                create_error(
+                    message=(
+                        f"'{column}' names {len(unknown)} area(s) not in "
+                        f"{target_file}: {', '.join(unknown)}"
+                    ),
+                    error_source=ErrorSource.FOREIGN_KEY_NOT_FOUND.value,
+                    column_name=column,
+                    relevant_column_value=cell,
+                    file_name=source_file,
+                )
+            )
+    return errors
 
 
 def validate_relationships(
@@ -643,6 +783,11 @@ class DatasetValidator:
         errors.extend(validate_unique(df, self.rules, self.tracker, dataset_name))
         errors.extend(
             validate_foreign_keys(
+                df, self.rules, self.all_validation_rules, self.tracker, dataset_name
+            )
+        )
+        errors.extend(
+            validate_multi_value_foreign_keys(
                 df, self.rules, self.all_validation_rules, self.tracker, dataset_name
             )
         )

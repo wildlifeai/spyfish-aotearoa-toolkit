@@ -1,5 +1,5 @@
 """
-class_map.py — Seed and load the YOLO class map from a Biigle label tree.
+class_map.py. Seed and load the YOLO class map from a Biigle label tree.
 
 The class map assigns a stable integer class_id per label. Species labels
 (name contains " - ") are sorted by source_id (Biigle's AphiaID slot) so
@@ -25,10 +25,10 @@ JSON shape on disk (one entry per class, keyed by class_id as string):
       }
     }
 
-`load_class_map()` returns a label_name → class_id lookup with entries for
-the bare scientific name, the Biigle "Common - Scientific" form, and any
-aliases — so downstream YOLO conversion matches whichever form the
-annotation report emits.
+Reading class_map.json back is owned by ``spyfish.config.species``, use
+``species_registry().name_to_class_id()`` / ``.class_id_to_scientific()``
+(pass ``class_map_path=`` for a per-drop sidecar). This module only seeds
+and writes the file.
 """
 
 import argparse
@@ -44,41 +44,6 @@ def save_class_map(class_map: Dict[str, dict], path: Path) -> None:
     with open(path, "w") as f:
         json.dump(class_map, f, indent=2)
     logging.info(f"Saved class map ({len(class_map)} classes) → {path}")
-
-
-def load_class_map(path: Path) -> Dict[str, int]:
-    """Load class_map.json and return a label_name → class_id lookup.
-
-    Includes the bare scientific name, the Biigle "Common - Scientific"
-    form, and any aliases (for bucket classes like bait/fish).
-    """
-    with open(path) as f:
-        registry = json.load(f)
-
-    lookup: Dict[str, int] = {}
-    for entry in registry.values():
-        cid = int(entry["class_id"])
-        sci = entry["scientific_name"]
-        common = entry.get("common_name", "")
-        lookup[sci] = cid
-        if common:
-            lookup[f"{common} - {sci}"] = cid
-        for alias in entry.get("aliases", []):
-            lookup[alias] = cid
-    return lookup
-
-
-def load_class_map_by_id(path: Path) -> Dict[int, str]:
-    """Load class_map.json and return a class_id → scientific_name lookup.
-
-    Inverse direction of `load_class_map`, for decoding a YOLO .txt row's
-    class ID back to a species name when remapping across class-map versions.
-    """
-    with open(path) as f:
-        registry = json.load(f)
-    return {
-        int(entry["class_id"]): entry["scientific_name"] for entry in registry.values()
-    }
 
 
 def _build_registry_from_labels(labels: List[dict]) -> Dict[str, dict]:
@@ -132,7 +97,7 @@ def _build_registry_from_labels(labels: List[dict]) -> Dict[str, dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  ⚠ TODO: MANUAL OVERRIDES — REMOVE WHEN UPSTREAM IS FIXED
+#  ⚠ TODO: MANUAL OVERRIDES. REMOVE WHEN UPSTREAM IS FIXED
 # ──────────────────────────────────────────────────────────────────────
 # Stop-gap entries that aren't yet in Biigle label tree 3511. Without
 # them, every reseed_from_label_tree run drops these classes and any
@@ -141,9 +106,9 @@ def _build_registry_from_labels(labels: List[dict]) -> Dict[str, dict]:
 # Fix: add these to the Biigle tree, then delete this block + the helper
 # below (and the call from reseed_from_label_tree).
 #
-#   • Kyphosus bigibbus (Grey drummer)             — was in old S3 species list
-#   • Kyphosus sp.      (Silver and grey drummers) — was in old S3 species list
-#   • fish bucket       — catches workflow labels (e.g. 'Fish - Final',
+#   • Kyphosus bigibbus (Grey drummer)            , was in old S3 species list
+#   • Kyphosus sp.      (Silver and grey drummers), was in old S3 species list
+#   • fish bucket      , catches workflow labels (e.g. 'Fish - Final',
 #                         'To review') that Biigle annotators apply but
 #                         which aren't species. Aliases get routed here.
 # ──────────────────────────────────────────────────────────────────────
@@ -165,7 +130,7 @@ _MANUAL_OVERRIDES: List[dict] = [
         # Both "Fish - Final" and "Fish: final" listed because Biigle export
         # vocabulary has used both forms; safe to keep both.
         # Unknown labels also fall through to this bucket via the convert/parser
-        # fallback path — these aliases are just for explicit, warning-free routing.
+        # fallback path, these aliases are just for explicit, warning-free routing.
         "aliases": [
             "Fish - Final",
             "Fish: final",
@@ -197,7 +162,7 @@ def _apply_manual_overrides(registry: Dict[str, dict]) -> Dict[str, dict]:
             if merged:
                 existing["aliases"] = merged
             logging.warning(
-                f"  manual override: {sci!r} already in registry — merged aliases"
+                f"  manual override: {sci!r} already in registry, merged aliases"
             )
             continue
 
@@ -251,7 +216,7 @@ def reseed_from_label_tree(
         )
         if entry:
             logging.warning(
-                f"  {bucket_name} class ({entry['class_id']}) — "
+                f"  {bucket_name} class ({entry['class_id']}), "
                 f"{len(entry['aliases'])} label(s) collapsed into one YOLO class: "
                 f"{entry['aliases']}"
             )

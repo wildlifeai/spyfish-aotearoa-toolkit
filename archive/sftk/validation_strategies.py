@@ -20,7 +20,6 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
-
 from sftk.common import DROP_ID_COLUMN, REPLICATE_COLUMN, SURVEY_ID_COLUMN
 from sftk.utils import normalize_file_name
 

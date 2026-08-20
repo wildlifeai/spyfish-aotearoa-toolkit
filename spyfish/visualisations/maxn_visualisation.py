@@ -1,5 +1,5 @@
 """
-MaxN timeline visualisation — produces a PNG saved to the data_quality folder.
+MaxN timeline visualisation, produces a PNG saved to the data_quality folder.
 
 Usage (standalone):
     python spyfish/visualisations/maxn_visualisation.py
@@ -47,7 +47,7 @@ def plot_maxn_timeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Total fish (all classes) at base confidence — kept as a faint context line.
+    # Total fish (all classes) at base confidence, kept as a faint context line.
     base_total = (
         raw_df[raw_df["confidence"] >= base_conf]
         .groupby("time_seconds")
@@ -128,7 +128,7 @@ def plot_maxn_timeline(
             label=sp,
         )
 
-    # 5. MaxN peak dots — coloured to match the species' line.
+    # 5. MaxN peak dots, coloured to match the species' line.
     for _, row in maxn_df.iterrows():
         t = row[config.csv_maxn_time_seconds_column]
         count = row[config.csv_max_interval_column]
@@ -162,7 +162,7 @@ def plot_maxn_timeline(
     # Styling
     ax.set_xlabel("Time (seconds from video start)", fontsize=12)
     ax.set_ylabel("Fish Count per Frame", fontsize=12)
-    ax.set_title(f"MaxN Timeline — {drop_id}", fontsize=14, fontweight="bold")
+    ax.set_title(f"MaxN Timeline, {drop_id}", fontsize=14, fontweight="bold")
     ax.set_xlim(0, max_time + 1)
     ax.set_ylim(0, ax.get_ylim()[1] * 1.15)
     ax.spines["top"].set_visible(False)
@@ -188,9 +188,7 @@ def plot_maxn_timeline(
         ),
     ]
     ncol = 2 if len(species_list) > 6 else 1
-    ax.legend(
-        handles=handles, loc="upper right", fontsize=8, framealpha=0.9, ncol=ncol
-    )
+    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9, ncol=ncol)
 
     plt.tight_layout()
     out_path = output_dir / f"{drop_id}_maxn_timeline.png"
@@ -206,7 +204,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     drop_id = args.drop_id
-    # CSV filenames embed the model *name* (stem), not the full .pt path —
+    # CSV filenames embed the model *name* (stem), not the full .pt path,
     # matches how the live pipeline builds them (Path(model).stem), e.g.
     # "species_20260603" → SLI_..._ml_species_20260603_maxn.csv.
     model_name = Path(config.pipeline_model_path).stem

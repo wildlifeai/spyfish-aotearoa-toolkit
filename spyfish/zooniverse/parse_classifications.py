@@ -1,5 +1,5 @@
 """
-Zooniverse classification parsing — strict new-format drop_id resolution only.
+Zooniverse classification parsing, strict new-format drop_id resolution only.
 
 Non-canonical video filenames log a warning and surface as ``drop_id=None``.
 Historical backfill lives in ``spyfish.zooniverse.legacy_extract``; core
@@ -13,9 +13,10 @@ from typing import Optional
 import pandas as pd
 from panoptes_client import Panoptes
 
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
-from spyfish.utils import load_species_labels, normalise_zoo_choice, seconds_to_time
+from spyfish.utils import seconds_to_time
 from spyfish.zooniverse.subject_keys import SubjectKeys
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -35,13 +36,13 @@ _COUNT_BUCKETS: dict[str, int] = {
 }
 
 # Volunteer quality-control thresholds for aggregate_by_subject_species.
-# Self-contained — delete both constants and the filter block in the
+# Self-contained, delete both constants and the filter block in the
 # aggregator to remove this behaviour entirely without touching config.yaml.
 _USER_EXCLUSION_NH_PCT_THRESHOLD = 0.90  # exclude users with >= 90% NH rate
 _USER_EXCLUSION_MIN_CLASSIFICATIONS = 100  # only after this many classifications
 
 
-# ── Phase 0 — Fetch from API ─────────────────────────────────────────────────
+# ── Phase 0. Fetch from API ─────────────────────────────────────────────────
 
 
 def connect_to_zooniverse() -> None:
@@ -69,7 +70,7 @@ def fetch_classifications_for_set(subject_set_id: str) -> list[dict]:
 
     # `scope="project"` is required for two reasons:
     #   1. Without it, Panoptes returns only the authenticated user's own
-    #      classifications (default "private" scope), not the volunteer pool —
+    #      classifications (default "private" scope), not the volunteer pool,
     #      ~21 of ~500 for a typical retired drop on the team account.
     #   2. Without it, the response strips `subject_data` (no metadata, no
     #      retired field), so the per-subject retirement filter below rejects
@@ -101,7 +102,7 @@ def fetch_classifications_for_set(subject_set_id: str) -> list[dict]:
                 # Hashed-IP token Panoptes assigns to anonymous classifications
                 # (and includes for logged-in too). Carried through so the
                 # dedupe in aggregate_by_subject_species can fall back to it
-                # when user_id is None — otherwise all anonymous votes on a
+                # when user_id is None, otherwise all anonymous votes on a
                 # subject collapse to a single (None, subject, species) row.
                 "user_ip": raw.get("user_ip"),
                 "annotations": raw.get("annotations", []),
@@ -118,7 +119,7 @@ def fetch_classifications_for_set(subject_set_id: str) -> list[dict]:
     if n_skipped:
         logging.warning(
             f"Subject set {subject_set_id}: skipped {n_skipped} classification(s) "
-            "from non-retired subjects — set marked complete but retirement may be "
+            "from non-retired subjects, set marked complete but retirement may be "
             "in progress. Rerun to pick up when fully settled."
         )
 
@@ -128,13 +129,13 @@ def fetch_classifications_for_set(subject_set_id: str) -> list[dict]:
     return classifications
 
 
-# ── Phase 1 — Parse ──────────────────────────────────────────────────────────
+# ── Phase 1. Parse ──────────────────────────────────────────────────────────
 
 
 def _resolve_drop_id(video_filename: str) -> Optional[str]:
     """
     Strict filename → drop_id. Returns ``None`` for empty inputs and for
-    any stem that doesn't pass ``config.validate_drop_id``. Silent by design —
+    any stem that doesn't pass ``config.validate_drop_id``. Silent by design,
     a per-call warning here would flood logs on legacy-heavy backfills where
     most rows fail by construction. Callers aggregate the unresolved set and
     surface a single summary (see ``parse_classifications``). Legacy stems
@@ -214,11 +215,11 @@ def _parse_annotation(ann: dict) -> list[dict]:
             # Bounding box drawing tool (x/y = top-left corner, width/height =
             # dimensions). Each box is one drawn individual → count=1.
             # tool_label carries the species name (mixed-case, unlike the
-            # all-caps choice strings from clip workflows — normalise downstream
+            # all-caps choice strings from clip workflows, normalise downstream
             # if aggregating across both annotation types).
             # TODO: per-classification box count (n boxes of same species =
             # MaxN for that classifier) requires grouping by classification_id
-            # before aggregation — not yet done here.
+            # before aggregation, not yet done here.
             annotation_type = "drawing"
             species = value_item.get("tool_label")
             x = value_item.get("x", 0)
@@ -248,7 +249,7 @@ def _parse_annotation(ann: dict) -> list[dict]:
     return rows
 
 
-# Placeholder used when a classification has no parseable annotations — keeps
+# Placeholder used when a classification has no parseable annotations, keeps
 # the row in the output so "everyone said NOTHINGHERE" is countable later.
 _NOTHING_HERE_PLACEHOLDER = {
     "annotation_type": "classification",
@@ -265,7 +266,7 @@ _NOTHING_HERE_PLACEHOLDER = {
 
 # Placeholder for a volunteer who submitted without selecting any option
 # (value: [] in every task). Distinct from an explicit NOTHINGHERE click.
-# Excluded from aggregation — a non-response carries no information.
+# Excluded from aggregation, a non-response carries no information.
 _BLANK_SUBMISSION_PLACEHOLDER = {
     **_NOTHING_HERE_PLACEHOLDER,
     "is_blank_submission": True,
@@ -289,7 +290,7 @@ def _parse_float(value) -> Optional[float]:
 def _extract_subject_metadata(meta: dict) -> dict:
     """Read Zooniverse subject metadata using only the keys upload.py writes.
 
-    Strict — no legacy fallbacks. Pre-normalise legacy metadata via
+    Strict, no legacy fallbacks. Pre-normalise legacy metadata via
     `legacy_extract._normalize_legacy_metadata` before passing to this parser.
     """
     return {
@@ -376,7 +377,7 @@ def parse_classifications(raw_classifications: list[dict]) -> pd.DataFrame:
     (classification, species annotation). Two summary warnings surface at
     the end: subjects with non-current metadata keys, and unresolved
     non-canonical video filenames. Both are usually expected on legacy
-    data — pass through ``legacy_extract`` first to resolve them.
+    data, pass through ``legacy_extract`` first to resolve them.
     """
     records = []
     subjects_missing_keys: dict[str, int] = {}
@@ -430,7 +431,7 @@ def parse_classifications(raw_classifications: list[dict]) -> pd.DataFrame:
     return df
 
 
-# ── Phase 2 — Aggregate ──────────────────────────────────────────────────────
+# ── Phase 2. Aggregate ──────────────────────────────────────────────────────
 
 
 def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
@@ -448,19 +449,19 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
       count_disagreement       → count disagreement (max_count ≥ mode + 2)
 
     Applies the agreement_pct filter (`vote_count / total_classifiers`)
-    as the primary gate — invariant to workflow retirement count, so
+    as the primary gate, invariant to workflow retirement count, so
     expert and broad-public workflows both pass on the same principle.
-    Suspicious-minority and count-disagreement flags are advisory —
+    Suspicious-minority and count-disagreement flags are advisory,
     rows still pass the filter, but the flags route them into the
     appropriate BIIGLE pool downstream.
 
     Pre-aggregation exclusions (applied in order before counting):
-      1. Blank submissions (is_blank_submission=True) — value:[] payload,
+      1. Blank submissions (is_blank_submission=True), value:[] payload,
          no answer selected. Carries no information; excluded from all counts.
-      2. High-NH users — NH rate >= zooniverse_user_exclusion_nh_pct_threshold
+      2. High-NH users. NH rate >= zooniverse_user_exclusion_nh_pct_threshold
          AND >= zooniverse_user_exclusion_min_classifications. Catches
          click-through users without requiring a manual exclusion list.
-      3. Dedupe by (user_id, subject_id, species) — collapses CSV export
+      3. Dedupe by (user_id, subject_id, species), collapses CSV export
          row inflation (observed at 10–30× on some workflows).
 
     Returns:
@@ -469,7 +470,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # Drop blank submissions before any counting — a non-response carries no
+    # Drop blank submissions before any counting, a non-response carries no
     # information and should not inflate total_classifiers or nothing_here_votes.
     if "is_blank_submission" in df.columns:
         n_blank = int(df["is_blank_submission"].sum())
@@ -514,7 +515,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     # Build a per-volunteer dedupe token that survives anonymous classifications.
     # Panoptes sets user_id=None for not-logged-in volunteers, so a naive
     # (user_id, subject, species) dedupe collapses every anonymous vote to a
-    # single (None, subject, species) row — silent data loss for workflows
+    # single (None, subject, species) row, silent data loss for workflows
     # with sizeable anonymous traffic (e.g. 14054). Fall back through
     # user_name then user_ip (hashed IP token Panoptes provides on
     # anonymous classifications). Final fallback is the classification_id
@@ -537,11 +538,11 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     # classification under multiple distinct classification_ids (workflow
     # 23923 was observed at ~30× inflation in the legacy corpus), which
     # would inflate vote_count and total_classifiers. Deduping on the
-    # logical key — what the volunteer actually claimed — collapses those
+    # logical key, what the volunteer actually claimed, collapses those
     # to one row per real claim. Multi-species clicks (one volunteer voting
     # both BLUECOD and SNAPPER on one subject) are preserved because species
     # is part of the key. Multi-click on the same species at different
-    # timestamps is the only signal lost — rare in practice (<1% of rows
+    # timestamps is the only signal lost, rare in practice (<1% of rows
     # per the multi-click distribution) and an acceptable trade.
     n_before = len(df)
     df = df.drop_duplicates(
@@ -570,7 +571,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
         .rename("nothing_here_votes")
     )
 
-    # Species rows only. Split OTHER out — "OTHER" is the catch-all bucket
+    # Species rows only. Split OTHER out, "OTHER" is the catch-all bucket
     # for species not in the named list, so two volunteers saying OTHER on the
     # same clip might be flagging different animals (a ray and a lobster).
     # Treating them as consensus would silently merge distinct findings, so
@@ -611,7 +612,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # OTHER: group by volunteer too so each vote is its own row.
-    # Uses _volunteer_key (not user_id) so anonymous voters don't collapse —
+    # Uses _volunteer_key (not user_id) so anonymous voters don't collapse,
     # see the dedupe-key construction above. Drop the key from the output
     # schema so downstream consumers see the same columns as agg_non_other.
     agg_other = (
@@ -632,7 +633,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     agg["agreement_pct"] = (agg["vote_count"] / agg["total_classifiers"] * 100).round(1)
 
     # Flag suspicious minority finds: nothing_here dominates but someone found something.
-    # Does not apply to OTHER — every OTHER row is a single volunteer vote by
+    # Does not apply to OTHER, every OTHER row is a single volunteer vote by
     # construction; expecting agreement on it isn't meaningful.
     agg["suspicious_minority_find"] = (
         (agg["species"] != "OTHER")
@@ -650,7 +651,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Apply agreement_pct filter to named-species rows only. OTHER rows
-    # always pass — each is a single volunteer's potentially-unique find and
+    # always pass, each is a single volunteer's potentially-unique find and
     # an agreement threshold doesn't apply.
     min_agreement_pct = config.zooniverse_min_agreement_pct
     gate_mask = (agg["species"] == "OTHER") | (
@@ -662,7 +663,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     # but none cleared the agreement gate, if a majority of voters still saw
     # SOMETHING (i.e., not NOTHINGHERE), emit one consensus row labelled
     # species="fish". Encodes "we agree there's a fish here, we don't agree
-    # which" — a high-value signal for expert review that would otherwise be
+    # which", a high-value signal for expert review that would otherwise be
     # lost as a scatter of weak per-species rows below the agreement floor.
     consensus_pct = config.zooniverse_consensus_something_here_pct
     subjects_with_named_passed = set(
@@ -757,7 +758,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     return passed.sort_values(["video_filename", "vote_count"], ascending=[True, False])
 
 
-# ── Phase 3 — NOTHINGHERE sampling ───────────────────────────────────────────
+# ── Phase 3. NOTHINGHERE sampling ───────────────────────────────────────────
 
 
 def sample_nothing_here_clips(df: pd.DataFrame) -> pd.DataFrame:
@@ -841,7 +842,7 @@ def subject_completion_from_api() -> pd.DataFrame:
     Requires an active Panoptes connection (call connect_to_zooniverse() first).
 
     Reads drop_id and subject_set_type from the SubjectSet display_name
-    (``clips_{drop_id}`` / ``frames_{drop_id}``) — O(num_sets), no per-subject
+    (``clips_{drop_id}`` / ``frames_{drop_id}``). O(num_sets), no per-subject
     iteration. Sets that predate the display_name convention get drop_id=None.
 
     Returns:
@@ -862,7 +863,7 @@ def subject_completion_from_api() -> pd.DataFrame:
                 n_unrecognised += 1
 
             total = int(ss.raw.get("set_member_subjects_count") or 0)
-            # Retirement progress lives in `completeness` — a dict keyed by
+            # Retirement progress lives in `completeness`, a dict keyed by
             # workflow_id, value is the fraction (0.0–1.0) of subjects retired
             # in that workflow. A subject set linked to multiple workflows is
             # retired once any workflow has classified everything, so we take
@@ -886,7 +887,7 @@ def subject_completion_from_api() -> pd.DataFrame:
     if n_unrecognised:
         logging.info(
             f"  {n_unrecognised} subject set(s) have non-standard display names "
-            "(manually created or pre-convention) — drop_id set to None for those."
+            "(manually created or pre-convention), drop_id set to None for those."
         )
 
     df = pd.DataFrame(rows)
@@ -907,25 +908,24 @@ def _zoo_choice_to_scientific(choice: str) -> Optional[str]:
 
     Returns the mapped scientific name when known. Returns ``"fish"`` as the
     generic fallback for choices that don't map (e.g. ``OTHER``, or a legacy
-    common-name variant we haven't catalogued) — the volunteer still saw a
+    common-name variant we haven't catalogued), the volunteer still saw a
     fish, just couldn't identify it. Matches the binary-fish-class floor the
     ML model uses for rare species. Returns ``None`` only for empty/blank input.
     """
     if not choice:
         return None
-    return load_species_labels().zoo_choice_to_scientific.get(
-        normalise_zoo_choice(choice), "fish"
-    )
+    sp = species_registry().from_zoo_choice(choice)
+    return sp.scientific_name if sp else "fish"
 
 
-# ── Phase 4 — MaxN CSV export ────────────────────────────────────────────────
+# ── Phase 4. MaxN CSV export ────────────────────────────────────────────────
 
 
 def zooniverse_maxn_columns() -> list[str]:
     """Ordered column list for a Zooniverse MaxN CSV.
 
     ``subject_id`` is included so each row traces back to the Zooniverse
-    clip it came from — feeds the annotations-DB ``external_id`` field on
+    clip it came from, feeds the annotations-DB ``external_id`` field on
     citsci rows, which the dashboard surfaces as Provenance.
     """
     return [
@@ -956,7 +956,7 @@ def write_empty_zooniverse_maxn_csv(drop_id: str) -> None:
 def write_zooniverse_maxn_csv(aggregated_df: pd.DataFrame) -> None:
     """Write one MaxN CSV per drop_id from the aggregated volunteer consensus.
 
-    Rows with suspicious_minority_find=True are excluded from the export —
+    Rows with suspicious_minority_find=True are excluded from the export,
     they remain in the DB audit trail but should not drive BIIGLE frame selection.
     Expects the same DataFrame shape produced by aggregate_by_subject_species.
     """
@@ -997,7 +997,7 @@ def write_zooniverse_maxn_csv(aggregated_df: pd.DataFrame) -> None:
                 }
             )
         if not rows:
-            logging.info(f"  {drop_id}: no usable rows — skipping MaxN CSV.")
+            logging.info(f"  {drop_id}: no usable rows, skipping MaxN CSV.")
             continue
         out_path = config.get_zooniverse_maxn_csv_path(drop_id)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1013,7 +1013,7 @@ def write_zooniverse_maxn_csv(aggregated_df: pd.DataFrame) -> None:
         )
     if n_skipped_null:
         logging.info(
-            f"write_zooniverse_maxn_csv: {n_skipped_null} row(s) skipped — "
+            f"write_zooniverse_maxn_csv: {n_skipped_null} row(s) skipped, "
             "blank/null species choice."
         )
 
@@ -1028,7 +1028,7 @@ def get_all_db_drop_ids() -> list[str]:
     return list(deployments.keys())
 
 
-# ── Phase 5 — DB ingestion ────────────────────────────────────────────────────
+# ── Phase 5. DB ingestion ────────────────────────────────────────────────────
 
 
 def ingest_zooniverse_annotations(drop_id: str) -> int:
@@ -1040,14 +1040,18 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
     re-running is safe. `sync_annotation_counts([drop_id])` advances
     citsci_status → citsci_complete automatically when count > 0. The
     all-NOTHINGHERE case (empty CSV, fully retired with zero positive
-    findings) needs an explicit advance since the data-presence rule wouldn't
-    trigger — that's still a valid completion, just with no observations.
+    findings) writes one null-deployment row — "reviewed, nothing seen" is a
+    result, and the row lets the same data-presence rule advance the status
+    that every other completion goes through.
 
     Returns:
-        Number of annotation rows ingested (0 if CSV not found or empty).
+        Number of annotation rows ingested (0 if CSV not found; 1 for the
+        null-deployment row of a confirmed-empty review).
     """
-    from spyfish.config.base import CitSciStatus
-    from spyfish.database.annotation_manager import AnnotationDatabaseManager
+    from spyfish.database.annotation_manager import (
+        AnnotationDatabaseManager,
+        null_deployment_row,
+    )
     from spyfish.database.manager import DatabaseManager as PipelineDB
 
     maxn_csv = config.get_zooniverse_maxn_csv_path(drop_id)
@@ -1065,19 +1069,12 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
 
     if df.empty:
         logging.info(
-            f"ingest_zooniverse: MaxN CSV is empty for {drop_id} (all-NOTHINGHERE)"
+            f"ingest_zooniverse: MaxN CSV is empty for {drop_id} "
+            "(all-NOTHINGHERE) — recording a null-deployment row."
         )
+        ann_db.add_annotations([null_deployment_row(drop_id, "citsci")])
         pipeline_db.sync_annotation_counts([drop_id])
-        # Confirmed-empty review still completes the citsci stage —
-        # data-presence rule in sync_annotation_counts won't trigger
-        # because count = 0, so advance explicitly.
-        pipeline_db.bulk_update_section_status(
-            [drop_id],
-            CitSciStatus.COLUMN,
-            CitSciStatus.COMPLETE,
-            skip_if_in=[CitSciStatus.COMPLETE],
-        )
-        return 0
+        return 1
 
     annotations = []
     for _, row in df.iterrows():
@@ -1093,7 +1090,7 @@ def ingest_zooniverse_annotations(drop_id: str) -> int:
                     config.csv_interval_annotation_column, ""
                 ),
                 "confidence_agreement": row.get(config.csv_confidence_agreement_column),
-                # subject_id is the Zooniverse clip identifier — stored as
+                # subject_id is the Zooniverse clip identifier, stored as
                 # the citsci external_id so any row can be traced back to its
                 # source clip on zooniverse.org/subjects/<id>. Older MaxN
                 # CSVs predating this column read as NaN; coerce to None.

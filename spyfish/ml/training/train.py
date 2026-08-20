@@ -1,5 +1,5 @@
 """
-train.py — Train binary and species YOLO detection models for Spyfish Aotearoa.
+train.py. Train binary and species YOLO detection models for Spyfish Aotearoa.
 
 Adapted from yolov12_comparison/train_models.py, with:
   - S3 download of base model weights if not cached locally
@@ -45,7 +45,7 @@ STABILITY_PARAMS = {
     "warmup_epochs": 5.0,
     "warmup_bias_lr": 0.0001,
     "nbs": 64,
-    "amp": False,  # Disable AMP — fp16 causes NaN on some underwater datasets
+    "amp": False,  # Disable AMP, fp16 causes NaN on some underwater datasets
     "box": 5.0,  # Lower bounding box loss penalty (default 7.5)
     # Cache decoded images to DISK, not RAM. cache=True (RAM) OOM-kills under
     # SLURM: Ultralytics sizes the RAM cache from psutil, which reports the whole
@@ -57,7 +57,7 @@ STABILITY_PARAMS = {
 }
 
 # Class-imbalance handling lives here, not in prepare_training_data.py.
-# Trim/oversample were removed — they were destructive (oversample copies whole
+# Trim/oversample were removed, they were destructive (oversample copies whole
 # frames; trim throws away annotations). The right place for class balancing in
 # YOLO is the loss/sampler, which preserves all data:
 #   - `image_weights=True` (Ultralytics arg) → samples images more often when
@@ -198,7 +198,7 @@ def train_model(
             f"Training completed but best.pt not found at {best_weights}"
         )
 
-    logging.info(f"Training complete — best weights: {best_weights}")
+    logging.info(f"Training complete, best weights: {best_weights}")
     return best_weights
 
 
@@ -206,7 +206,7 @@ def freeze_dataset_snapshot(data_yaml: Path, best_weights: Path) -> Optional[Pat
     """Freeze the exact dataset a model trained on, beside its weights.
 
     Writes a self-contained ``dataset/`` snapshot into the run dir (sibling of
-    ``weights/``) so ``(model, data)`` is reproducible — you can always answer
+    ``weights/``) so ``(model, data)`` is reproducible, you can always answer
     "what was this .pt trained on?". Captures the lean essentials only:
       - ``data.yaml`` (resolved class list)
       - ``class_map.json`` sidecar (if present next to data.yaml)

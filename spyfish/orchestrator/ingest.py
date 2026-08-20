@@ -9,7 +9,7 @@ from spyfish.config.base import (
     VideoPresence,
 )
 from spyfish.config.wrapper import config
-from spyfish.database.manager import DatabaseManager
+from spyfish.database.manager import DatabaseManager, parse_geo_value
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.validation.data_validator import DataValidator
 
@@ -69,7 +69,7 @@ def check_pending_arrivals(
                 db.update_deployment_fields(
                     drop_id, video_presence=VideoPresence.ARCHIVED
                 )
-                logging.info(f"{drop_id}: video in DEEP_ARCHIVE — marked archived.")
+                logging.info(f"{drop_id}: video in DEEP_ARCHIVE, marked archived.")
             continue
 
         logging.info(f"✅ Video confirmed for {drop_id}. Advancing ml_status → ready.")
@@ -80,6 +80,48 @@ def check_pending_arrivals(
     logging.info(
         f"Arrival check complete. Advanced {updated_count} drops to ml_status=ready."
     )
+
+
+def _attach_region(sites_df, storage):
+    """Add a Region column to the sites frame, resolved from Marine Reserves.csv.
+
+    Region is not on the sites sheet. It hangs off the marine reserve, so it is
+    reached by matching a site's LinkToMarineReserve against the reserve Title.
+    That column holds comma-joined titles for sites sitting between two reserves;
+    the first is used, since both reserves in every observed pair share a region.
+
+    Best-effort: on any failure the column is added empty so ingest still runs.
+    """
+    title_col = config.reserve_title_column
+    try:
+        reserves = storage.read_df_from_s3_csv(config.s3_sharepoint_reserves_csv)
+        # Values are passed through as-is apart from trimming. The known typo
+        # ("Hauraki-Waikato- Taranaki" vs "Hauraki-Waikato-Taranaki") is
+        # deliberately NOT patched here, see claude_docs/todo.md; it is a
+        # SharePoint data fix, and papering over it in code would hide it from
+        # every other consumer of that list.
+        title_to_region = {
+            str(title).strip(): str(region).strip()
+            for title, region in zip(
+                reserves[title_col], reserves[config.region_column]
+            )
+        }
+    except Exception as e:
+        logging.warning(f"Could not load reserves CSV ({e}); Region will be empty.")
+        sites_df[config.region_column] = ""
+        return sites_df
+
+    first_reserve = (
+        sites_df[config.link_to_marine_reserve_column]
+        .fillna("")
+        .str.split(",")
+        .str[0]
+        .str.strip()
+    )
+    sites_df[config.region_column] = first_reserve.map(title_to_region).fillna("")
+    resolved = int((sites_df[config.region_column] != "").sum())
+    logging.info(f"Resolved Region for {resolved}/{len(sites_df)} sites.")
+    return sites_df
 
 
 def run_ingestion():
@@ -131,7 +173,7 @@ def run_ingestion():
 
     if validator.errors_df is not None and not validator.errors_df.empty:
         # Dict-style access (e["SurveyID"]) rather than attribute-style
-        # (e.SurveyID) — the latter silently breaks when a column name
+        # (e.SurveyID), the latter silently breaks when a column name
         # collides with a pandas Series method (e.g. a column named `name`,
         # `count`, `size` would return the method instead of the value).
         for _, e in validator.errors_df.iterrows():
@@ -161,6 +203,7 @@ def run_ingestion():
 
     try:
         sites_df = storage.read_df_from_s3_csv(config.s3_sharepoint_site_csv)
+        sites_df = _attach_region(sites_df, storage)
         db.upsert_sites(sites_df)
     except Exception as e:
         logging.warning(
@@ -204,7 +247,7 @@ def _sync_deployments_to_db(
 ):
     """Upsert deployment rows into the pipeline DB.
 
-    `structural_error_drops` is read-only here — drops flagged by the
+    `structural_error_drops` is read-only here, drops flagged by the
     validator before we started. Per-row sampling-parse failures are
     tracked locally rather than mutated back into the caller's set, so
     this function stays pure with respect to its inputs.
@@ -285,7 +328,7 @@ def _sync_deployments_to_db(
         else:
             video_presence = VideoPresence.ABSENT
 
-        # Determine initial ml_status. Only applied on INSERT — existing records
+        # Determine initial ml_status. Only applied on INSERT, existing records
         # preserve their section statuses via the ON CONFLICT clause in
         # add_or_update_deployment. get_deployments_eligible filters ingest_status='ok'
         # so bad/excluded deployments won't be picked up by processing stages.
@@ -306,6 +349,9 @@ def _sync_deployments_to_db(
             is_bad_deployment=is_bad_deployment,
             sampling_start=sampling_start,
             sampling_end=sampling_end,
+            latitude=parse_geo_value(row.get(config.latitude_column)),
+            longitude=parse_geo_value(row.get(config.longitude_column)),
+            depth=parse_geo_value(row.get(config.depth_column)),
         )
         new_count += 1
 

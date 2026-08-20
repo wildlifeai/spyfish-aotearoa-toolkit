@@ -29,7 +29,7 @@ class MLRunner:
         )
         self.ml_fps = config.ml_fps
         self.imgsz = int(config.imgsz)
-        # Via the property (not raw get_required) so the (0, 1] validation fires —
+        # Via the property (not raw get_required) so the (0, 1] validation fires,
         # a stray confidence_threshold=0 floods inference with max_det garbage.
         self.confidence = config.confidence_threshold
         self.model = str(validate_model_path(config.pipeline_model_path))
@@ -67,7 +67,7 @@ class MLRunner:
             if df.at[idx, "video_presence"] == VideoPresence.ARCHIVED:
                 drop_id = df.at[idx, "drop_id"]
                 logging.warning(
-                    f"Skipping {drop_id}: video in DEEP_ARCHIVE — "
+                    f"Skipping {drop_id}: video in DEEP_ARCHIVE, "
                     f"restore with `aws s3api restore-object` before ML can run."
                 )
                 continue
@@ -187,7 +187,7 @@ class MLRunner:
                 # Only a drop still in ml_running can legally move to ml_error. If it
                 # already reached ml_complete (inference succeeded but a later step
                 # raised), forcing ml_error would itself be an invalid transition and
-                # mask the real success — so skip it.
+                # mask the real success, so skip it.
                 dep = self.db.get_deployment(drop_id)
                 if dep and dep["ml_status"] == MlStatus.RUNNING:
                     self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
@@ -201,7 +201,7 @@ class MLRunner:
                 else:
                     current = dep["ml_status"] if dep else "unknown"
                     logging.error(
-                        f"{drop_id}: exception after status reached {current!r} — not "
+                        f"{drop_id}: exception after status reached {current!r}, not "
                         "forcing ml_error (would be an invalid transition)."
                     )
 
@@ -223,7 +223,7 @@ class MLRunner:
             dep = self.db.get_deployment(drop_id)
             if dep and dep["ml_status"] == MlStatus.RUNNING:
                 logging.error(
-                    f"Drop {drop_id} is still ml_status=running after batch — advancing to error."
+                    f"Drop {drop_id} is still ml_status=running after batch, advancing to error."
                 )
                 self.db.update_section_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
 
