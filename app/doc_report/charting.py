@@ -169,6 +169,18 @@ def style(
     return fig
 
 
+def year_axis(fig: go.Figure) -> go.Figure:
+    """Year ticks as plain full numbers on the x-axis.
+
+    Year columns are ints, so Plotly treats the axis as continuous: on a wide
+    span it thins the ticks to every fifth or tenth year (a 15-year chart read
+    as holding two years), and its locale formatting can render 2024 as
+    "2,024". One tick per year, bare digits.
+    """
+    fig.update_xaxes(dtick=1, tickformat="d")
+    return fig
+
+
 def top_n_slider(
     label: str, n_items: int, default: int, key: str, help: str | None = None
 ) -> int:

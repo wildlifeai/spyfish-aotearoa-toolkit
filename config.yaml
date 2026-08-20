@@ -433,11 +433,49 @@ training:
   auto_balance_val: true
   val_balance_pct: 0.08         # target val fraction per multi-source species
   val_balance_tolerance: 0.2    # stop when the worst-covered species is within this of target (lower = more drops, tighter coverage)
+  val_balance_overshoot_weight: 0     # penalty per box a candidate val drop carries beyond any species' deficit (steers the greedy toward the smallest covering drop). 0 = off. Tested 2026-08-20 on the local 34-drop dataset: every weight 0.05-2.0 INCREASED total val leakage (46%->52-55%) — with heavily drop-concentrated species, big drops satisfy many deficits per pick, so whale-grabbing is near-optimal and small-drop preference just adds picks. Re-evaluate on a richer drop pool via scripts/wip/compare_val_overshoot.py before enabling.
   class_floor_min_images: 50    # merge species appearing in fewer than this many distinct frames into "fish"
+  # One canonical class per animal. Applied to every species name BEFORE
+  # counting, balancing, flooring, and class-list building. Without this,
+  # hierarchy splits (family vs species labels for the same animal) and
+  # nomenclature drift split one animal's boxes across two classes; the smaller
+  # half then falls below class_floor_min_images and merges into 'fish', which
+  # is how hagfish and red gurnards ended up ground-truthed as 'fish'
+  # (found 2026-08-21). Policy: the bigger pile keeps its name.
+  # Policy (Kalindi, 2026-08-21): join the busiest taxon of the group. When a
+  # merged-away species accumulates enough boxes of its own, delete its line
+  # here and the class floor decides whether it stands as its own class.
+  # The sibling-species entries below knowingly trade species precision for
+  # keeping rare-family boxes out of 'fish'; accepted level of mistake.
+  species_canonicalization:
+    Chelidonichthys kumu: Triglidae         # 142 vs 726 boxes; family label deleted from tree 3511; upload label_mapping already merges the other way
+    Eptatretus cirrhatus: Myxinidae         # 61 vs 139
+    Pseudocaranx dentex: Pseudocaranx georgianus  # same fish, current name after reclassification
+    # Morays: family label is the busy pile (174 boxes).
+    Gymnothorax prionodon: Muraenidae       # 5 vs 174
+    Gymnothorax nubilus: Muraenidae         # tree child, unseen in data yet
+    Gymnothorax obesus: Muraenidae          # tree child, unseen in data yet
+    Gymnothorax prasinus: Muraenidae        # tree child, unseen in data yet
+    Enchelycore ramosa: Muraenidae          # tree child, unseen in data yet
+    # Triplefins: common triplefin is the busy pile (111 boxes).
+    Tripterygiidae: Forsterygion lapillum   # 47 vs 111; species pile dominates
+    Forsterygion varium: Forsterygion lapillum     # tree child, unseen in data yet
+    Forsterygion maryannae: Forsterygion lapillum  # tree child, unseen in data yet
+    Forsterygion gymnotum: Forsterygion lapillum   # tree child, unseen in data yet
+    Notoclinops segmentatus: Forsterygion lapillum # tree child, unseen in data yet
+    # Goatfish: blue-striped goatfish is the busy pile (48 boxes).
+    Mullidae: Upeneichthys lineatus         # 1 vs 48; species pile dominates
+    Upeneus francisi: Upeneichthys lineatus        # tree child, unseen in data yet
+    Parupeneus spilurus: Upeneichthys lineatus     # tree child, unseen in data yet
   local_training_dir: "process_files/training"
   excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
-  force_val_drops_file: "process_files/training_lists/force_val_drops.txt" # drops to force into val (overrides survey-aware donation)
-  force_train_drops_file: "process_files/training_lists/force_train_drops.txt" # drops to force into train (overrides survey-aware donation; force_val wins on overlap)
+  # BIIGLE volume ids whose drops always go to TRAIN (old-label / legacy training
+  # volumes whose annotations shouldn't be evaluated against). Resolved offline
+  # via the volume_id column stamped into each drop's _biigle_training_raw.csv
+  # at download time; CSVs downloaded before that column existed never match —
+  # re-download the volume with --force to stamp them. This is the only manual
+  # split control: val selection is fully automatic (auto_balance_val above).
+  force_train_biigle_volumes: []
   retrain_min_improvement_pct: 2.0
   # Per-drop frame filter (applied in assemble_yolo_dataset)
   cap_frames_per_drop: 100               # max frames per drop in the assembled YOLO dataset (extras bypass this cap). BUV is a fixed camera, so frames within a drop share one background + repeat individuals — beyond ~100 they're largely redundant. dominant_species frames are dropped first, so blue-cod-only frames go before multi-species ones.

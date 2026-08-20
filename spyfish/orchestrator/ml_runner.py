@@ -34,8 +34,22 @@ class MLRunner:
         self.confidence = config.confidence_threshold
         self.model = str(validate_model_path(config.pipeline_model_path))
 
-    def get_inference_targets(self) -> List[dict]:
-        """Queries the DB for drops with ml_status='ready' and downloads their videos."""
+    def get_inference_targets(
+        self, survey_id: str | None = None, force: bool = False
+    ) -> List[dict]:
+        """Queries the DB for drops with ml_status='ready' and downloads their videos.
+
+        With ``survey_id``, targets every ready drop in that survey (drop_id
+        prefix match) and bypasses ``limit_processing`` — the survey is the
+        batch. Survey drops in other ml states are reported, not advanced;
+        run --check-arrivals first for drops still awaiting video confirmation.
+
+        ``force`` (survey mode only) additionally resets the survey's
+        ml_complete / ml_error drops back to ml_ready so inference re-runs on
+        them. Outputs are keyed by model name, so a re-run with a new model
+        writes alongside the old model's CSVs; only a same-model re-run
+        overwrites (the intended refresh).
+        """
         logging.debug(
             f"Querying local state database for ml_status={MlStatus.READY!r} (LIMIT: {self.limit})..."
         )
@@ -46,7 +60,42 @@ class MLRunner:
             )
             return []
 
+        if survey_id and force:
+            # Direct status set (same path as --set-targets), not advance_status:
+            # ml_complete -> ml_ready is not a forward transition, it is an
+            # operator-requested re-run.
+            summary = self.db.get_survey_ml_status_summary(survey_id)
+            redo = summary.get(MlStatus.COMPLETE, []) + summary.get(MlStatus.ERROR, [])
+            for drop_id in redo:
+                self.db.update_section_status(drop_id, MlStatus.COLUMN, MlStatus.READY)
+            if redo:
+                logging.info(
+                    f"--force: reset {len(redo)} {survey_id} drop(s) from "
+                    f"ml_complete/ml_error back to ml_ready: {sorted(redo)}"
+                )
+
         records = self.db.get_deployments_eligible("ml_status", [MlStatus.READY])
+
+        if survey_id:
+            prefix = f"{survey_id}_"
+            records = [r for r in records if r["drop_id"].startswith(prefix)]
+            self.limit = len(records)
+            summary = self.db.get_survey_ml_status_summary(survey_id)
+            not_ready = {s: d for s, d in summary.items() if s != MlStatus.READY}
+            logging.info(
+                f"Survey {survey_id}: {len(records)} drop(s) ready for ML "
+                f"(limit_processing bypassed)."
+            )
+            for status, drop_ids in sorted(not_ready.items()):
+                logging.info(
+                    f"  not targeted ({status}): {len(drop_ids)} drop(s), "
+                    f"e.g. {drop_ids[:3]}"
+                )
+            if not records and not summary:
+                logging.warning(
+                    f"Survey {survey_id}: no deployments found — check the survey id."
+                )
+
         df = pd.DataFrame(records)
 
         if df.empty:

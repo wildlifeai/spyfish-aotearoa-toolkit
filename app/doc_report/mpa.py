@@ -28,6 +28,7 @@ import streamlit as st  # noqa: E402
 from .charts.mpa import (  # noqa: E402
     render_by_mpa,
     render_community_composition,
+    render_depth,
     render_diversity,
     render_inside_share,
     render_mpa_populations,
@@ -53,6 +54,7 @@ def render(ctx: dict) -> None:
             "Diversity",
             "Composition",
             "Trends",
+            "Depth",
         ]
     )
 
@@ -85,6 +87,7 @@ def render(ctx: dict) -> None:
         reserves=site_ctx["reserves"],
         regions=site_ctx["regions"],
         protections=site_ctx["protections"],
+        species=site_ctx["species"],
     )
 
     # ── Ported from the Experiments page ─────────────────────────────────────
@@ -107,6 +110,11 @@ def render(ctx: dict) -> None:
     ):
         st.divider()
         chart(exp)
+
+    # Deployment depth: surveyed depths per MPA, species against them. Reads
+    # the deployments (for depth) and the source-filtered annotations, not
+    # the site frames, so it works whether or not the map is unlocked.
+    render_depth(dep, ann)
 
 
 def load_context(ctx: dict | None = None) -> dict:

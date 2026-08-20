@@ -34,7 +34,6 @@ def split_drops_by_survey(
     train_pct: float = 0.80,
     val_pct: float = 0.10,
     test_pct: float = 0.10,
-    force_val_drops: Optional[set] = None,
     force_train_drops: Optional[set] = None,
     seed: int = 42,
 ) -> Tuple[List[str], List[str], List[str]]:
@@ -73,39 +72,16 @@ def split_drops_by_survey(
     """
     rng = random.Random(seed)
     include_test = test_pct > 0
-    force_val = set(force_val_drops or set())
     force_train = set(force_train_drops or set())
 
-    # Overlap is ambiguous, force_val wins (val is the more deliberate choice).
-    overlap = force_val & force_train
-    if overlap:
-        logging.warning(
-            f"{len(overlap)} drop(s) appear in BOTH force_val and force_train, "
-            f"force_val wins: {sorted(overlap)}"
-        )
-        force_train -= overlap
-
     # Pull forced drops out of the survey-grouped pool first; they bypass the
-    # donation rule. Useful when a rare-species drop sits in a singleton
-    # survey that would otherwise never reach val, or when bulk-import extras
-    # should default to train regardless of the survey-aware shuffle.
-    forced_val_in_data = [d for d in drop_ids if d in force_val]
+    # donation rule (old-label volumes resolved from force_train_biigle_volumes).
     forced_train_in_data = [d for d in drop_ids if d in force_train]
-    missing_val = force_val - set(forced_val_in_data)
     missing_train = force_train - set(forced_train_in_data)
-    if missing_val:
-        logging.warning(
-            f"force_val_drops contains {len(missing_val)} ID(s) not present in "
-            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_val)}"
-        )
     if missing_train:
         logging.warning(
-            f"force_train_drops contains {len(missing_train)} ID(s) not present in "
-            f"the dataset (typo? excluded? wrong survey prefix?): {sorted(missing_train)}"
-        )
-    if forced_val_in_data:
-        logging.info(
-            f"Forcing {len(forced_val_in_data)} drop(s) into val: {sorted(forced_val_in_data)}"
+            f"force_train drops contain {len(missing_train)} ID(s) not present in "
+            f"the dataset (excluded? wrong survey prefix?): {sorted(missing_train)}"
         )
     if forced_train_in_data:
         logging.info(
@@ -115,13 +91,13 @@ def split_drops_by_survey(
     # Group by survey, excluding forced drops (they're already assigned)
     survey_to_drops: Dict[str, List[str]] = {}
     for drop_id in drop_ids:
-        if drop_id in force_val or drop_id in force_train:
+        if drop_id in force_train:
             continue
         survey_id = config.get_survey_id_from_drop(drop_id)
         survey_to_drops.setdefault(survey_id, []).append(drop_id)
 
     train_drops: List[str] = list(forced_train_in_data)
-    val_drops: List[str] = list(forced_val_in_data)
+    val_drops: List[str] = []
     test_drops: List[str] = []
 
     # Shuffle survey order for reproducibility
@@ -242,19 +218,23 @@ def balance_val_drops(
     candidate_drops: List[str],
     val_pct: float,
     tolerance: float = 0.05,
-    force_val: Optional[Set[str]] = None,
     force_train: Optional[Set[str]] = None,
+    overshoot_weight: float = 0.0,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Greedy species-balanced val selection (the in-pipeline suggester).
 
      Picks whole drops into val so each multi-source species reaches ~``val_pct``
      of its boxes, stopping when even the worst-covered species is within
      ``tolerance`` of its target. Single-source species (one drop) are train-only
-    , you can't validate a species the model can't also train on. ``force_val``
-     drops are seeded into val; ``force_train`` (and anything they overlap) are
-     never picked. Returns (train, val, []), no test split.
+    , you can't validate a species the model can't also train on. ``force_train``
+     drops (old-label volumes, resolved from force_train_biigle_volumes) are
+     never picked for val. Returns (train, val, []), no test split.
+
+    ``overshoot_weight`` penalises each box a candidate drop carries beyond any
+    species' remaining deficit — those boxes leave train for no val benefit, so
+    with a positive weight the greedy prefers the smallest drop that covers a
+    need over a box-heavy one. 0 scores by coverage gain alone (overshoot-blind).
     """
-    force_val = set(force_val or set())
     force_train = set(force_train or set())
     per_drop = _per_drop_species_counts(
         labels_staged_dir, species_names, set(candidate_drops)
@@ -277,39 +257,26 @@ def balance_val_drops(
 
     current: Counter = Counter()
     val: List[str] = []
-    for d in candidate_drops:
-        if d in force_val:
-            # Honor the operator's explicit choice even when no staged labels
-            # were found, falling through would place the drop in train
-            # (train = candidates − val), silently inverting the instruction
-            # and turning it into a background-negative training image.
-            if d not in per_drop:
-                logging.warning(
-                    f"force_val drop {d} has no staged labels, kept in val, "
-                    "but it contributes no boxes; check the staging step."
-                )
-                val.append(d)
-                continue
-            val.append(d)
-            current.update(per_drop[d])
-
-    remaining = {
-        d: c for d, c in per_drop.items() if d not in force_val and d not in force_train
-    }
+    remaining = {d: c for d, c in per_drop.items() if d not in force_train}
     while remaining and target:
         worst = max((target[s] - current[s]) / target[s] for s in target)
         if worst <= tolerance:
             break
-        best, best_score = None, 0
+        best, best_score = None, None
         for d, counts in remaining.items():
-            score = sum(
+            gain = sum(
                 min(n, target[s] - current[s])
                 for s, n in counts.items()
                 if target.get(s, 0) - current[s] > 0
             )
-            if score > best_score:
+            if gain == 0:
+                continue
+            # Boxes beyond any remaining deficit leave train for no val benefit.
+            overshoot = sum(counts.values()) - gain
+            score = gain - overshoot_weight * overshoot
+            if best_score is None or score > best_score:
                 best, best_score = d, score
-        if best is None or best_score == 0:
+        if best is None:
             break
         val.append(best)
         current.update(remaining.pop(best))
@@ -322,6 +289,37 @@ def balance_val_drops(
         f"{len(single_source)} single-source species kept train-only"
     )
     return train, val, []
+
+
+def force_train_drops_from_volumes(volume_ids: Set[int]) -> Set[str]:
+    """Resolve force_train_biigle_volumes to drop ids, offline.
+
+    Reads the ``volume_id`` column that download_training_volume_labels stamps
+    into each drop's ``_biigle_training_raw.csv``. CSVs written before that
+    column existed never match — re-download the volume with --force to stamp
+    them. Returns the drop ids whose training labels came from a listed volume.
+    """
+    if not volume_ids:
+        return set()
+    forced: Set[str] = set()
+    suffix = config.biigle_training_raw_suffix
+    for csv_path in config.deployment_data_dir.glob(f"**/annotations/*{suffix}"):
+        try:
+            header = pd.read_csv(csv_path, nrows=0).columns
+            if "volume_id" not in header:
+                continue
+            vols = pd.read_csv(csv_path, usecols=["volume_id"])["volume_id"]
+            if vols.empty:
+                continue
+            if int(vols.iloc[0]) in volume_ids:
+                forced.add(csv_path.name[: -len(suffix)])
+        except Exception as e:
+            logging.warning(f"Could not read volume_id from {csv_path.name}: {e}")
+    logging.info(
+        f"force_train_biigle_volumes {sorted(volume_ids)} resolved to "
+        f"{len(forced)} drop(s)"
+    )
+    return forced
 
 
 # ---------------------------------------------------------------------------
@@ -346,9 +344,9 @@ def split_data(
         seed: Random seed.
         extra_drop_ids: Extras (drops with labels but no MaxN). When provided,
             they participate in the survey-aware split alongside MaxN drops,
-            so force_val_drops / force_train_drops + the per-survey val_pct
-            apply to extras too. Volume_<id> extras group under
-            UNKNOWN_SURVEY; canonical-ID extras group with their real survey.
+            so forced-train volumes + the per-survey val_pct apply to extras
+            too. Volume_<id> extras group under UNKNOWN_SURVEY; canonical-ID
+            extras group with their real survey.
 
     Returns:
         (train_drops, val_drops, test_drops)
@@ -367,8 +365,9 @@ def split_data(
         train_pct=train_pct,
         val_pct=val_pct,
         test_pct=test_pct,
-        force_val_drops=config.training_force_val_drops,
-        force_train_drops=config.training_force_train_drops,
+        force_train_drops=force_train_drops_from_volumes(
+            config.training_force_train_biigle_volumes
+        ),
         seed=seed,
     )
 

@@ -38,6 +38,42 @@ from .layout import chips
 
 def render(ctx: dict) -> None:
     """Render the Pipeline view from the shared context."""
+    st.subheader("How to use it")
+    st.markdown(
+        "The state of the data pipeline: which footage has arrived, how far "
+        "each deployment has got through processing, and where things are "
+        "stuck. The sidebar filters apply to every view and stick between "
+        "views. Survey findings are in the Reporting section."
+    )
+    st.caption(
+        "Any feedback, issues, or something you want to see on this page? "
+        "Contact us at kalindi@wildlife.ai"
+    )
+    st.write("")
+
+    st.subheader("Sections")
+    # Lazy import: shell imports this module, so the top of the file cannot.
+    from .shell import render_view_boxes
+
+    render_view_boxes(
+        "Operations",
+        {
+            "Metadata error review": "Validation errors and data-quality "
+            "issues in the deployment metadata.",
+            "MPA": "Survey effort and processing state per marine protected " "area.",
+            "Surveys": "Each survey's progress through the pipeline stages.",
+            "Sites": "Site coverage: planned versus achieved deployments.",
+            "Deployments": "Where the footage is: present, archived, or " "missing.",
+            "Annotations": "Annotation progress across the three sources.",
+            "Species": "Species data hygiene: names that do not map, and "
+            "disagreement between sources.",
+            "Model Metrics": "Trained model performance, and promoting a "
+            "model to production.",
+        },
+    )
+    st.write("")
+    st.write("")
+
     dep = ctx["deployments"]
     if dep.empty:
         st.warning("No deployments match the current filters.")
@@ -48,6 +84,7 @@ def render(ctx: dict) -> None:
     df = _stage_flags(dep)
     presence = df["video_presence"]
 
+    st.subheader("Overview")
     # Only what the funnel below does NOT already answer. The funnel counts all
     # deployments, the not-bad and ingested subsets, video present, and each
     # annotation source, so none of those are repeated here. What is left is the

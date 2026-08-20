@@ -12,7 +12,7 @@ on S3, wiring them in is a possible future enhancement.
 import plotly.express as px
 import streamlit as st
 
-from .charting import style
+from .charting import style, year_axis
 from .charts.deployments import add_completion_flags
 from .charts.surveys import render_annotation_depth, render_bad_per_survey
 from .data import split_reserves
@@ -126,6 +126,7 @@ def render(ctx: dict) -> None:
     fig.update_traces(marker_color="#1E6FB4", textposition="outside", cliponaxis=False)
     style(fig, height=210)
     fig.update_xaxes(title=None)
+    year_axis(fig)
     st.plotly_chart(fig, key="surveys_per_year")
 
     st.divider()
