@@ -270,9 +270,6 @@ def run_retraining(
     if config.training_auto_balance_val:
         # Species-balanced val: pick whole drops so each multi-source species
         # hits ~val_balance_pct of its boxes (the suggester, inline). Decodes
-<<<<<<< HEAD
-        # labels via the in-memory species_names — no class_map.json drift.
-=======
         # labels via the in-memory species_names, no class_map.json drift.
             labels_staged_dir=labels_staged_dir,
             candidate_drops=candidate_drops,
@@ -299,11 +296,7 @@ def run_retraining(
         generate_data_yaml(species_names, species_dir)
         _write_sidecar_class_map(species_names, species_dir, class_map_path)
         logging.info(
-<<<<<<< HEAD
-            "DRY RUN — wrote class_map.json + data.yaml and stopped before "
-=======
             "DRY RUN, wrote class_map.json + data.yaml and stopped before "
->>>>>>> 98206891a2c9cfebafc70d233559d5135a50627f
             "assembly. Run scripts/wip/suggest_val_drops.py to plan val, then "
             "re-run --data-prep (without --dry-run) for the full dataset."
         )
