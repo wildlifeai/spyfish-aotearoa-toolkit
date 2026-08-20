@@ -222,6 +222,7 @@ def build_coco_from_raw_csv(
     for rec in frame_records:
         img_id = rec["image_id"]
         time_of_max = rec["time_of_max"]  # absolute seconds from video start
+        rec_drop_id = rec.get("drop_id", "")
 
         images.append(
             {
@@ -230,16 +231,40 @@ def build_coco_from_raw_csv(
                 "width": rec.get("img_w", img_w),
                 "height": rec.get("img_h", img_h),
                 "time_of_max": time_of_max,
-                "drop_id": rec.get("drop_id", ""),
+                "drop_id": rec_drop_id,
                 "selection_reason": rec.get("selection_reason", ""),
             }
         )
 
+        # Every frame record must identify its source video — all callers
+        # populate it. A missing drop_id means a global nearest-time lookup
+        # could silently pull boxes from a different video, so fail loudly
+        # instead of guessing.
+        if not rec_drop_id:
+            raise ValueError(
+                f"Frame record {img_id} ({rec.get('file_name')!r}) has no drop_id. "
+                "Every record must identify its source video so detections are "
+                "matched within the correct video, not globally."
+            )
+
         if raw_df.empty:
             continue
 
+        # When the raw CSV spans multiple videos (the merged-volume case), the
+        # same time_seconds occurs in every video — each chapter's clock runs
+        # 0–707s — so a global nearest-time lookup could pull boxes from a
+        # different video at the same timestamp. Restrict to this frame's own
+        # video. Single-video pipeline raw CSVs have no drop_id column (one
+        # video, so the whole file is already the right scope).
+        candidates = raw_df
+        if "drop_id" in raw_df.columns:
+            candidates = raw_df[raw_df["drop_id"] == rec_drop_id]
+            if candidates.empty:
+                n_frames_without_detections += 1
+                continue
+
         # Find the raw CSV frame closest to this time_of_max
-        deltas = (raw_df["time_seconds"] - time_of_max).abs()
+        deltas = (candidates["time_seconds"] - time_of_max).abs()
         nearest_idx = deltas.idxmin()
         nearest_delta = deltas.loc[nearest_idx]
         if nearest_delta > max_time_delta_seconds:
@@ -248,8 +273,8 @@ def build_coco_from_raw_csv(
             n_frames_without_detections += 1
             continue
 
-        nearest_time = raw_df["time_seconds"].loc[nearest_idx]
-        frame_rows = raw_df[raw_df["time_seconds"] == nearest_time]
+        nearest_time = candidates["time_seconds"].loc[nearest_idx]
+        frame_rows = candidates[candidates["time_seconds"] == nearest_time]
 
         for _, row in frame_rows.iterrows():
             cls_name = str(row.get("class", "unknown"))

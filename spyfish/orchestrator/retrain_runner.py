@@ -21,11 +21,13 @@ from spyfish.ml.training.prepare_training_data import (
     assemble_yolo_dataset,
     discover_extra_drops,
     flatten_and_remap_labels,
+    generate_data_yaml,
     prepare_from_annotations,
     print_assembled_summary,
     print_per_drop_species_inventory,
+    _write_sidecar_class_map,
 )
-from spyfish.ml.training.split_data import split_data
+from spyfish.ml.training.split_data import balance_val_drops, split_data
 from spyfish.ml.training.train import run_training_pipeline
 
 
@@ -106,6 +108,7 @@ def run_retraining(
     binary: bool = True,
     species: bool = True,
     auto_promote: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """
     Run the retraining pipeline. Steps are composable — pass any subset of
@@ -115,6 +118,12 @@ def run_retraining(
     on disk (faster iteration on hyperparameter changes). Skipping `binary`
     or `species` runs only the other model. The optimizer / lr / dropout
     used for training come from `config.yaml` (training section).
+
+    `dry_run` runs the FAST part only — flatten labels, build the class map +
+    data.yaml, compute the split, print the summary — then stops before the slow
+    assembly (image-index walk + symlinking + floor). Use it to sanity-check the
+    split and to produce the maps `scripts/wip/suggest_val_drops.py` reads, so
+    you can iterate the val balance cheaply before paying for one full assembly.
     """
     logging.info("Starting Retraining Pipeline...")
     logging.info(
@@ -250,18 +259,50 @@ def run_retraining(
         f"  {len(_trainable_drops)} drops ready for training: {_trainable_drops}"
     )
 
-    # 6. Split — only MaxN-backed drops participate in survey-aware splitting.
+    # 6. Split. Extras participate in the survey-aware split alongside MaxN
+    # drops so `force_val_drops` / `force_train_drops` and the per-survey
+    # val_pct apply to them too. Canonical-ID extras (BNP_*, SLI_*, TUH_*) group
+    # with their real survey; volume_<id> extras group under UNKNOWN_SURVEY.
+    # Without forcing, the splitter pulls ~val_pct of each group into val —
+    # essential for species diversity in val when extras dominate the dataset.
     logging.info("Splitting data into train/val/test...")
-    train_drops, val_drops, test_drops = split_data(
-        balanced_df=balanced_df, images_dir=images_dir, output_dir=local_training_dir
-    )
-
-    # 6b. Fold extras into train split only (no drop/survey metadata for safe val/test).
-    if extra_drops:
-        train_drops = sorted(set(train_drops) | set(extra_drops))
-        logging.info(
-            f"Added {len(extra_drops)} extra drop(s) to train split: {extra_drops}"
+    if config.training_auto_balance_val:
+        # Species-balanced val: pick whole drops so each multi-source species
+        # hits ~val_balance_pct of its boxes (the suggester, inline). Decodes
+        # labels via the in-memory species_names — no class_map.json drift.
+        candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
+        train_drops, val_drops, test_drops = balance_val_drops(
+            labels_staged_dir=labels_staged_dir,
+            species_names=species_names,
+            candidate_drops=candidate_drops,
+            val_pct=config.training_val_balance_pct,
+            tolerance=config.training_val_balance_tolerance,
+            force_val=config.training_force_val_drops,
+            force_train=config.training_force_train_drops,
         )
+    else:
+        train_drops, val_drops, test_drops = split_data(
+            balanced_df=balanced_df,
+            images_dir=images_dir,
+            output_dir=local_training_dir,
+            extra_drop_ids=list(extra_drops),
+        )
+
+    if dry_run:
+        # Fast path: write just the maps the suggester needs (the 59-class
+        # decoder + data.yaml), skip the slow assembly (image-index walk +
+        # symlink + floor). Lets you iterate the val balance cheaply, then pay
+        # for one full assembly on the split you actually want.
+        species_dir = local_training_dir / "species"
+        species_dir.mkdir(parents=True, exist_ok=True)
+        generate_data_yaml(species_names, species_dir)
+        _write_sidecar_class_map(species_names, species_dir, class_map_path)
+        logging.info(
+            "DRY RUN — wrote class_map.json + data.yaml and stopped before "
+            "assembly. Run scripts/wip/suggest_val_drops.py to plan val, then "
+            "re-run --data-prep (without --dry-run) for the full dataset."
+        )
+        return {"dry_run_complete": True}
 
     # 7. Assemble YOLO layout.
     logging.info("Assembling final YOLO dataset layout...")

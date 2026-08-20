@@ -33,7 +33,42 @@ class MLConfig(BaseConfig):
 
     @property
     def confidence_threshold(self):
-        return get_required(self.ml_inference, "confidence_threshold", "ml_inference")
+        value = float(
+            get_required(self.ml_inference, "confidence_threshold", "ml_inference")
+        )
+        if not 0.0 < value <= 1.0:
+            raise ValueError(
+                f"ml_inference.confidence_threshold must be in (0, 1]; got {value}. "
+                "A value of 0 disables YOLO's confidence filter, so inference returns "
+                "its full max_det boxes per frame (e.g. 300) — flooding the pipeline "
+                "with near-zero-confidence detections. Set a real threshold (e.g. 0.15)."
+            )
+        return value
+
+    @property
+    def ml_max_boxes_per_frame(self) -> int:
+        """Per-frame detection ceiling above which a drop's inference is treated as
+        degenerate (model saturating max_det, or confidence_threshold set to ~0)."""
+        return int(
+            get_required(self.ml_inference, "max_boxes_per_frame", "ml_inference")
+        )
+
+    @property
+    def ml_batch_size(self) -> int:
+        """Frames per YOLO predict() call during video inference (GPU batching)."""
+        return int(get_required(self.ml_inference, "batch_size", "ml_inference"))
+
+    @property
+    def ml_nms_iou(self) -> float:
+        """IoU threshold for the post-hoc per-frame box de-duplication in the COCO
+        builder. Boxes overlapping more than this collapse to the highest-conf one."""
+        return float(get_required(self.ml_inference, "nms_iou", "ml_inference"))
+
+    @property
+    def ml_nms_agnostic(self) -> bool:
+        """When True, the post-hoc de-dup merges overlapping boxes across classes
+        (a species box and a generic 'fish' box on one animal); False = same-class only."""
+        return bool(get_required(self.ml_inference, "nms_agnostic", "ml_inference"))
 
     @property
     def maxn_confidence_threshold(self):
@@ -169,6 +204,24 @@ class MLConfig(BaseConfig):
         return float(get_required(self.training_config, "test_pct", "training"))
 
     @property
+    def training_auto_balance_val(self) -> bool:
+        """When True, val is chosen by the species-balanced selector instead of
+        per-survey donation."""
+        return bool(get_required(self.training_config, "auto_balance_val", "training"))
+
+    @property
+    def training_val_balance_pct(self) -> float:
+        """Target val fraction per multi-source species for the balanced selector."""
+        return float(get_required(self.training_config, "val_balance_pct", "training"))
+
+    @property
+    def training_val_balance_tolerance(self) -> float:
+        """Greedy stops when the worst-covered species is within this of target."""
+        return float(
+            get_required(self.training_config, "val_balance_tolerance", "training")
+        )
+
+    @property
     def local_training_dir(self) -> Path:
         return self.project_root / get_required(
             self.training_config, "local_training_dir", "training"
@@ -206,6 +259,22 @@ class MLConfig(BaseConfig):
     def training_force_val_drops(self) -> set:
         """DropIDs to force into the val split (overrides survey-aware donation)."""
         return self._parse_drop_ids_from_file(self.training_force_val_drops_file)
+
+    @property
+    def training_force_train_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "force_train_drops_file", "training"
+        )
+
+    @property
+    def training_force_train_drops(self) -> set:
+        """DropIDs to force into the train split (overrides survey-aware donation).
+
+        Useful for bulk-import extras whose box totals would otherwise dominate
+        a small val pool. Force-val wins over force-train when a drop appears in
+        both files.
+        """
+        return self._parse_drop_ids_from_file(self.training_force_train_drops_file)
 
     @property
     def training_results_dir(self) -> Path:

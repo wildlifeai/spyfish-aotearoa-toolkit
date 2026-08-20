@@ -8,6 +8,7 @@ Two-step workflow:
 
 import json
 import logging
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -304,6 +305,25 @@ def upload_coco_annotations_to_biigle(
         cat["id"]: cat["name"] for cat in coco_data.get("categories", [])
     }
 
+    # Image dimensions, for clamping boxes to frame bounds (0 = unknown → no clamp).
+    coco_img_id_to_dims = {
+        img["id"]: (img.get("width", 0), img.get("height", 0))
+        for img in coco_data.get("images", [])
+    }
+
+    # Circuit-breaker: refuse a degenerate COCO before hammering the BIIGLE API.
+    # Mirrors the ML-stage check, but also guards re-uploads of a flooded COCO that
+    # was produced before that check existed (e.g. a confidence_threshold=0 run).
+    n_imgs = len(coco_data.get("images", [])) or 1
+    n_anns = len(coco_data.get("annotations", []))
+    if n_anns / n_imgs > config.ml_max_boxes_per_frame:
+        raise ValueError(
+            f"Refusing to upload degenerate COCO to volume {volume_id}: {n_anns:,} "
+            f"annotations across {n_imgs} image(s) ({n_anns / n_imgs:.0f}/image > "
+            f"max_boxes_per_frame={config.ml_max_boxes_per_frame}). Re-run ML with a "
+            "valid confidence_threshold (0 disables filtering) before uploading."
+        )
+
     # Routing sources, in precedence order:
     #   1. config.label_mapping — explicit per-species override
     #   2. species_labels.csv — full BIIGLE label tree (~175 species)
@@ -315,6 +335,7 @@ def upload_coco_annotations_to_biigle(
 
     # Build the Biigle bulk payload
     biigle_annotations = []
+    skipped_boxes = 0
 
     for ann in coco_data["annotations"]:
         coco_img_id = ann["image_id"]
@@ -330,9 +351,23 @@ def upload_coco_annotations_to_biigle(
         # COCO bbox format: [x, y, w, h] -> Biigle Rectangle format: [x1, y1, x2, y1, x2, y2, x1, y2]
         x, y, w, h = ann["bbox"]
 
-        # Coordinates are verified to be full original frame resolution (e.g. 1920x1080), no scaling needed.
-        x1, y1 = float(x), float(y)
+        # Drop degenerate / non-finite boxes: BIIGLE rejects zero-area or malformed
+        # rectangles ("Invalid points for shape Rectangle") and one bad box fails the
+        # whole bulk batch. Edge-clipped detections commonly collapse to w=0 or h=0.
+        if not all(math.isfinite(v) for v in (x, y, w, h)) or w <= 0 or h <= 0:
+            skipped_boxes += 1
+            continue
+
+        # Coordinates are full original frame resolution (e.g. 1920x1080), no scaling.
+        # Clamp to frame bounds so a box touching/overhanging an edge stays valid.
+        img_w, img_h = coco_img_id_to_dims.get(coco_img_id, (0, 0))
+        x1, y1 = max(0.0, float(x)), max(0.0, float(y))
         x2, y2 = float(x + w), float(y + h)
+        if img_w and img_h:
+            x2, y2 = min(float(img_w), x2), min(float(img_h), y2)
+        if x2 - x1 <= 0 or y2 - y1 <= 0:
+            skipped_boxes += 1
+            continue
         points = [x1, y1, x2, y1, x2, y2, x1, y2]
 
         cat_id = ann.get("category_id")
@@ -360,6 +395,12 @@ def upload_coco_annotations_to_biigle(
                 "label_id": assigned_label_id,
                 "confidence": float(ann.get("score", 1.0)),
             }
+        )
+
+    if skipped_boxes:
+        logging.warning(
+            f"Skipped {skipped_boxes} degenerate box(es) (zero-area / non-finite / "
+            "fully out-of-bounds) before upload — these would be rejected by BIIGLE."
         )
 
     if unmatched:

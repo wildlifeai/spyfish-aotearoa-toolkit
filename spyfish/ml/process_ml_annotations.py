@@ -260,6 +260,25 @@ def process_one_drop(
         raise FileNotFoundError(f"Raw CSV not found for {drop_id} at {raw_csv}")
 
     raw_df = pd.read_csv(raw_csv)
+
+    # Circuit-breaker: refuse degenerate inference before it propagates downstream.
+    # A healthy BUV frame has a handful of detections; hundreds/frame means the model
+    # is saturating its max_det cap (out-of-distribution footage, or a mis-set
+    # confidence_threshold). Fail loudly here so the drop lands in ml_error rather
+    # than building a multi-million-box COCO that later crashes the BIIGLE upload.
+    if not raw_df.empty:
+        n_frames = max(1, raw_df["time_seconds"].nunique())
+        boxes_per_frame = len(raw_df) / n_frames
+        if boxes_per_frame > config.ml_max_boxes_per_frame:
+            raise ValueError(
+                f"{drop_id}: degenerate ML inference — {boxes_per_frame:.0f} "
+                f"detections/frame across {n_frames} frames ({len(raw_df):,} total), "
+                f"exceeding max_boxes_per_frame={config.ml_max_boxes_per_frame}. The "
+                "model is saturating its max_det cap; check confidence_threshold "
+                "(0 disables filtering) and whether the footage is out-of-distribution "
+                "(turbid/low-visibility). Review the video or exclude this drop."
+            )
+
     maxn_df = process_maxn(
         raw_df,
         maxn_csv,

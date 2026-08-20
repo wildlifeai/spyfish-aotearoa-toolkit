@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -211,6 +212,7 @@ def convert_annotations_to_yolo(
     labels_dir: Path,
     images_dir: Path,
     default_img_size: Tuple[int, int] = (1920, 1080),
+    context: str = "",
 ) -> Dict[str, int]:
     """
     Write one YOLO .txt label file per image.
@@ -255,6 +257,7 @@ def convert_annotations_to_yolo(
         labels_dir.mkdir(parents=True, exist_ok=True)
         return {}
 
+    ctx = f"{context}: " if context else ""
     incoming_labels = set(df["label_name"].dropna().astype(str).unique())
     unknown = sorted(incoming_labels - set(class_map.keys()))
     fish_class_id = class_map.get("fish")  # generic-fish fallback bucket
@@ -262,7 +265,7 @@ def convert_annotations_to_yolo(
         affected = int(df["label_name"].isin(unknown).sum())
         if fish_class_id is None:
             raise ValueError(
-                f"class_map is missing {len(unknown)} label(s) and has no "
+                f"{ctx}class_map is missing {len(unknown)} label(s) and has no "
                 f"'fish' fallback bucket — {affected} of {len(df)} rows "
                 f"({affected / len(df):.1%}) would be dropped silently.\n"
                 f"  Missing labels: {unknown}\n"
@@ -270,7 +273,7 @@ def convert_annotations_to_yolo(
                 f"`python -m spyfish.biigle.class_map`, or add a fish bucket."
             )
         logging.warning(
-            f"{len(unknown)} label(s) not in class_map — routing {affected} of "
+            f"{ctx}{len(unknown)} label(s) not in class_map — routing {affected} of "
             f"{len(df)} rows ({affected / len(df):.1%}) to the 'fish' bucket "
             f"(class_id {fish_class_id}). Unknown labels: {unknown}"
         )
@@ -472,21 +475,30 @@ def biigle_to_yolo(
     Labels are written into each drop's labels/ folder (sibling of frames/).
     prepare_training_data then walks these to assemble the unified training dataset.
     """
-    logging.info(f"Searching for expert CSVs in {deployment_data_dir}...")
-    csv_paths = []
-    all_dfs = []
+    logging.info(f"Searching for expert/training CSVs in {deployment_data_dir}...")
+    expert_suffix = config.biigle_expert_raw_suffix
+    training_suffix = config.biigle_training_raw_suffix
 
-    # Strictly use the per-drop expert raw CSVs (skip frozen video-era exports)
-    raw_glob = f"**/annotations/*{config.biigle_expert_raw_suffix}"
-    for csv_path in sorted(deployment_data_dir.glob(raw_glob)):
-        if csv_path.name.startswith("legacy_video_"):
+    # One authoritative source per drop. A drop can carry both a
+    # `_biigle_expert_raw.csv` (from --biigle-sync) and a
+    # `_biigle_training_raw.csv` (from download-project of a "video labels"
+    # volume). The training_raw export is the fuller, more recent set for the
+    # video-era drops, so it WINS. Frozen `legacy_video_*` exports are ignored.
+    # See claude_docs/todo.md "Two annotation sources per drop" for the open
+    # questions behind this preference.
+    candidates: Dict[Path, Dict[str, Path]] = {}
+    for csv_path in sorted(deployment_data_dir.glob("**/annotations/*.csv")):
+        name = csv_path.name
+        if name.startswith("legacy_video_"):
             continue
-        logging.debug(f"  Found expert CSV: {csv_path}")
-        csv_paths.append(csv_path)
-        all_dfs.append(pd.read_csv(csv_path))
+        drop_dir = csv_path.parent.parent
+        if name.endswith(training_suffix):
+            candidates.setdefault(drop_dir, {})["training"] = csv_path
+        elif name.endswith(expert_suffix):
+            candidates.setdefault(drop_dir, {})["expert"] = csv_path
 
-    if not all_dfs:
-        logging.warning("No expert CSV files found. Retraining cannot proceed.")
+    if not candidates:
+        logging.warning("No expert/training CSV files found. Retraining cannot proceed.")
         return {}
 
     class_map = load_class_map(class_map_path)
@@ -496,12 +508,27 @@ def biigle_to_yolo(
         f"({n_classes} classes) from {class_map_path}"
     )
 
-    for csv_path, drop_df in zip(csv_paths, all_dfs):
-        drop_dir = csv_path.parent.parent
+    n_training = sum(1 for s in candidates.values() if "training" in s)
+    logging.info(
+        f"{len(candidates)} drop(s) with annotations — "
+        f"{n_training} via training_raw (preferred), "
+        f"{len(candidates) - n_training} via expert_raw."
+    )
+
+    for drop_dir, srcs in sorted(candidates.items()):
+        chosen = srcs.get("training") or srcs["expert"]
+        which = "training_raw" if "training" in srcs else "expert_raw"
         labels_dir = drop_dir / "labels"
         images_dir = drop_dir / "frames"
-        convert_annotations_to_yolo(drop_df, class_map, labels_dir, images_dir)
-        logging.debug(f"  Wrote labels for {drop_dir.name} → {labels_dir}")
+        # Wipe per-drop labels first so two sources / two runs can never mix
+        # stale .txt (the source-side version of the labels_staged staleness).
+        if labels_dir.exists():
+            shutil.rmtree(labels_dir)
+        convert_annotations_to_yolo(
+            pd.read_csv(chosen), class_map, labels_dir, images_dir,
+            context=f"{drop_dir.name} [{which}]",
+        )
+        logging.debug(f"  Wrote labels for {drop_dir.name} ({which}) → {labels_dir}")
 
     return class_map
 
@@ -562,7 +589,9 @@ def download_extra_volume_labels(
     logging.info(f"Froze class_map sidecar → {sidecar_class_map}")
 
     class_map = load_class_map(resolved_class_map_path)
-    summary = convert_annotations_to_yolo(df, class_map, labels_dir, frames_dir)
+    summary = convert_annotations_to_yolo(
+        df, class_map, labels_dir, frames_dir, context=drop_name
+    )
     logging.info(f"Wrote {len(summary)} YOLO label files → {labels_dir}")
     logging.info(
         f"Bundle ready at {source_dir} — populate {frames_dir}/ with JPEGs "
@@ -625,6 +654,12 @@ def download_training_volume_labels(
     THIS function when the volume's filenames carry real drop_ids (the
     training-frame convention); use that one for external volumes with no
     survey/drop structure.
+
+    Mixed volumes: any filename whose prefix doesn't validate as a canonical
+    drop_id is routed into ``extra_no_survey_id/volume_<volume_id>/`` (same
+    layout as ``download_extra_volume_labels``) instead of being dropped — so
+    orphan annotations in an otherwise-canonical training volume still reach
+    training, just via the extras assembly path.
 
     Note: per-frame YOLO box normalisation reads each image's real dimensions
     from ``training_frames/``. When the JPEGs aren't on this machine (e.g. they
@@ -709,7 +744,7 @@ def download_training_volume_labels(
         positives = boxes = 0
         if not is_empty_drop:
             file_summary = convert_annotations_to_yolo(
-                drop_df, class_map, labels_dir, training_frames_dir
+                drop_df, class_map, labels_dir, training_frames_dir, context=drop_id
             )
             written_stems = {Path(f).stem for f in file_summary}
             positives = sum(1 for n in file_summary.values() if n > 0)
@@ -753,9 +788,53 @@ def download_training_volume_labels(
             f"{sorted(empty_drops)}"
         )
     if skipped:
-        logging.warning(
-            f"  Skipped {len(skipped)} filename prefix(es) that aren't valid "
-            f"drop_ids: {sorted(skipped)}"
+        # Orphan filenames don't parse to a canonical drop_id. Instead of
+        # silently dropping their annotations from training, bundle them into
+        # extra_no_survey_id/volume_<id>/ so they ride the same assembly path
+        # as fully-non-canonical volumes (download_extra_volume_labels output).
+        extra_dir = config.deployment_data_dir / "extra_no_survey_id" / f"volume_{volume_id}"
+        extra_annotations = extra_dir / "annotations"
+        extra_labels = extra_dir / "labels"
+        extra_frames = extra_dir / "frames"
+        extra_annotations.mkdir(parents=True, exist_ok=True)
+        extra_labels.mkdir(parents=True, exist_ok=True)
+        extra_frames.mkdir(parents=True, exist_ok=True)
+
+        orphan_parts = [report_by_drop[p] for p in skipped if p in report_by_drop]
+        orphan_df = (
+            pd.concat(orphan_parts, ignore_index=True)
+            if orphan_parts
+            else pd.DataFrame(columns=report_cols)
+        )
+        orphan_raw = extra_annotations / f"volume_{volume_id}{config.biigle_expert_raw_suffix}"
+        orphan_df.to_csv(orphan_raw, index=False)
+
+        written_orphan_stems: set = set()
+        orphan_pos = orphan_boxes = 0
+        if not orphan_df.empty:
+            file_summary = convert_annotations_to_yolo(
+                orphan_df, class_map, extra_labels, extra_frames,
+                context=f"volume_{volume_id} orphans",
+            )
+            written_orphan_stems = {Path(f).stem for f in file_summary}
+            orphan_pos = sum(1 for n in file_summary.values() if n > 0)
+            orphan_boxes = sum(file_summary.values())
+
+        for prefix in skipped:
+            for fname in universe_by_drop.get(prefix, []):
+                stem = Path(fname).stem
+                if stem in written_orphan_stems:
+                    continue
+                (extra_labels / f"{stem}.txt").write_text("")
+                written_orphan_stems.add(stem)
+        orphan_neg = len(written_orphan_stems) - orphan_pos
+
+        logging.info(
+            f"  Routed {len(skipped)} orphan prefix(es) → "
+            f"{extra_dir.relative_to(config.deployment_data_dir.parent)}: "
+            f"{len(written_orphan_stems)} frame(s), {orphan_pos} positive, "
+            f"{orphan_neg} background, {orphan_boxes} boxes "
+            f"(prefixes: {sorted(skipped)})"
         )
     return summary
 
@@ -808,6 +887,60 @@ def download_project_volume_labels(
                 continue
         logging.info(f"  download {vol_id} ({name})")
         out[vol_id] = download_training_volume_labels(vol_id)
+        downloaded += 1
+
+    logging.info(
+        f"Project {project_id}: downloaded {downloaded}, skipped {skipped} "
+        f"(use --force to re-download)"
+    )
+    return out
+
+
+def download_project_extra_volume_labels(
+    project_id: int,
+    deployment_data_dir: Optional[Path] = None,
+    class_map_path: Optional[Path] = None,
+    report_type: Optional[int] = None,
+    force: bool = False,
+) -> Dict[int, Dict[str, int]]:
+    """Per-project wrapper around `download_extra_volume_labels`.
+
+    Each volume in `project_id` is downloaded into
+    `extra_no_survey_id/volume_<id>/` regardless of its filename convention —
+    use this for non-Spyfish projects (e.g. UoA mussel farms, project 4510)
+    whose images don't follow the `{drop_id}__frame_<secs>s.jpg` pattern.
+
+    Skip logic: a volume is skipped when its `volume_<id>_biigle_expert_raw.csv`
+    is already on disk; pass ``force=True`` to re-download.
+    """
+    from spyfish.biigle.biigle_handler import BiigleHandler
+
+    deployment_data_dir = deployment_data_dir or config.deployment_data_dir
+
+    handler = BiigleHandler()
+    volumes = handler.get_volumes(project_id)
+    logging.info(f"Project {project_id}: {len(volumes)} volume(s) (extras path)")
+
+    out: Dict[int, Dict[str, int]] = {}
+    skipped = downloaded = 0
+    for v in volumes:
+        vol_id = v["id"]
+        name = v.get("name", "")
+        raw_path = (
+            deployment_data_dir
+            / "extra_no_survey_id"
+            / f"volume_{vol_id}"
+            / "annotations"
+            / f"volume_{vol_id}{config.biigle_expert_raw_suffix}"
+        )
+        if raw_path.exists() and not force:
+            logging.info(f"  skip {vol_id} ({name}) — {raw_path.name} exists")
+            skipped += 1
+            continue
+        logging.info(f"  download {vol_id} ({name})")
+        out[vol_id] = download_extra_volume_labels(
+            vol_id, deployment_data_dir, class_map_path, report_type
+        )
         downloaded += 1
 
     logging.info(
@@ -900,6 +1033,42 @@ def main():
         "--force", action="store_true", help="Re-download even when local CSV exists"
     )
 
+    # New: per-project loop, EXTRAS path. Each volume lands in
+    # extra_no_survey_id/volume_<id>/ — use for projects whose images don't
+    # follow the {drop_id}__frame_<secs>s.jpg convention (e.g. UoA 4510).
+    proj_x_cmd = subparsers.add_parser(
+        "download-project-extras",
+        help=(
+            "Download every volume in a BIIGLE project into "
+            "extra_no_survey_id/volume_<id>/ (no drop_id parsing). Volumes "
+            "whose raw CSV already exists are skipped (use --force to re-download)."
+        ),
+    )
+    proj_x_cmd.add_argument(
+        "--project-id", required=True, type=int, help="BIIGLE project ID"
+    )
+    proj_x_cmd.add_argument(
+        "--deployment-data-dir",
+        type=Path,
+        default=None,
+        help="Root deployment_data directory (default: config.deployment_data_dir)",
+    )
+    proj_x_cmd.add_argument(
+        "--class-map",
+        type=Path,
+        default=None,
+        help="Path to class_map.json (defaults to config.class_map_path)",
+    )
+    proj_x_cmd.add_argument(
+        "--report-type",
+        type=int,
+        default=None,
+        help="Biigle report type ID (default: image annotations)",
+    )
+    proj_x_cmd.add_argument(
+        "--force", action="store_true", help="Re-download even when local CSV exists"
+    )
+
     args = parser.parse_args()
 
     if args.command == "convert":
@@ -911,6 +1080,14 @@ def main():
         )
     elif args.command == "download-training-volume":
         download_training_volume_labels(args.volume_id)
+    elif args.command == "download-project-extras":
+        download_project_extra_volume_labels(
+            args.project_id,
+            args.deployment_data_dir,
+            args.class_map,
+            args.report_type,
+            force=args.force,
+        )
     elif args.command == "download-project":
         download_project_volume_labels(args.project_id, force=args.force)
     else:

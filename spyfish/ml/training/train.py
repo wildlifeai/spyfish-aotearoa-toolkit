@@ -18,6 +18,7 @@ import gc
 import glob
 import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -46,7 +47,12 @@ STABILITY_PARAMS = {
     "nbs": 64,
     "amp": False,  # Disable AMP — fp16 causes NaN on some underwater datasets
     "box": 5.0,  # Lower bounding box loss penalty (default 7.5)
-    "cache": True,  # auto: tries RAM, falls back to disk-cached if RAM insufficient
+    # Cache decoded images to DISK, not RAM. cache=True (RAM) OOM-kills under
+    # SLURM: Ultralytics sizes the RAM cache from psutil, which reports the whole
+    # node's memory (100s of GB) rather than the job's cgroup limit (--mem), so it
+    # caches to RAM and blows past the limit. 'disk' is fast across epochs with
+    # bounded RAM. (2026-06-03: was True → OOM-killed at --mem=32G.)
+    "cache": "disk",
     "workers": 8,  # parallel dataloader processes for epoch 1's disk reads
 }
 
@@ -196,6 +202,52 @@ def train_model(
     return best_weights
 
 
+def freeze_dataset_snapshot(data_yaml: Path, best_weights: Path) -> Optional[Path]:
+    """Freeze the exact dataset a model trained on, beside its weights.
+
+    Writes a self-contained ``dataset/`` snapshot into the run dir (sibling of
+    ``weights/``) so ``(model, data)`` is reproducible — you can always answer
+    "what was this .pt trained on?". Captures the lean essentials only:
+      - ``data.yaml`` (resolved class list)
+      - ``class_map.json`` sidecar (if present next to data.yaml)
+      - the label ``.txt`` files for each split (tiny; the annotations themselves)
+      - ``{split}.txt`` lists of image filenames per split
+
+    Frames are referenced by filename, never copied (they're large and live in
+    the deployment tree). Best-effort: logs and returns None on any failure
+    rather than failing the training run.
+    """
+    try:
+        data_yaml = Path(data_yaml)
+        src_dir = data_yaml.parent  # e.g. .../training/species
+        run_dir = best_weights.parent.parent  # .../runs/<ts>_<kind>
+        snap = run_dir / "dataset"
+        snap.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(data_yaml, snap / "data.yaml")
+        sidecar = src_dir / "class_map.json"
+        if sidecar.exists():
+            shutil.copy2(sidecar, snap / "class_map.json")
+
+        for split in ("train", "val", "test"):
+            lbl_src = src_dir / "labels" / split
+            img_src = src_dir / "images" / split
+            if lbl_src.is_dir():
+                dst = snap / "labels" / split
+                dst.mkdir(parents=True, exist_ok=True)
+                for txt in lbl_src.glob("*.txt"):
+                    shutil.copy2(txt, dst / txt.name)
+            if img_src.is_dir():
+                names = sorted(p.name for p in img_src.iterdir() if p.is_file())
+                (snap / f"{split}.txt").write_text("\n".join(names) + "\n")
+
+        logging.info(f"Froze dataset snapshot → {snap}")
+        return snap
+    except Exception as e:
+        logging.warning(f"Could not freeze dataset snapshot: {e}")
+        return None
+
+
 def run_training_pipeline(
     binary_data_yaml: Optional[str] = None,
     species_data_yaml: Optional[str] = None,
@@ -239,6 +291,7 @@ def run_training_pipeline(
             imgsz=imgsz,
             batch=batch,
         )
+        freeze_dataset_snapshot(Path(binary_data_yaml), best_pt)
         results["binary"] = {"local": str(best_pt)}
 
     # Species model
@@ -256,6 +309,7 @@ def run_training_pipeline(
             imgsz=imgsz,
             batch=batch,
         )
+        freeze_dataset_snapshot(Path(species_data_yaml), best_pt)
         results["species"] = {"local": str(best_pt)}
 
     logging.info(f"\nTraining pipeline complete: {results}")

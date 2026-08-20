@@ -299,6 +299,39 @@ def flatten_and_remap_labels(
     """
     excluded = excluded_drops or set()
     id_remap = _build_id_remap(src_class_map_path, unified_names, fallback_species)
+    # Wipe any prior staged tree first — per-drop dirs from earlier runs (which
+    # may have used a DIFFERENT unified ordering) would otherwise survive and
+    # mix incompatible class-ID spaces into one labels_staged. That stale mix is
+    # exactly what corrupts the suggester and the assembled labels.
+    #
+    # Guard the delete: only ever wipe a dir literally named "labels_staged"
+    # that lives under the training workspace, and that contains nothing but
+    # per-drop subdirs of .txt files. Anything else → refuse and fail loudly,
+    # so a mis-passed dst_dir can never rmtree unintended files.
+    if dst_dir.exists():
+        training_root = config.local_training_dir.resolve()
+        resolved = dst_dir.resolve()
+        if dst_dir.name != "labels_staged" or training_root not in resolved.parents:
+            raise ValueError(
+                f"Refusing to wipe {resolved}: expected a 'labels_staged' dir "
+                f"under {training_root}. Aborting to avoid deleting unintended files."
+            )
+        stray = [
+            p
+            for p in dst_dir.iterdir()
+            if not (p.is_dir() or p.suffix == ".txt")
+        ]
+        if stray:
+            raise ValueError(
+                f"Refusing to wipe {resolved}: it holds {len(stray)} unexpected "
+                f"non-label entr(ies) (e.g. {stray[0].name}). A real labels_staged "
+                f"dir contains only per-drop subdirs. Inspect it before deleting."
+            )
+        n_drop_dirs = sum(1 for p in dst_dir.iterdir() if p.is_dir())
+        logging.info(
+            f"Wiping stale staged labels: {n_drop_dirs} per-drop dir(s) in {resolved}"
+        )
+        shutil.rmtree(dst_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     n = 0
@@ -394,21 +427,50 @@ def make_binary_labels(
 # ---------------------------------------------------------------------------
 
 
-def _build_image_index(images_dir: Path) -> Dict[str, Dict[str, Path]]:
+def _drop_source_dirs(images_dir: Path, drop_id: str) -> List[Path]:
+    """Candidate `frames/` + `training_frames/` dirs for one drop, both layouts:
+    canonical `images_dir/<survey>/<drop>/` and extras
+    `images_dir/extra_no_survey_id/<drop>/`. Only existing dirs are returned."""
+    parents = []
+    try:
+        survey = config.get_survey_id_from_drop(drop_id)
+        parents.append(images_dir / survey / drop_id)
+    except Exception:
+        pass
+    parents.append(images_dir / "extra_no_survey_id" / drop_id)
+    return [d / src for d in parents for src in _IMAGE_SOURCE_DIRS if (d / src).is_dir()]
+
+
+def _build_image_index(
+    images_dir: Path, drop_ids: Optional[Set[str]] = None
+) -> Dict[str, Dict[str, Path]]:
     """Map drop_id → {frame-image stem → path}, restricted to canonical image
     source dirs (`frames/` and `training_frames/` — see `_IMAGE_SOURCE_DIRS`).
 
     Scoping by drop_id prevents stem collisions across deployments from silently
     pairing a label with the wrong drop's image.
 
-    One walk of `images_dir`; downstream lookups are O(1). Excludes derivative
-    dirs (qa_frames, zooniverse_frames, biigle_frames, …) by checking the
-    immediate parent. A drop may legitimately have both source dirs (different
-    frames); stems don't collide across them, and `copy_split_files` only ever
-    copies images that have a matching label, so indexing both is safe.
+    When `drop_ids` is given, only those drops' source dirs are walked — a big
+    speedup on shared filesystems (Lustre/NeSI), where a full `rglob` over the
+    whole deployment tree (videos + every drop) dominates assembly time. When
+    omitted, falls back to one recursive walk of `images_dir`.
+
+    Excludes derivative dirs (qa_frames, zooniverse_frames, …) by only looking
+    at `_IMAGE_SOURCE_DIRS`. A drop may have both source dirs; stems don't
+    collide across them, and `copy_split_files` only copies images with a
+    matching label, so indexing both is safe.
     """
     exts = {e.lower() for e in config.image_extensions}
     index: Dict[str, Dict[str, Path]] = {}
+
+    if drop_ids is not None:
+        for drop_id in drop_ids:
+            for src_dir in _drop_source_dirs(images_dir, drop_id):
+                for p in src_dir.iterdir():
+                    if p.is_file() and p.suffix.lower() in exts:
+                        index.setdefault(drop_id, {}).setdefault(p.stem, p)
+        return index
+
     for p in images_dir.rglob("*"):
         if (
             p.is_file()
@@ -746,6 +808,10 @@ def print_assembled_summary(
         )
         return
 
+    # val% = share of each species' boxes held out for validation — quick read
+    # on whether a class is over- or under-represented in val.
+    df["val%"] = (100 * df["val"] / df["total"]).round(0).astype(int)
+
     logging.info(
         "\n=== Per-species bounding-box counts (post-balance, includes extras) ==="
     )
@@ -847,8 +913,10 @@ def assemble_yolo_dataset(
     if build_binary:
         _clean_yolo_split_dirs(binary_dir)
 
-    # Walk images_dir once; reused across all 6 copy_split_files calls below.
-    image_index = _build_image_index(images_dir)
+    # Index only the drops in this split (not the whole deployment tree) — the
+    # full rglob over videos + every drop is the slowest step on Lustre/NeSI.
+    split_drops = set(train_drops) | set(val_drops) | set(test_drops)
+    image_index = _build_image_index(images_dir, drop_ids=split_drops)
     n_frames = sum(len(stems) for stems in image_index.values())
     logging.info(
         f"assemble_yolo_dataset: indexed {n_frames} frame image(s) "

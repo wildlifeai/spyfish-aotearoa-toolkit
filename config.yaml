@@ -74,12 +74,20 @@ paths:
 
 
 ml_inference:
-  limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 5 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
-  confidence_threshold: 0.15      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
+  confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
   maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
+  max_boxes_per_frame: 80          # Ceiling: if a drop's inference averages more detections/frame than this, treat it as erroneous (model saturating max_det on out-of-distribution footage, or confidence_threshold mis-set to ~0) and fail the drop instead of building a giant COCO. No real BUV frame has 80 fish; the flood case hits YOLO's max_det=300.
+  batch_size: 32                   # Frames per YOLO predict() call during video inference. Batching amortises per-call overhead and keeps the GPU fed (single-frame calls leave an A100 at ~0% util). 32 fits comfortably at imgsz=640 on a 40GB A100; lower to 8–16 for larger imgsz or smaller GPUs.
+  # YOLO NMS, applied at inference (passed to model.predict). Cleans overlapping/stacked
+  # boxes at the source, so the raw CSV — and therefore MaxN counts, frame selection AND
+  # the BIIGLE COCO — are all consistent. Tuning these requires re-running --ml (fast now
+  # that inference is batched).
+  nms_iou: 0.45                    # Boxes overlapping more than this IoU are suppressed. Lower = more aggressive merging of duplicate boxes on one fish (YOLO default 0.7). Tuned to 0.45 by eyeballing real frames across SLI_117_02 (2026-06-04): 0.4 cleaned duplicates dramatically but deleted one real fish; 0.45 keeps the dedup win while preserving that fish. Raise toward 0.5 if distinct overlapping fish (schooling/eels) get merged.
+  nms_agnostic: true               # Cross-class NMS: when true, an overlapping species box + generic 'fish' box on the same animal collapse to one (highest confidence wins) instead of both surviving. YOLO default is false (per-class).
   remote_host: "mahuika"
   remote_user: "kalindi"
   extraction:
@@ -99,8 +107,8 @@ extraction:
     start_export: 3          # Clips from the start of the video (health check)
     temporal_spacing_seconds: 10  # Minimum seconds between selected clips
   multiclass_strategy:
-    per_species_maxn_export: 5       # MaxN clips per species
-    per_species_confusing_export: 10 # Confusing clips per species
+    per_species_maxn_export: 4       # MaxN clips per species
+    per_species_confusing_export: 3 # Confusing clips per species
     per_video_empty_export: 3        # Empty clips per video
     per_video_start_export: 2        # Start clips per video
     temporal_spacing_seconds: 10     # Minimum seconds between selected clips
@@ -146,7 +154,7 @@ biigle:
   # Default project for generic handler methods (used when no role is specified).
   # Points at in_progress so plain `config.biigle_project_id` = upload target.
   project_id: 4942
-  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference
+  disk_id: 134          #  134 doc, 98 test, S3 bucket disk reference
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
   volume_report_type_video: 10                   # TODO Volume overview report
@@ -167,16 +175,36 @@ biigle:
   default_bait_label_id: 537309   # tree 3375 → "Bait" — used when an ML annotation's class resolves to 'bait'
   default_label_tree_id: 3511 # 3375
 
-  # Map species scientific/common names (from COCO JSON) to specific Biigle label IDs.
-  # The upload script will check this dictionary first, then fall back to default_fish_label_id.
-  # Empty dict = no species-specific mappings; everything goes to default_fish_label_id.
+  # Label tree that holds the CMECS substrate / cover labels ("Spyfish CMECS
+  # Substrate"). Any annotation whose label belongs to this tree is measured for
+  # percent-cover, regardless of shape (magic-wand Polygon or traced LineString).
+  # Tree membership — not a label-name prefix — is the discriminator: CMECS
+  # hierarchy paths start at generic roots ("Biotic Component", "Substrate
+  # Component", ...) with no Spyfish marker, so only the tree ID identifies them
+  # reliably. This is also what separates a substrate LineString from a fish-SIZE
+  # LineString: size lines carry a species label (tree 3511) or "Scale bar", so
+  # they route to process_sizes() instead.
+  substrate_label_tree_id: 3994
 
+  # OVERRIDE map only: species scientific/common name (from COCO JSON) → Biigle label ID.
+  # This is the FIRST routing source in upload_frames.py and exists to force a model
+  # class to a DIFFERENT label than its natural one — e.g. send an uncertain species to
+  # "Fish: review required" for expert confirmation. It is NOT the species list.
+  # Normal routing is handled downstream without any entry here:
+  #   1. label_mapping (this dict)          ← overrides only
+  #   2. species_labels.csv (~175 species)  ← full BIIGLE label tree, keyed by scientific name
+  #   3. 'bait'  → default_bait_label_id
+  #   4. 'fish' / unknown → default_fish_label_id
+  # Most of the 16-class model (13 species + bait + fish) resolves via sources 2–4
+  # with no entry here. The one exception below is a deliberate override.
   label_mapping:
-    'Jasus edwardsii': 477401
-    'Notolabrus celidotus': 477425
-    'Pagrus auratus': 477416
-    'Parapercis colias': 477318
-    'Pseudolabrus miles': 477406
+    # Family-level "Gurnards - Triglidae" (was 477460) was deleted from BIIGLE tree 3511,
+    # so the model's `Triglidae` class has no natural label in species_labels.csv. Route it
+    # to the red-gurnard SPECIES label (Chelidonichthys kumu, 477395) — decision 2026-06-03.
+    # NOTE: this merges family-level detections into the species label, so in BIIGLE a
+    # `Triglidae` call is indistinguishable from a `Chelidonichthys kumu` call. Remove this
+    # entry if the "Gurnards - Triglidae" family label is restored in the tree.
+    'Triglidae': 477395
   # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
   # on slow or unreachable endpoints.
   request_timeout_secs: 30
@@ -195,19 +223,27 @@ training:
   optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
   lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
   dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
-  train_pct: 0.85
-  val_pct: 0.15
+  train_pct: 1.0
+  val_pct: 0.0                  # 0 = no per-survey val donation (used only when auto_balance_val is false). With auto_balance_val on, val comes from the species-balanced selector instead.
   test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
+  # Species-balanced val selection (the suggester, folded into the pipeline).
+  # When true, the split picks whole drops into val so each multi-source species
+  # reaches ~val_balance_pct of its boxes (greedy, stops within tolerance), honouring
+  # force_val_drops (seeded) / force_train_drops (excluded). Replaces per-survey donation.
+  auto_balance_val: true
+  val_balance_pct: 0.08         # target val fraction per multi-source species
+  val_balance_tolerance: 0.2    # stop when the worst-covered species is within this of target (lower = more drops, tighter coverage)
   class_floor_min_images: 50    # merge species appearing in fewer than this many distinct frames into "fish"
   local_training_dir: "process_files/training"
   excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
   force_val_drops_file: "process_files/training_lists/force_val_drops.txt" # drops to force into val (overrides survey-aware donation)
+  force_train_drops_file: "process_files/training_lists/force_train_drops.txt" # drops to force into train (overrides survey-aware donation; force_val wins on overlap)
   retrain_min_improvement_pct: 2.0
   # Per-drop frame filter (applied in assemble_yolo_dataset)
-  cap_frames_per_drop: 120               # max frames per drop in the assembled YOLO dataset (extras bypass this cap)
+  cap_frames_per_drop: 100               # max frames per drop in the assembled YOLO dataset (extras bypass this cap). BUV is a fixed camera, so frames within a drop share one background + repeat individuals — beyond ~100 they're largely redundant. dominant_species frames are dropped first, so blue-cod-only frames go before multi-species ones.
   dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
-    # - "Pagrus auratus"                   # snapper — overrepresented in current corpus
-    # - "Parapercis colias"                # blue cod — overrepresented in current corpus
+    - "Parapercis colias"                # blue cod — overrepresented (~59% of all boxes); drop blue-cod-only frames first so the cap keeps frames with rarer species
+    # - "Pagrus auratus"                   # snapper — enable if it starts dominating too
   split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
   background_ratio: 0.1                  # target share of background (empty-label) frames in the TRAIN split; 0 disables. Ultralytics rec 0–10%, COCO ≈ 1%. Backgrounds (mostly from training-frame volumes) are pooled across train drops and subsampled to hit this ratio.
 
@@ -217,7 +253,7 @@ training_extraction:
   # runs the configured model, uploads to a survey-level Biigle volume.
   # See `python -m spyfish.ml.training.extract_training_frames --help`.
   n_frames: 10                # frames per drop; back-loaded toward sampling_end (more fish later)
-  annotation_type: binary     # "binary" or "species" — picks `{kind}_*.pt` from pipeline_model/
+  annotation_type: species     # "binary" or "species" — picks `{kind}_*.pt` from pipeline_model/
 
 
 validation_patterns:

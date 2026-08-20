@@ -84,12 +84,67 @@ def run_yolo_inference(
         total_frames_to_process = max(1, (end_frame - current_frame) // vid_stride)
 
         frames_processed = 0
+        batch_size = config.ml_batch_size
 
-        with open(output_csv, "w", newline="") as csvfile:
+        # Write to a temp file and atomically rename only after the loop finishes
+        # cleanly, so an interrupted run never leaves a truncated CSV that the
+        # skip-existing check would mistake for a completed one.
+        tmp_csv = f"{output_csv}.partial"
+        with open(tmp_csv, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(
                 ["frame", "time_seconds", "class", "confidence", "x", "y", "w", "h"]
             )
+
+            # Decode frames with cv2 (exact, unambiguous absolute indexing) but run
+            # YOLO in batches. Single-frame predicts pay full Python/pre-process/NMS
+            # overhead per call and leave the GPU idle (~0% util) between them — the
+            # dominant cost on long videos. Batching keeps the GPU fed while the
+            # frame index stays the exact absolute `current_frame`, so downstream
+            # frame extraction still seeks back pixel-perfectly.
+            batch_frames: list = []
+            batch_indices: list = []
+
+            def _flush_batch() -> None:
+                nonlocal frames_processed
+                if not batch_frames:
+                    return
+                results = model.predict(
+                    source=batch_frames,
+                    conf=float(conf),
+                    imgsz=int(imgsz),
+                    iou=config.ml_nms_iou,
+                    agnostic_nms=config.ml_nms_agnostic,
+                    verbose=False,
+                    project=None,
+                    save=False,
+                )
+                for res, frame_idx in zip(results, batch_indices):
+                    t_seconds = frame_idx / true_fps
+                    for box in res.boxes:
+                        x, y, w, h = box.xywh[0].tolist()
+                        # IMPORTANT: store absolute frame_idx, NOT index // stride —
+                        # extraction tools seek back to this exact frame.
+                        writer.writerow(
+                            [
+                                frame_idx,
+                                t_seconds,
+                                model.names[int(box.cls[0])],
+                                float(box.conf[0]),
+                                x,
+                                y,
+                                w,
+                                h,
+                            ]
+                        )
+                frames_processed += len(batch_frames)
+                percent = min(100.0, (frames_processed / total_frames_to_process) * 100)
+                logging.info(
+                    f"Inference progress for {drop_id}: {frames_processed}/"
+                    f"{total_frames_to_process} frames ({percent:.1f}%)"
+                )
+                batch_frames.clear()
+                batch_indices.clear()
 
             while True:
                 ret, frame = cap.read()
@@ -100,52 +155,10 @@ def run_yolo_inference(
                 if sampling_end is not None and real_video_seconds > sampling_end:
                     break
 
-                # Absolute video timestamp — seconds from the start of the video file.
-                ml_timeline_seconds = real_video_seconds
-
-                # Run prediction on single frame
-                # TODO checkif we need this, project=None prevents the creation of the 'runs' directory
-                results = model.predict(
-                    source=frame,
-                    conf=float(conf),
-                    imgsz=int(imgsz),
-                    verbose=False,
-                    project=None,
-                    save=False,
-                )
-                r = results[0]
-
-                frames_processed += 1
-                if (
-                    frames_processed % config.log_interval_frames == 0
-                    or frames_processed == total_frames_to_process
-                ):
-                    percent = (frames_processed / total_frames_to_process) * 100
-                    logging.info(
-                        f"Inference progress for {drop_id}: {frames_processed}/{total_frames_to_process} frames ({percent:.1f}%) at {real_video_seconds:.1f}s"
-                    )
-
-                boxes = r.boxes
-                for box in boxes:
-                    x, y, w, h = box.xywh[0].tolist()
-                    confidence = float(box.conf[0])
-                    cls = int(box.cls[0])
-                    class_name = model.names[cls]
-
-                    # IMPORTANT: Store absolute current_frame, NOT index // stride
-                    # This ensures extraction tools can seek back pixel-perfectly.
-                    writer.writerow(
-                        [
-                            current_frame,
-                            ml_timeline_seconds,
-                            class_name,
-                            confidence,
-                            x,
-                            y,
-                            w,
-                            h,
-                        ]
-                    )
+                batch_frames.append(frame)
+                batch_indices.append(current_frame)
+                if len(batch_frames) >= batch_size:
+                    _flush_batch()
 
                 # Fast forward vid_stride frames using grab()
                 end_of_video = False
@@ -160,7 +173,12 @@ def run_yolo_inference(
 
                 current_frame += 1
 
+            # Flush any frames left in the final partial batch.
+            _flush_batch()
+
         cap.release()
+        # Atomic promote — only reached if the loop above completed without error.
+        Path(tmp_csv).replace(output_csv)
 
         logging.info(f"Inference complete. Output saved to {output_csv}")
 
@@ -230,6 +248,8 @@ def predict_on_frame_paths(
         source=sources,
         conf=conf,
         imgsz=img_size,
+        iou=config.ml_nms_iou,
+        agnostic_nms=config.ml_nms_agnostic,
         verbose=False,
         project=None,
         save=False,
