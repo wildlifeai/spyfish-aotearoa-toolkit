@@ -87,9 +87,9 @@ def _run_set_targets(push_s3: bool = True) -> None:
     process_csv_targets(csv_path, push_s3=push_s3)
 
 
-def _run_ml() -> None:
+def _run_ml(survey_id: str | None = None, force: bool = False) -> None:
     runner = MLRunner()
-    targets = runner.get_inference_targets()
+    targets = runner.get_inference_targets(survey_id=survey_id, force=force)
 
     if not targets:
         logging.info("No drops available for ML processing.")
@@ -418,7 +418,17 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="On --zooniverse-sync: re-fetch from API even if raw CSV already exists on disk",
+        help="On --zooniverse-sync: re-fetch from API even if raw CSV already "
+        "exists on disk. On --ml --survey: also reset the survey's "
+        "ml_complete/ml_error drops to ml_ready and re-run inference on them "
+        "(same-model outputs are overwritten; a new model writes alongside).",
+    )
+    parser.add_argument(
+        "--survey",
+        metavar="SURVEY_ID",
+        help="On --ml: run inference on every ml_ready drop in this survey "
+        "(bypasses limit_processing). Drops still awaiting video confirmation "
+        "are reported; run --check-arrivals first to advance them.",
     )
     parser.add_argument(
         "--ping",
@@ -439,6 +449,11 @@ def main() -> None:
         return
 
     def _patch_stage(s):
+        if s.flag == "ml" and args.survey:
+            return replace(
+                s,
+                fn=functools.partial(_run_ml, survey_id=args.survey, force=args.force),
+            )
         if s.flag == "zooniverse-sync":
             return replace(
                 s, fn=functools.partial(_run_zooniverse_sync, force=args.force)

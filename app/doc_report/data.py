@@ -382,6 +382,9 @@ def build_context(
     reserves: list,
     ingested_only: bool,
     source: str = BEST_AVAILABLE,
+    species: list | None = None,
+    regions: list | None = None,
+    protections: list | None = None,
 ) -> dict:
     """Apply the page-level filters once and hand every view the same frames.
 
@@ -417,6 +420,12 @@ def build_context(
     if reserves:
         dep = dep[matches_reserves(dep["link_to_marine_reserve"], reserves)]
         ann = ann[matches_reserves(ann["link_to_marine_reserve"], reserves)]
+    if regions:
+        dep = dep[dep["region"].isin(regions)]
+        ann = ann[ann["region"].isin(regions)]
+    if protections:
+        dep = dep[dep["protection_status"].isin(protections)]
+        ann = ann[ann["protection_status"].isin(protections)]
     if ingested_only:
         dep = dep[dep["ingest_status"] == "ok"]
         ann = ann[ann["drop_id"].isin(dep["drop_id"])]
@@ -427,15 +436,31 @@ def build_context(
     ann_all_sources = ann
     ann = _apply_source(ann, source)
 
+    # Species narrows the ANNOTATION rows only, and last: deployments are not
+    # "about" one species, and absence records (null species) or other species'
+    # rows leaving the deployment frame would silently change every effort
+    # denominator on the page. The pre-species frame stays available for
+    # exactly those denominators.
+    ann_all_species = ann
+    if species:
+        ann = ann[ann["display_name"].isin(species)]
+        ann_all_sources = ann_all_sources[ann_all_sources["display_name"].isin(species)]
+
     return {
         "deployments": dep,
         "annotations": ann,
         "annotations_all_sources": ann_all_sources,
+        # Source-filtered but species-UNfiltered: the denominator frame for
+        # detection rates and "reviewed, nothing seen" counts.
+        "annotations_all_species": ann_all_species,
         "source": source,
         # Kept unfiltered so a tab can show "x of y" without re-loading.
         "all_deployments": deployments,
         "all_annotations": annotations,
         "years": years,
         "reserves": reserves,
+        "species": species or [],
+        "regions": regions or [],
+        "protections": protections or [],
         "ingested_only": ingested_only,
     }

@@ -146,9 +146,22 @@ except Exception as exc:  # noqa: BLE001, reporting must never kill the app
     OPERATIONS_VIEWS, REPORTING_VIEWS = {}, {}
     _SHELL_ERROR = exc
 
+
+def _built_views(views: dict) -> list:
+    """View names that get a nav entry: everything actually built.
+
+    Views mapping to None are not built yet; a nav link to a page that only
+    says "not built" is clutter, so they stay out and the home pages list
+    them as coming soon instead. The "* home" entries also map to None at
+    import time (the shell wires them up when a page runs), so they are kept
+    by name.
+    """
+    return [n for n, v in views.items() if v is not None or n.endswith(" home")]
+
+
 SECTION_VIEWS = {
-    "Reporting": list(REPORTING_VIEWS),
-    "Operations": list(OPERATIONS_VIEWS),
+    "Reporting": _built_views(REPORTING_VIEWS),
+    "Operations": _built_views(OPERATIONS_VIEWS),
 }
 
 
@@ -215,12 +228,13 @@ dashboard_test_page = _file_page(
 )
 # Model Metrics sits in Operations, not Tools: how the model is performing is a
 # question about the state of the pipeline, like every other view in that
-# section. Spliced in below, after Species and before Metadata error review.
+# section. At the bottom of the group, since it is the most specialist view.
 model_page = _file_page("pages/📊_Model_Metrics.py", title="Model Metrics", icon="📊")
 if model_page is not None and section_pages.get("Operations"):
-    _ops = section_pages["Operations"]
-    _before = view_pages.get(("Operations", "Metadata error review"))
-    _ops.insert(_ops.index(_before) if _before in _ops else len(_ops), model_page)
+    section_pages["Operations"].append(model_page)
+    # Registered alongside the function views so the Operations home's
+    # section boxes can link to it through the same PAGES registry.
+    view_pages[("Operations", "Model Metrics")] = model_page
 # Moved out of `pages/_advanced/` and into Tools with the rest of them. It had
 # an "In development" group to itself, which was a header and a horizontal rule
 # spent on one link.

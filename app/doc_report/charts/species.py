@@ -31,6 +31,7 @@ from ..charting import (
     source_coverage_note,
     style,
     top_n_slider,
+    year_axis,
 )
 from ..data import effort_per, real_species
 from ..layout import section
@@ -421,6 +422,7 @@ def render_species_over_time(
                 legend=dict(orientation="h", y=1.14, x=0, title_text=""),
                 **({"yaxis_tickformat": ".0%"} if pct else {}),
             )
+            year_axis(fig)
             st.plotly_chart(fig, key=f"species_time_{metric.replace(' ', '_')}")
 
     st.caption(
@@ -1301,7 +1303,7 @@ def render_yearly_trend(df: pd.DataFrame) -> None:
     style(
         fig,
         legend_title_text="Site",
-        xaxis={"dtick": 1},
+        xaxis={"dtick": 1, "tickformat": "d"},
         margin={"l": 10, "r": 10, "t": 20, "b": 10},
     )
     st.plotly_chart(fig, use_container_width=True)

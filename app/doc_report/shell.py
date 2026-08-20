@@ -10,9 +10,11 @@ looks like a view reporting nothing.
 """
 
 import sqlite3
+from dataclasses import dataclass
 
 import plotly.express as px
 import streamlit as st
+from theme import protection_sort_key
 from utils import sync_db_if_needed
 
 from . import (
@@ -32,7 +34,7 @@ from . import (
     species_search,
     surveys,
 )
-from .charting import style
+from .charting import style, year_axis
 from .charts.deployments import (
     render_deployments_per_year,
 )
@@ -108,30 +110,57 @@ NOT_BUILT = {
 }
 
 
-FILTER_KEYS = (
-    "_w_years",
-    "_w_reserves",
-    "_w_source",
-    "report_years",
-    "report_reserves",
-    "report_source",
+# ── The shared filters, in one registry ──────────────────────────────────────
+#
+# One entry per filter: its session key (the value that survives navigation,
+# never attached to a widget), its widget key, its query-param name, and its
+# label. Reset, URL adoption and URL mirroring all loop over this, so adding a
+# multiselect filter is one entry here plus its options in `build_context`.
+#
+# Query-param names are short and singular because they are typed and read by
+# people: `?reserve=X&reserve=Y&years=2018-2024`.
+#
+# No shared species filter for now: the MPA populations panel carries its own
+# species picker, which matters more, and two species controls fighting each
+# other was worse than one. The plumbing for it (a registry entry here, its
+# options in `build_context`, `ctx["species"]`, the panel passthrough) is
+# ready for the day it comes back.
+@dataclass(frozen=True)
+class FilterSpec:
+    state_key: str
+    widget_key: str
+    qp: str
+    label: str
+    # "multi" filters share all the generic machinery. "range" (the year
+    # slider) and "select" (the source picker) carry their own URL encoding
+    # and widget handling in the functions below.
+    kind: str = "multi"
+
+
+FILTERS = {
+    "years": FilterSpec("report_years", "_w_years", "years", "Survey year", "range"),
+    "reserves": FilterSpec("report_reserves", "_w_reserves", "reserve", "MPA"),
+    "regions": FilterSpec("report_regions", "_w_regions", "region", "Region"),
+    "protections": FilterSpec(
+        "report_protections", "_w_protections", "protection", "Protection status"
+    ),
+    "source": FilterSpec("report_source", "_w_source", "source", "Source", "select"),
+}
+
+_MULTI = {name: spec for name, spec in FILTERS.items() if spec.kind == "multi"}
+
+FILTER_KEYS = tuple(
+    key for spec in FILTERS.values() for key in (spec.widget_key, spec.state_key)
 )
-
-
-# Query-param names for the shareable filter URL. Short and singular because
-# they are typed and read by people: `?reserve=X&reserve=Y&years=2018-2024`.
-_QP_RESERVES = "reserve"
-_QP_YEARS = "years"
-_QP_SOURCE = "source"
 
 
 def _reset_filters() -> None:
     """Drop every filter key so the next run seeds them from the data again."""
     for key in FILTER_KEYS:
         st.session_state.pop(key, None)
-    for key in (_QP_RESERVES, _QP_YEARS, _QP_SOURCE):
-        if key in st.query_params:
-            del st.query_params[key]
+    for spec in FILTERS.values():
+        if spec.qp in st.query_params:
+            del st.query_params[spec.qp]
 
 
 def _adopt_url_filters() -> None:
@@ -149,20 +178,21 @@ def _adopt_url_filters() -> None:
         return
     st.session_state["_url_filters_adopted"] = True
     qp = st.query_params
-    reserves = qp.get_all(_QP_RESERVES)
-    if reserves:
-        # Not validated against the data here: the widget seed drops names the
-        # data does not hold, and the mirror rewrites the URL from what
-        # survived.
-        st.session_state["report_reserves"] = reserves
-    years = qp.get(_QP_YEARS)
+    for spec in _MULTI.values():
+        values = qp.get_all(spec.qp)
+        if values:
+            # Not validated against the data here: the widget seed drops values
+            # the data does not hold, and the mirror rewrites the URL from what
+            # survived.
+            st.session_state[spec.state_key] = values
+    years = qp.get(FILTERS["years"].qp)
     if years:
         try:
             lo, hi = (int(part) for part in years.split("-", 1))
             st.session_state["report_years"] = (lo, hi)
         except ValueError:
             pass  # a hand-mangled URL is ignored, not an error
-    source = qp.get(_QP_SOURCE) or ""
+    source = qp.get(FILTERS["source"].qp) or ""
     # Case-insensitive: the choices are capitalised ("Expert") but a URL is as
     # often typed as pasted, and ?source=expert should mean the obvious thing.
     match = next(
@@ -173,7 +203,7 @@ def _adopt_url_filters() -> None:
         st.session_state["report_source"] = match
 
 
-def _mirror_filters_to_url(year_range, bounds, reserves: list, source: str) -> None:
+def _mirror_filters_to_url(selected: dict, bounds) -> None:
     """Write the current filters into the URL, so the view can be shared.
 
     Re-asserted on every build because a page switch rewrites the URL to the
@@ -191,24 +221,52 @@ def _mirror_filters_to_url(year_range, bounds, reserves: list, source: str) -> N
             elif key in qp:
                 del qp[key]
 
-    _sync(_QP_RESERVES, list(reserves))
+    for name, spec in _MULTI.items():
+        _sync(spec.qp, list(selected[name]))
+    year_range = selected["years"]
     non_default_years = bounds and year_range and tuple(year_range) != tuple(bounds)
     _sync(
-        _QP_YEARS,
+        FILTERS["years"].qp,
         [f"{year_range[0]}-{year_range[1]}"] if non_default_years else [],
     )
     _sync(
-        _QP_SOURCE,
-        [source] if source != report_data.BEST_AVAILABLE else [],
+        FILTERS["source"].qp,
+        (
+            [selected["source"]]
+            if selected["source"] != report_data.BEST_AVAILABLE
+            else []
+        ),
     )
 
 
-def build_context(cols) -> dict:
-    """Page-level filters plus the filtered frames every view reads.
+def _prune_multi(spec: FilterSpec, options: list) -> None:
+    """Seed the widget from the stored values, and prune it on every run.
 
-    `cols` are containers the caller supplies, so the filters can sit on the
-    title row rather than in a band of their own. The same three controls appear
-    on every reporting view and apply to whichever view is open.
+    Option lists follow the other filters ("hide what does not exist"), so a
+    value picked earlier can drop out of the list; left in the widget key it
+    would make the multiselect raise. Pruning before the widget is built is
+    safe — assigning to a widget key only raises after its widget exists in
+    the current run.
+    """
+    current = st.session_state.get(spec.widget_key, st.session_state[spec.state_key])
+    st.session_state[spec.widget_key] = [v for v in current if v in options]
+
+
+def _multi_filter(spec: FilterSpec, options: list, **kwargs) -> list:
+    """One multiselect filter: prune, render, store. Returns the selection."""
+    _prune_multi(spec, options)
+    value = st.multiselect(spec.label, options, key=spec.widget_key, **kwargs)
+    st.session_state[spec.state_key] = value
+    return value
+
+
+def build_context() -> dict:
+    """Sidebar filters plus the filtered frames every view reads.
+
+    The filters render into the sidebar, above the page nav (`_sidebar_css`
+    does the reordering): MPA and survey year always visible, the rest behind
+    a "More filters" expander. The same controls appear on every reporting
+    view and apply to whichever view is open.
 
     Filters live here rather than in each view so the counts stay consistent.
     Two views filtering separately would disagree about how many deployments
@@ -237,7 +295,7 @@ def build_context(cols) -> dict:
         )
         st.stop()
 
-    _compact_filter_css()
+    _sidebar_css()
 
     # Filter values are kept under their own session keys, not the widget keys.
     # Streamlit drops widget state for widgets that were not rendered in a run,
@@ -247,14 +305,15 @@ def build_context(cols) -> dict:
     dated = deployments["survey_year"].dropna()
     bounds = (int(dated.min()), int(dated.max())) if not dated.empty else None
     st.session_state.setdefault("report_years", bounds)
-    st.session_state.setdefault("report_reserves", [])
+    for spec in _MULTI.values():
+        st.session_state.setdefault(spec.state_key, [])
     st.session_state.setdefault("report_source", report_data.BEST_AVAILABLE)
 
     # After the defaults, before the widget seeds: a pasted URL overrides the
     # defaults, and the widgets then seed from what it said.
     _adopt_url_filters()
 
-    # Each widget is seeded into its own key ONCE and then left alone. Passing
+    # The slider is seeded into its own key ONCE and then left alone. Passing
     # `value=` / `default=` / `index=` on every run is what caused the slider to
     # lose the first drag: those arguments are part of a widget's identity, so
     # feeding the mirrored value back in changed the identity on the rerun the
@@ -270,7 +329,62 @@ def build_context(cols) -> dict:
             max(bounds[0], min(stored[1], bounds[1])),
         )
 
-    with cols[0]:
+    # Option lists follow the other filters, so a picker only offers values
+    # that exist under the current selection ("hide what does not exist").
+    # They are computed from the session keys BEFORE their widgets render:
+    # any widget interaction reruns the whole script, so by the time anything
+    # draws, the keys already hold the new value.
+    years_now = st.session_state.get("_w_years") or st.session_state["report_years"]
+
+    def in_years(frame):
+        if not years_now:
+            return frame
+        # Undated rows kept, same policy as `report_data.build_context`.
+        year = frame["survey_year"]
+        return frame[year.between(*years_now) | year.isna()]
+
+    dep_scope = in_years(deployments)
+    reserve_options = sorted(
+        report_data.split_reserves(dep_scope["link_to_marine_reserve"])
+    )
+
+    # Active-filter count for the expander label, from the session keys, so a
+    # closed expander still says whether anything is narrowing the page.
+    active = sum(bool(st.session_state[spec.state_key]) for spec in _MULTI.values())
+    stored_years = st.session_state["report_years"]
+    if bounds and stored_years and tuple(stored_years) != tuple(bounds):
+        active += 1
+    if st.session_state["report_source"] != report_data.BEST_AVAILABLE:
+        active += 1
+
+    with st.sidebar, st.container(key="sidebar_filters"):
+        # The whole block is one expander under the nav, open by default; the
+        # active count stays in the label so it still reads at a glance if
+        # someone closes it.
+        expander = st.expander(
+            f"🔍 Filters · {active} active" if active else "🔍 Filters",
+            expanded=True,
+        )
+    with expander:
+        st.caption(
+            "Filters apply to every Reporting and Operations view and stick "
+            "between views."
+        )
+        reserves = _multi_filter(
+            FILTERS["reserves"],
+            reserve_options,
+            help="Marine protected area, from the site's "
+            "`link_to_marine_reserve`. A site between two areas is "
+            "counted under both.",
+            placeholder="All reserves",
+        )
+        if reserves:
+            dep_scope = dep_scope[
+                report_data.matches_reserves(
+                    dep_scope["link_to_marine_reserve"], reserves
+                )
+            ]
+
         year_range = st.session_state["report_years"]
         if bounds and bounds[0] < bounds[1]:
             year_range = st.slider(
@@ -282,84 +396,110 @@ def build_context(cols) -> dict:
         else:
             # `st.slider` raises when min equals max, so a database holding a
             # single year (a sample database, or a first season) cannot have
-            # one. Name the year rather than leaving the column empty: a blank
-            # reads as a filter that broke, not one with nothing to choose.
-            st.markdown(
-                '<div style="font-size:.7rem;opacity:.7;margin-bottom:.1rem">'
-                "Survey year</div>",
-                unsafe_allow_html=True,
+            # one. Name the year rather than showing nothing: a blank reads as
+            # a filter that broke, not one with nothing to choose.
+            only = (
+                f"{bounds[0]} · only year in the data"
+                if bounds
+                else ("no dated deployments")
             )
-            only = f"{bounds[0]}" if bounds else "no dated deployments"
-            st.markdown(
-                f'<div style="font-size:.8rem;opacity:.55;padding-bottom:.35rem">'
-                f"{only} · only year in the data</div>",
-                unsafe_allow_html=True,
-            )
+            st.caption(f"Survey year: {only}")
         st.session_state["report_years"] = year_range
-    with cols[1]:
-        names = set()
-        for value in deployments["link_to_marine_reserve"].dropna():
-            names.update(p.strip() for p in str(value).split(",") if p.strip())
-        names = sorted(names)
-        if "_w_reserves" not in st.session_state:
-            st.session_state["_w_reserves"] = [
-                r for r in st.session_state["report_reserves"] if r in names
+
+        # A plain container, not a nested expander (Streamlit forbids those):
+        # everything sits in the one Filters expander.
+        with st.container():
+            # The annotations in scope under the other filters, for the
+            # source picker's coverage counts below.
+            ann_scope = in_years(annotations)
+            if reserves:
+                ann_scope = ann_scope[
+                    report_data.matches_reserves(
+                        ann_scope["link_to_marine_reserve"], reserves
+                    )
+                ]
+            stored_regions = st.session_state["report_regions"]
+            stored_prot = st.session_state["report_protections"]
+            if stored_regions:
+                ann_scope = ann_scope[ann_scope["region"].isin(stored_regions)]
+            if stored_prot:
+                ann_scope = ann_scope[ann_scope["protection_status"].isin(stored_prot)]
+
+            regions = _multi_filter(
+                FILTERS["regions"],
+                sorted(r for r in dep_scope["region"].dropna().unique() if r),
+                placeholder="All regions",
+            )
+            protections = _multi_filter(
+                FILTERS["protections"],
+                sorted(
+                    (p for p in dep_scope["protection_status"].dropna().unique() if p),
+                    key=protection_sort_key,
+                ),
+                placeholder="All statuses",
+            )
+
+            # Deployment counts in the labels, as the Experiments page does: an
+            # empty chart is otherwise a mystery, when the answer is simply
+            # that the chosen source has annotated almost nothing. Sources
+            # with nothing at all in scope are left out of the list entirely.
+            coverage = report_data.source_coverage(ann_scope)
+
+            def _source_label(choice: str) -> str:
+                if choice == report_data.BEST_AVAILABLE:
+                    return "Best available (expert > citsci > ml)"
+                if choice == report_data.ALL_SOURCES:
+                    return "All sources (rows can repeat)"
+                return f"{choice} ({coverage.get(choice, 0):,} deps)"
+
+            always = (report_data.BEST_AVAILABLE, report_data.ALL_SOURCES)
+            source_choices = [
+                c
+                for c in report_data.SOURCE_CHOICES
+                if c in always or coverage.get(c, 0) > 0
             ]
-        reserves = st.multiselect(
-            "MPA",
-            names,
-            help="Marine protected area, from the site's "
-            "`link_to_marine_reserve`. A site between two areas is "
-            "counted under both.",
-            placeholder="All reserves",
-            key="_w_reserves",
-        )
-        st.session_state["report_reserves"] = reserves
-    with cols[2]:
-        # Deployment counts in the labels, as the Experiments page does: an
-        # empty chart is otherwise a mystery, when the answer is simply that
-        # the chosen source has annotated almost nothing.
-        coverage = report_data.source_coverage(annotations)
+            if "_w_source" not in st.session_state:
+                st.session_state["_w_source"] = st.session_state["report_source"]
+            if st.session_state["_w_source"] not in source_choices:
+                st.session_state["_w_source"] = report_data.BEST_AVAILABLE
+            source = st.selectbox(
+                "Source",
+                source_choices,
+                format_func=_source_label,
+                key="_w_source",
+                help="Which annotation source the species numbers come from. "
+                "**Best available** applies the pipeline's own precedence per "
+                "deployment, expert beats citsci beats ML, and keeps only "
+                "the best source's rows for each deployment, so a deployment "
+                "reviewed by both an expert and volunteers is not counted "
+                "twice. **All** keeps every source's rows side by side, which "
+                "is what Species search wants but will double-count anything "
+                "that sums rows. Picking a single source answers 'what does "
+                "this source alone say', and the count beside each is how "
+                "many deployments it covers.",
+            )
+            st.session_state["report_source"] = source
 
-        def _source_label(choice: str) -> str:
-            if choice == report_data.BEST_AVAILABLE:
-                return "Best available (expert > citsci > ml)"
-            if choice == report_data.ALL_SOURCES:
-                return "All sources (rows can repeat)"
-            return f"{choice} ({coverage.get(choice, 0):,} deps)"
+            # Deleting the keys rather than assigning defaults to them:
+            # assigning to a widget key after its widget has been created in
+            # this run raises, and `build_context` re-seeds whatever is missing
+            # on the next run anyway. `on_click` runs before that next run
+            # builds its widgets, so this is the one safe place to clear them.
+            st.button(
+                "↺ Reset filters",
+                key="_w_reset",
+                on_click=_reset_filters,
+                help="Reset every filter to its default.",
+            )
 
-        if "_w_source" not in st.session_state:
-            st.session_state["_w_source"] = st.session_state["report_source"]
-        source = st.selectbox(
-            "Source",
-            report_data.SOURCE_CHOICES,
-            format_func=_source_label,
-            key="_w_source",
-            help="Which annotation source the species numbers come from. "
-            "**Best available** applies the pipeline's own precedence per "
-            "deployment, expert beats citsci beats ML, and keeps only "
-            "the best source's rows for each deployment, so a deployment "
-            "reviewed by both an expert and volunteers is not counted "
-            "twice. **All** keeps every source's rows side by side, which "
-            "is what Species search wants but will double-count anything "
-            "that sums rows. Picking a single source answers 'what does "
-            "this source alone say', and the count beside each is how "
-            "many deployments it covers.",
-        )
-        st.session_state["report_source"] = source
-    with cols[3]:
-        # Deleting the keys rather than assigning defaults to them: assigning to
-        # a widget key after its widget has been created in this run raises, and
-        # `build_context` re-seeds whatever is missing on the next run anyway.
-        # `on_click` runs before that next run builds its widgets, so this is
-        # the one safe place to clear them.
-        st.button(
-            "↺",
-            key="_w_reset",
-            on_click=_reset_filters,
-            help="Reset the year, MPA and source filters to their defaults.",
-        )
-    _mirror_filters_to_url(year_range, bounds, reserves, source)
+    selected = {
+        "years": year_range,
+        "reserves": reserves,
+        "regions": regions,
+        "protections": protections,
+        "source": source,
+    }
+    _mirror_filters_to_url(selected, bounds)
 
     # Not filtered to ingested-only. Hiding excluded deployments would flatter
     # every coverage number on the page, so they stay in and the front page
@@ -371,6 +511,8 @@ def build_context(cols) -> dict:
         reserves,
         ingested_only=False,
         source=source,
+        regions=regions,
+        protections=protections,
     )
 
 
@@ -473,78 +615,27 @@ def _sticky_header_css() -> None:
     )
 
 
-def _compact_filter_css() -> None:
-    """Shrink the filter row so it reads as chrome, not content.
+def _sidebar_css() -> None:
+    """Tighten the sidebar filter widgets a little.
 
-    Scoped by widget key. Streamlit puts an `st-key-<key>` class on every keyed
-    widget's container, which is the only reliable hook here: a wrapping div
-    written with `st.markdown` does not contain the widgets, because Streamlit
-    renders each one into its own container.
+    Sidebar widgets default to body-text sizing, and six of them inside one
+    expander is a lot of chrome. The nav stays in its default place at the
+    top; the filter expander renders below it, in Streamlit's own order.
     """
     st.markdown(
         """
         <style>
-          .st-key-_w_years, .st-key-_w_reserves,
-          .st-key-_w_source { font-size: .75rem; }
-          .st-key-_w_years label p,
-          .st-key-_w_reserves label p,
-          .st-key-_w_source label p {
-            font-size: .7rem !important;
+          .st-key-sidebar_filters [data-testid="stWidgetLabel"] {
+            margin-bottom: .05rem;
+            min-height: 0;
+          }
+          .st-key-sidebar_filters label p {
+            font-size: .75rem !important;
             margin-bottom: 0 !important;
           }
           /* The min/max end labels under a slider double its height. */
-          .st-key-_w_years [data-testid="stSliderTickBar"] { display: none; }
-          .st-key-_w_years [data-testid="stSliderThumbValue"] {
-            font-size: .68rem;
-          }
-          .st-key-_w_source [data-baseweb="select"] > div,
-          .st-key-_w_reserves [data-baseweb="select"] > div {
-            min-height: 1.9rem;
-            font-size: .75rem;
-          }
-          .st-key-_w_years, .st-key-_w_reserves { padding-bottom: .1rem; }
-          /* Each widget carries a label block and its own padding, and the
-             tallest of the three sets the height of the whole sticky band,
-             so the band was 92px for one row of controls. These trim the
-             label gap and the select's internal padding; the controls stay
-             clickable at 1.7rem, which is Streamlit's own small size. */
-          .st-key-_w_years [data-testid="stWidgetLabel"],
-          .st-key-_w_reserves [data-testid="stWidgetLabel"],
-          .st-key-_w_source [data-testid="stWidgetLabel"] {
-            margin-bottom: .05rem;
-            min-height: 0;
-          }
-          .st-key-_w_source [data-baseweb="select"] > div,
-          .st-key-_w_reserves [data-baseweb="select"] > div {
-            min-height: 1.7rem;
-            padding-top: 0;
-            padding-bottom: 0;
-          }
-          .st-key-_w_years [data-testid="stSlider"] { padding-top: 0; }
-          /* A view's own filters (Sites has three) render into the header via
-             `layout.extra_filters`, so they get the same treatment, otherwise
-             the second row of the same band would be half as tall again as the
-             first. */
-          .st-key-view_filters label p {
-            font-size: .7rem !important;
-            margin-bottom: 0 !important;
-          }
-          .st-key-view_filters [data-testid="stWidgetLabel"] {
-            margin-bottom: .05rem;
-            min-height: 0;
-          }
-          .st-key-view_filters [data-baseweb="select"] > div {
-            min-height: 1.7rem;
-            font-size: .75rem;
-            padding-top: 0;
-            padding-bottom: 0;
-          }
-          /* The reset button sits on the filter row, so it is sized to the
-             filters rather than to body text. */
-          .st-key-_w_reset button {
-            padding: .15rem .4rem;
-            min-height: 1.9rem;
-            font-size: .9rem;
+          .st-key-sidebar_filters [data-testid="stSliderTickBar"] {
+            display: none;
           }
         </style>
         """,
@@ -571,6 +662,28 @@ def register_pages(pages: dict) -> None:
     PAGES.update(pages)
 
 
+def render_view_boxes(section: str, summaries: dict) -> None:
+    """Bordered link boxes for a section's views, coming-soon ones included.
+
+    Shared by both home pages. A fresh bordered row per three views: reusing
+    one row's columns would stack two views inside the same box.
+    """
+    items = list(summaries.items())
+    for start in range(0, len(items), 3):
+        cols = st.columns(3, border=True)
+        for col, (view_name, blurb) in zip(cols, items[start : start + 3]):
+            page = PAGES.get((section, view_name))
+            with col:
+                if page is not None:
+                    st.page_link(page, label=view_name)
+                else:
+                    # Not built yet, so it has no nav entry. Named here
+                    # anyway: what is coming is part of the picture, and
+                    # hiding it invites "where do I find this?" questions.
+                    st.markdown(f"{view_name} *(coming soon)*")
+                st.caption(blurb)
+
+
 def render_home(ctx: dict) -> None:
     """The Reporting landing view: the programme in one screen.
 
@@ -578,10 +691,41 @@ def render_home(ctx: dict) -> None:
     the context in. It must not build its own header, or two places can
     disagree about what the filters are.
     """
-    st.caption(
-        "How the marine protected areas are doing. Processing and data-quality "
-        "state live in the Operations section."
+    st.subheader("How to use it")
+    st.markdown(
+        "BUV survey results from the marine reserves, for MPA reporting. "
+        "The sidebar filters (year, MPA and more) apply to every view and "
+        "stick between views. Each section below covers one topic; the "
+        "chips at the top of a view link to its parts. Pipeline state is in "
+        "the Operations section."
     )
+    st.caption(
+        "Any feedback, issues, or something you want to see on this page? "
+        "Contact us at kalindi@wildlife.ai"
+    )
+    st.write("")
+
+    # What's available, straight under the intro: the reader decides where to
+    # go before scrolling through the headline numbers.
+    st.subheader("Sections")
+    render_view_boxes(
+        "Reporting",
+        {
+            "MPA": "Each marine protected area: how much has been surveyed "
+            "there and what has been found.",
+            "Surveys": "How much surveying has happened, when, and how far "
+            "each survey has got through the pipeline.",
+            "Sites": "Species abundance and per-site rollups, grouped by "
+            "region, MPA and protection status.",
+            "Deployments": "Where the footage is: ready to process, "
+            "archived, or missing.",
+            "Annotations": "Annotation coverage, and how the three sources " "compare.",
+            "Species": "Per-species abundance and occurrence across sites "
+            "and years.",
+        },
+    )
+    st.write("")
+    st.write("")
 
     dep = ctx["deployments"]
     ann = ctx["annotations"]
@@ -626,6 +770,7 @@ def render_home(ctx: dict) -> None:
         protection_means = grouped.mean().round(1).to_dict()
         protection_counts = grouped.count().to_dict()
 
+    st.subheader("Overview")
     # Scope first, then results. Widest container leads: MPAs contain sites,
     # sites hold deployments, surveys are the visits.
     kpis = st.columns(4)
@@ -673,44 +818,35 @@ def render_home(ctx: dict) -> None:
 
     st.write("")
 
-    left, right = st.columns([2, 1])
+    # No pipeline funnel here: how far the data got through processing is an
+    # Operations question, and its home page opens with exactly that funnel.
+    st.subheader("Survey activity per year")
+    if dated.empty:
+        st.info("No deployments have a parseable date in their DropID.")
+    else:
+        per_year = (
+            dated.groupby(dated["survey_year"].astype(int))
+            .agg(Deployments=("drop_id", "nunique"), Surveys=("survey_id", "nunique"))
+            .reset_index()
+            .rename(columns={"survey_year": "Year"})
+        )
+        # Stacked one above the other on a shared x-axis rather than side by
+        # side: the two counts differ by a factor of about fifty, so one
+        # chart would flatten surveys into the axis. Aligned years let the
+        # pair be read together, which is the point, many deployments in
+        # few surveys is a different year from the reverse.
+        st.markdown("**Surveys per year**")
+        fig = px.bar(per_year, x="Year", y="Surveys", text="Surveys")
+        fig.update_traces(
+            marker_color="#1E6FB4", textposition="outside", cliponaxis=False
+        )
+        style(fig, height=190)
+        fig.update_xaxes(title=None)
+        year_axis(fig)
+        st.plotly_chart(fig, key="home_surveys_per_year")
 
-    with left:
-        st.subheader("Survey activity per year")
-        if dated.empty:
-            st.info("No deployments have a parseable date in their DropID.")
-        else:
-            per_year = (
-                dated.groupby(dated["survey_year"].astype(int))
-                .agg(
-                    Deployments=("drop_id", "nunique"), Surveys=("survey_id", "nunique")
-                )
-                .reset_index()
-                .rename(columns={"survey_year": "Year"})
-            )
-            # Stacked one above the other on a shared x-axis rather than side by
-            # side: the two counts differ by a factor of about fifty, so one
-            # chart would flatten surveys into the axis. Aligned years let the
-            # pair be read together, which is the point, many deployments in
-            # few surveys is a different year from the reverse.
-            st.markdown("**Surveys per year**")
-            fig = px.bar(per_year, x="Year", y="Surveys", text="Surveys")
-            fig.update_traces(
-                marker_color="#1E6FB4", textposition="outside", cliponaxis=False
-            )
-            style(fig, height=190)
-            fig.update_xaxes(title=None)
-            st.plotly_chart(fig, key="home_surveys_per_year")
-
-            # Same chart as the Surveys view, from the same function.
-            render_deployments_per_year(dated, key="home_per_year")
-
-    with right:
-        # Same funnel as the Pipeline view, from the same function, so the two
-        # can never disagree about how many deployments got where.
-        from .pipeline import _stage_flags, render_funnel
-
-        render_funnel(_stage_flags(dep), compact=True)
+        # Same chart as the Surveys view, from the same function.
+        render_deployments_per_year(dated, key="home_per_year")
 
     # ── The base comparisons, from the same functions as the Species view ────
     # The front page answers the first questions a reader arrives with, in
@@ -766,6 +902,7 @@ def render_home(ctx: dict) -> None:
                 reserves=site["reserves"],
                 regions=site["regions"],
                 protections=site["protections"],
+                species=site["species"],
             )
         if mpa_page is not None:
             st.page_link(
@@ -797,52 +934,21 @@ def render_home(ctx: dict) -> None:
                 "summary table, and what was left out and why",
             )
 
-    st.divider()
-    st.subheader("Views")
-    summaries = {
-        "MPA": "Each marine protected area: how much has been surveyed there "
-        "and what has been found.",
-        "Surveys": "How much surveying has happened, when, and how far each "
-        "survey has got through the pipeline.",
-        "Sites": "Species abundance and per-site rollups, grouped by region, "
-        "MPA and protection status.",
-        "Deployments": "Where the footage is: ready to process, archived, or "
-        "missing.",
-        "Annotations": "Annotation coverage, and how the three sources compare.",
-        "Species": "Per-species abundance and occurrence across sites and years.",
-    }
-    cols = st.columns(3)
-    for i, (name, blurb) in enumerate(summaries.items()):
-        page = PAGES.get(("Reporting", name))
-        if page is None:
-            continue
-        with cols[i % 3]:
-            built = REPORTING_VIEWS.get(name) is not None
-            st.page_link(page, label=name if built else f"{name} (not built yet)")
-            st.caption(blurb)
-
 
 def render(section: str, name: str) -> None:
     """Render one view of one section, with the shared filters and tab strip."""
     _sticky_header_css()
 
-    # Only the title and the filters are pinned. The tab strip is navigation:
-    # it is used once on arrival, and keeping it out halves the height of the
-    # sticky band.
+    # Filters first: they live in the sidebar now, so nothing of theirs sits
+    # in the header band.
+    ctx = build_context()
+
+    # The sticky header is one row: title on the left, the view's chip strip
+    # on the right. The chips container is created here, inside the sticky
+    # block, and filled later by the view via `layout.chips` — Streamlit
+    # places output by container, not by call order.
     with st.container(key="report_header"):
-        # The year slider gets the widest filter column. At the previous
-        # ratio its track was 139px for 15 years, under 10px per year,
-        # with two handles and their value labels on it, so it read as
-        # stuck rather than fine-grained.
-        # The shared grid: title, then four equal filter slots. See
-        # `layout.header_columns`.
-        head = layout.header_columns()
-        # The reset button rides with the title rather than taking a filter
-        # slot: it is not a filter, and in the row it left three filters and a
-        # button sharing a grid meant for four of a kind.
-        title_col, reset_col = head[0].columns(
-            [0.72, 0.28], vertical_alignment="bottom"
-        )
+        title_col, chips_col = st.columns([0.4, 0.6], vertical_alignment="bottom")
         with title_col:
             # "Reporting · Report home" says the same thing twice, so the
             # landing views drop the section prefix.
@@ -852,25 +958,16 @@ def render(section: str, name: str) -> None:
                 f'padding-bottom:.2rem">📊 {heading}</div>',
                 unsafe_allow_html=True,
             )
-        # Three filters into the first three slots; the fourth stays empty and
-        # is where a fourth shared filter would go.
-        ctx = build_context(list(head[1:4]) + [reset_col])
-
-        # Two empty containers, filled later by the view: one for any filters
-        # of its own, one for its chips. They are created here, inside the
-        # sticky block, so both end up in the header band even though the view
-        # that supplies them does not run until further down. See `layout`.
-        #
-        # Created filters-first, because the order they are created in is the
-        # order they appear: every filter in the band, then the chips under all
-        # of them.
-        # Keyed here rather than nested inside once the view fills them: a
-        # keyed container inside a plain one gave the strip a flex parent that
-        # squeezed it to 11px while its chips stood 26px tall, so they hung out
-        # of the header. One container, one key, one box.
+        with chips_col:
+            # Keyed here rather than nested inside once the view fills it: a
+            # keyed container inside a plain one gave the strip a flex parent
+            # that squeezed it to 11px while its chips stood 26px tall, so
+            # they hung out of the header. One container, one key, one box.
+            chips_slot = st.container(key="section_chips")
         layout.measure_header()
-        view_filters = st.container(key="view_filters")
-        layout.set_slots(st.container(key="section_chips"), view_filters)
+
+    # A view's own filters go to the sidebar, under the shared block.
+    layout.set_slots(chips_slot, st.sidebar.container(key="view_filters"))
 
     # The line explaining that the filters are section-wide lives in the "About
     # the reporting numbers" expander at the foot of the page, not here. As a
@@ -909,10 +1006,11 @@ def render(section: str, name: str) -> None:
 Rebuild of the DOC PowerBI report. Views are added one at a time. Anything not
 built says so rather than rendering an empty chart.
 
-**The filters at the top apply to every {section} view**, and stay put as you
-move between them. Survey year and MPA narrow which deployments are counted;
-Source picks which annotation source the species numbers come from. The ↺
-button returns all three to their defaults.
+**The filters in the sidebar apply to every {section} view**, and stay put as
+you move between them. Survey year and MPA narrow which deployments are
+counted; Region and Protection status narrow further, and Source picks which
+annotation source the species numbers come from. The ↺ button returns them
+all to their defaults.
 
 **Coverage in this database**: {len(dep):,} deployments across
 {dep['survey_id'].nunique()} surveys,

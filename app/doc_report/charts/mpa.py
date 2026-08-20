@@ -50,6 +50,7 @@ from ..charting import (  # noqa: E402
     protection_dashes,
     source_coverage_note,
     style,
+    year_axis,
 )
 from ..data import effort_per, real_species  # noqa: E402
 from ..layout import section  # noqa: E402
@@ -197,8 +198,15 @@ def render_mpa_populations(
     reserves=None,
     regions=None,
     protections=None,
+    species=None,
 ) -> None:
     """Species and diversity across the MPAs: picker, trend, and the site map."""
+    # The shared species filter narrows what the panel's own picker offers,
+    # so picking snapper in the sidebar makes this panel show snapper rather
+    # than ignoring the selection. Applied to the sightings only; the effort
+    # denominators are per site, not per species, and stay whole.
+    if species:
+        df_context = df_context[df_context["display_name"].isin(species)]
     df = df_context
     # Deployments analysed per site, used by the map and the trend. Computed
     # here rather than passed in: the Site detail table on the Sites page builds
@@ -430,7 +438,8 @@ def render_mpa_populations(
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.04, "title": None},
         )
         fig_trend.update_yaxes(title=y_title)
-        fig_trend.update_xaxes(title=None, dtick=1)
+        fig_trend.update_xaxes(title=None)
+        year_axis(fig_trend)
         st.plotly_chart(fig_trend, use_container_width=True)
         st.caption(
             "Every year in the range is on the axis. Markers are the years "
@@ -1128,6 +1137,7 @@ def render_reserve_trends(df: pd.DataFrame) -> None:
             annotation_position="right",
         )
 
+    year_axis(fig)
     st.plotly_chart(fig, use_container_width=True)
 
     # ── Honest caveat ───────────────────────────────────────────────────────
@@ -1278,3 +1288,107 @@ def render_inside_share(df) -> None:
                 ),
             },
         )
+
+
+def render_depth(dep: pd.DataFrame, ann: pd.DataFrame) -> None:
+    """Deployment depth: the depths surveyed per MPA, and where each species
+    was recorded within them.
+
+    Depth is the DEPLOYMENT's depth (`DepthDeployment` from the metadata),
+    not the animal's position in the water column: a fish "at 20 m" here is a
+    fish recorded by a camera sitting at 20 m.
+    """
+    st.divider()
+    section("Depth")
+
+    depth_dep = dep.assign(depth=pd.to_numeric(dep["depth"], errors="coerce"))
+    depth_dep = depth_dep[depth_dep["depth"].notna()]
+    if depth_dep.empty:
+        st.info(
+            "No deployment depths recorded. Depth comes from "
+            "`DepthDeployment` in the deployment metadata; re-run ingest "
+            "once it is filled in."
+        )
+        return
+
+    st.caption(
+        f"{len(depth_dep):,} of {len(dep):,} deployments carry a depth. "
+        "Species sit where the cameras sat: a species shown mostly at 20 m "
+        "first of all says the surveying happened at 20 m, so read the right "
+        "chart against the surveyed depths on the left."
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("**Surveyed depth per MPA**")
+        # The DropID reserve code (KSF, TUK, ...) rather than the full MPA
+        # name: the names ate half the chart width as y labels. The full name
+        # rides along in the hover.
+        by_mpa = depth_dep[depth_dep["reserve_code"] != ""]
+        if by_mpa.empty:
+            st.info("No deployments with both a depth and an MPA.")
+        else:
+            order = (
+                by_mpa.groupby("reserve_code")["depth"]
+                .median()
+                .sort_values()
+                .index.tolist()
+            )
+            fig = px.box(
+                by_mpa,
+                x="depth",
+                y="reserve_code",
+                category_orders={"reserve_code": order},
+                hover_data={"link_to_marine_reserve": True},
+            )
+            fig.update_traces(marker=dict(size=3), line=dict(width=1.5))
+            style(fig, height=max(260, 32 * len(order) + 90), showlegend=False)
+            fig.update_xaxes(title="Depth (m)")
+            fig.update_yaxes(title=None)
+            st.plotly_chart(fig, key="depth_per_mpa")
+
+    with right:
+        st.markdown("**Species by deployment depth**")
+        # One row per (drop, species): whether the species was recorded on
+        # that deployment at all, then the deployment's depth. `real_species`
+        # keeps the unidentified bucket out; absence records drop with the
+        # notna filter.
+        seen = real_species(ann[ann["scientific_name"].notna()])
+        seen = seen.drop_duplicates(["drop_id", "scientific_name"]).merge(
+            depth_dep[["drop_id", "depth"]], on="drop_id", how="inner"
+        )
+        # Only species with enough deployments for a distribution to mean
+        # anything; a box over two points reads as data it does not have.
+        drops_per_species = seen.groupby("display_name")["drop_id"].nunique()
+        keep = drops_per_species[drops_per_species >= 5]
+        seen = seen[seen["display_name"].isin(keep.index)]
+        if seen.empty:
+            st.info(
+                "No species has five or more depth-carrying deployments "
+                "under the current filters."
+            )
+        else:
+            top = keep.sort_values(ascending=False).head(15).index
+            seen = seen[seen["display_name"].isin(top)]
+            order = (
+                seen.groupby("display_name")["depth"]
+                .median()
+                .sort_values()
+                .index.tolist()
+            )
+            fig = px.box(
+                seen,
+                x="depth",
+                y="display_name",
+                category_orders={"display_name": order},
+            )
+            fig.update_traces(marker=dict(size=3), line=dict(width=1.5))
+            style(fig, height=max(260, 32 * len(order) + 90), showlegend=False)
+            fig.update_xaxes(title="Depth (m)")
+            fig.update_yaxes(title=None)
+            st.plotly_chart(fig, key="depth_per_species")
+            st.caption(
+                "Species with five or more depth-carrying deployments, up "
+                "to the 15 most-recorded, shallowest median first."
+            )

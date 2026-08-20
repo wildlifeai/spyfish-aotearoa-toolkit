@@ -22,7 +22,7 @@ from spyfish.config.base import (
 )
 from spyfish.config.wrapper import config
 
-from ..charting import style
+from ..charting import style, year_axis
 from ..layout import section
 
 
@@ -278,6 +278,7 @@ def render_deployments_per_year(
         uniformtext_mode="hide",
         legend=dict(orientation="h", y=1.12, x=0, title_text="", traceorder="normal"),
     )
+    year_axis(fig)
     st.plotly_chart(fig, key=key)
 
 
