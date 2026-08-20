@@ -419,7 +419,7 @@ training:
   epochs: 100
   patience: 25
   imgsz: 640
-  batch: 16                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  batch: 32                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
   optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
   lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
   dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
