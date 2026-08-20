@@ -271,8 +271,11 @@ def run_retraining(
         # Species-balanced val: pick whole drops so each multi-source species
         # hits ~val_balance_pct of its boxes (the suggester, inline). Decodes
         # labels via the in-memory species_names, no class_map.json drift.
+        candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
+        train_drops, val_drops, test_drops = balance_val_drops(
             labels_staged_dir=labels_staged_dir,
             candidate_drops=candidate_drops,
+            species_names=species_names,
             val_pct=config.training_val_balance_pct,
             tolerance=config.training_val_balance_tolerance,
             force_val=config.training_force_val_drops,
