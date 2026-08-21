@@ -197,7 +197,7 @@ def save_metrics(
 def run_evaluation_pipeline(
     model_path: str,
     data_yaml: str,
-    model_type: str = "binary",
+    model_type: str = "species",
     split: str = "test",
 ) -> dict:
     """
@@ -206,7 +206,7 @@ def run_evaluation_pipeline(
     Args:
         model_path: Path to the new trained model.
         data_yaml: Path to data.yaml.
-        model_type: 'binary' or 'species'.
+        model_type: Label used in results-dir and promoted-model naming.
         split: Dataset split to evaluate ('test' or 'val').
 
     Returns:
@@ -262,9 +262,7 @@ def main():
     parser.add_argument(
         "--data", required=True, type=str, help="Path to YOLO data.yaml"
     )
-    parser.add_argument(
-        "--model-type", type=str, default="binary", choices=["binary", "species"]
-    )
+    parser.add_argument("--model-type", type=str, default="species")
     parser.add_argument("--split", type=str, default="test", choices=["test", "val"])
     args = parser.parse_args()
 

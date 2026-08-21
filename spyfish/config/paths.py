@@ -53,6 +53,15 @@ class PathsConfig(BaseConfig):
             self.legacy_paths, "zooniverse", "paths.legacy"
         )
 
+    @property
+    def legacy_zooniverse_s3_prefix(self) -> str:
+        """The legacy dir's repo-relative path, reused as its S3 prefix.
+
+        Same convention as `training_results_s3_prefix`: local layout and S3
+        layout mirror each other, so one value cannot drift from the other.
+        """
+        return self.legacy_zooniverse_dir.relative_to(self.project_root).as_posix()
+
     # ── Metadata / S3 keys ─────────────────────────────────────────────────
 
     @property
@@ -223,61 +232,29 @@ class PathsConfig(BaseConfig):
             )
         return pt_files[0]
 
-    def get_pipeline_model(self, kind: str) -> Path:
-        """Find a specific pipeline model variant in pipeline_model_dir by filename prefix.
-
-        Files in pipeline_model_dir are expected to follow the convention
-        `{kind}_*.pt`, e.g.:
-          - binary_cfd_water_20260301.pt
-          - species_cfd_20260426_234352.pt
-
-        If multiple files match, the most recently modified is returned.
-
-        Args:
-            kind: Model variant, must be "binary" or "species".
-
-        Raises:
-            ValueError: kind is not one of {"binary", "species"}.
-            FileNotFoundError: no `{kind}_*.pt` file in pipeline_model_dir.
-        """
-        if kind not in {"binary", "species"}:
-            raise ValueError(f"kind must be 'binary' or 'species', got {kind!r}")
-        if not self.pipeline_model_dir.exists():
-            raise FileNotFoundError(
-                f"Model directory does not exist: {self.pipeline_model_dir}"
-            )
-        candidates = sorted(
-            self.pipeline_model_dir.glob(f"{kind}_*.pt"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not candidates:
-            raise FileNotFoundError(
-                f"No '{kind}_*.pt' model found in {self.pipeline_model_dir}. "
-                f"Expected naming convention: {kind}_*.pt (e.g. {kind}_cfd_20260101.pt)"
-            )
-        return candidates[0]
-
     @property
     def pipeline_model_path(self) -> Path:
         """Find the local pipeline model weights (.pt) from pipeline_model_dir.
 
-        Defaults to the species model when both binary and species coexist.
-        For explicit selection between variants, use `get_pipeline_model(kind)`.
-
-        Falls back to the first .pt file in the directory if no `species_*.pt`
-        is present, preserves backward compatibility with single-model setups
-        that pre-date the binary/species naming convention.
+        Prefers `species_*.pt` (most recently modified when several match, the
+        promotion naming convention); falls back to the first .pt file in the
+        directory for single-model setups that pre-date the naming convention.
+        The binary model variant was retired 2026-08-21 — the species model IS
+        the binary model with more informative labels (see design_doc.md,
+        "ML model strategy").
         """
-        try:
-            return self.get_pipeline_model("species")
-        except FileNotFoundError:
-            path = self._first_model_file(self.pipeline_model_dir)
-            if path is None:
-                raise FileNotFoundError(
-                    f"No model file found in {self.pipeline_model_dir}"
-                )
-            return path
+        if self.pipeline_model_dir.exists():
+            candidates = sorted(
+                self.pipeline_model_dir.glob("species_*.pt"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                return candidates[0]
+        path = self._first_model_file(self.pipeline_model_dir)
+        if path is None:
+            raise FileNotFoundError(f"No model file found in {self.pipeline_model_dir}")
+        return path
 
     @property
     def base_model_path(self) -> Path:
@@ -464,28 +441,17 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}{suffix}_coco_annotations_for_biigle.json"
         )
 
-    _ZOONIVERSE_FRAMES_RAW_SUFFIXES = {
-        "species": "_zooniverse_frames_species_raw.csv",
-        "binary": "_zooniverse_frames_binary_raw.csv",
-        "merged": "_zooniverse_frames_raw.csv",
-    }
+    def get_zooniverse_frames_raw_csv_path(self, drop_id: str) -> Path:
+        """Raw inference CSV for the Zooniverse-frame rerun.
 
-    def get_zooniverse_frames_raw_csv_path(self, drop_id: str, kind: str) -> Path:
-        """Raw inference CSV for the Zooniverse-frame rerun ensemble.
-
-        ``kind`` is ``"species"``, ``"binary"``, or ``"merged"``, written
-        by the two-pass species+binary inference + IoU merge that runs
-        on Zooniverse-selected frames before BIIGLE upload.
+        Written by the pipeline-model pass over Zooniverse-selected frames
+        before BIIGLE upload. (Was a species+binary IoU-merged ensemble until
+        the binary model's retirement, 2026-08-21; the filename is unchanged so
+        historical CSVs stay discoverable.)
         """
-        suffix = self._ZOONIVERSE_FRAMES_RAW_SUFFIXES.get(kind)
-        if suffix is None:
-            raise ValueError(
-                f"kind must be one of {sorted(self._ZOONIVERSE_FRAMES_RAW_SUFFIXES)}, "
-                f"got {kind!r}"
-            )
         return (
             self.get_drop_annotations_dir(drop_id)
-            / f"{self.validate_drop_id(drop_id)}{suffix}"
+            / f"{self.validate_drop_id(drop_id)}_zooniverse_frames_raw.csv"
         )
 
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:

@@ -8,7 +8,8 @@ Frames are sampled across the deployment's [sampling_start, sampling_end] window
 back-loaded toward the end (where bait-attracted fish density is highest).
 
 Configuration lives under `training_extraction:` in config.yaml; see
-`config.training_extraction_n_frames` and `config.training_extraction_annotation_type`.
+`config.training_extraction_n_frames`. The model is the promoted pipeline
+model (`config.pipeline_model_path`).
 
 Frames are selected from the detections `--ml` already produced: ``maxn_per_species``
 peak frames per species, topped up to ``n_frames`` with back-loaded timestamps.
@@ -64,7 +65,7 @@ def require_ml_raw_csv(drop_id: str) -> Path:
     `process_maxn` and status advance, so a drop could end up holding
     detections but no MaxN and no `ml_complete`.
     """
-    model_path = config.get_pipeline_model(config.training_extraction_annotation_type)
+    model_path = config.pipeline_model_path
     raw_csv = config.get_raw_csv_path(drop_id, model_path.stem)
     if raw_csv.exists():
         return raw_csv
@@ -80,16 +81,15 @@ def require_ml_raw_csv(drop_id: str) -> Path:
 # ── Extraction ───────────────────────────────────────────────────────────────
 
 
-def _per_frame_csv_name(drop_id: str, annotation_type: Optional[str] = None) -> str:
+def _per_frame_csv_name(drop_id: str) -> str:
     """Filename for the detections run over a drop's extracted frames.
 
-    Carries the weights filename rather than just "binary"/"species" so that
-    promoting a new model invalidates the old CSV by name, matching how
-    `config.get_raw_csv_path` names the full-video one. Without the version a
-    re-run would silently reuse the previous model's boxes.
+    Carries the weights filename so that promoting a new model invalidates
+    the old CSV by name, matching how `config.get_raw_csv_path` names the
+    full-video one. Without the version a re-run would silently reuse the
+    previous model's boxes.
     """
-    kind = annotation_type or config.training_extraction_annotation_type
-    return f"{drop_id}_{config.get_pipeline_model(kind).stem}_raw.csv"
+    return f"{drop_id}_{config.pipeline_model_path.stem}_raw.csv"
 
 
 # ── Inference ────────────────────────────────────────────────────────────────
@@ -140,14 +140,13 @@ def run_inference_on_paths(drop_id: str, paths: list, times: list) -> Path:
         predict_on_frame_paths,
     )
 
-    kind = config.training_extraction_annotation_type
-    out_csv = Path(paths[0]).parent / _per_frame_csv_name(drop_id, kind)
-    logging.info(f"{drop_id}: running '{kind}' inference over {len(paths)} frame(s)")
+    out_csv = Path(paths[0]).parent / _per_frame_csv_name(drop_id)
+    logging.info(f"{drop_id}: running inference over {len(paths)} frame(s)")
     return predict_on_frame_paths(
         frame_paths=[Path(p) for p in paths],
         timestamps=times,
         output_csv=out_csv,
-        model=get_cached_pipeline_model(kind),
+        model=get_cached_pipeline_model(),
         fps=None,
     )
 

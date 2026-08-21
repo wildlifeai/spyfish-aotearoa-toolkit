@@ -14,15 +14,14 @@
 
 # Spyfish Aotearoa training job wrapper.
 #
-# Runs the retraining pipeline end-to-end: data prep + binary + species training.
+# Runs the retraining pipeline end-to-end: data prep + species training.
 # Optimizer / lr / dropout come from config.yaml's training section.
 # Auto-promotion is on — models that beat production by `retrain_min_improvement_pct`
 # are copied into pipeline_model/ at the end of the run.
 #
-# To scope the run, pass any subset of --data-prep / --binary / --species:
+# To scope the run, pass any subset of --data-prep / --species:
 #   python run_pipeline.py --retrain --species              # just species training
 #   python run_pipeline.py --retrain --data-prep            # rebuild dataset only
-#   python run_pipeline.py --retrain --data-prep --binary   # data prep + binary
 #
 # Before first use, update the three placeholders marked TODO:
 #   1. SBATCH --account above

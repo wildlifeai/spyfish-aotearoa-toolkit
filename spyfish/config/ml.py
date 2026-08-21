@@ -79,6 +79,33 @@ class MLConfig(BaseConfig):
         )
 
     @property
+    def maxn_persistence_seconds(self) -> float:
+        """Rolling-min window (seconds) a count must hold to set MaxN; 0 disables
+        (single-frame MaxN, the pre-2026-08 behaviour). Converted to sampled
+        frames at runtime from the raw CSV's own frame spacing."""
+        return float(
+            get_required(self.ml_inference, "maxn_persistence_seconds", "ml_inference")
+        )
+
+    @property
+    def maxn_gap_fill_seconds(self) -> float:
+        """Zero-gaps up to this long between detections take min(neighbours)
+        before the persistence window runs, so detector flicker on a
+        continuously present animal isn't taxed as two short visits."""
+        return float(
+            get_required(self.ml_inference, "maxn_gap_fill_seconds", "ml_inference")
+        )
+
+    @property
+    def maxn_exclude_classes(self) -> List[str]:
+        """Classes whose detections never count toward MaxN (e.g. 'bait').
+        They keep their raw-CSV detections for frame selection and BIIGLE."""
+        return list(
+            get_required(self.ml_inference, "maxn_exclude_classes", "ml_inference")
+            or []
+        )
+
+    @property
     def interval_seconds(self):
         return get_required(
             get_required(self.ml_inference, "extraction", "ml_inference"),
@@ -273,6 +300,24 @@ class MLConfig(BaseConfig):
         return self._parse_drop_ids_from_file(self.training_excluded_drops_file)
 
     @property
+    def training_excluded_species(self) -> set:
+        """Canonical species names removed from training entirely: their boxes
+        are dropped at label conversion (never merged into 'fish'). The
+        annotations DB and BIIGLE are unaffected."""
+        return set(
+            get_required(self.training_config, "excluded_species", "training") or []
+        )
+
+    @property
+    def training_val_balance_max_share(self) -> float:
+        """Hard cap on any multi-source species' share of boxes in val; candidate
+        drops that would breach it are refused, so concentrated species resolve
+        train-heavy instead of val-heavy. 1.0 disables."""
+        return float(
+            get_required(self.training_config, "val_balance_max_share", "training")
+        )
+
+    @property
     def training_species_canonicalization(self) -> dict:
         """Synonym / hierarchy-split species-name merges, applied before any
         counting, balancing, flooring, or class-list building. Maps a label's
@@ -332,23 +377,3 @@ class MLConfig(BaseConfig):
         return int(
             get_required(self._training_extraction, "n_frames", "training_extraction")
         )
-
-    @property
-    def training_extraction_annotation_type(self) -> str:
-        """Which model to run on extracted frames, 'binary' or 'species'.
-
-        Resolves to `config.get_pipeline_model(annotation_type)` at runtime.
-        """
-        kind = str(
-            get_required(
-                self._training_extraction,
-                "annotation_type",
-                "training_extraction",
-            )
-        )
-        if kind not in {"binary", "species"}:
-            raise ValueError(
-                f"training_extraction.annotation_type must be 'binary' or "
-                f"'species', got {kind!r}"
-            )
-        return kind

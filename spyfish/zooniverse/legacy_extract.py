@@ -410,6 +410,33 @@ def _filter_to_complete_drops(
 # ── Orchestrator, the --legacy entry point for Zooniverse backfill ──────────
 
 
+def _download_legacy_csvs_from_s3(legacy_dir: Path) -> None:
+    """Fetch the legacy exports from S3 when the local dir holds none.
+
+    The exports are one-off downloads from the Zooniverse project page, so a
+    fresh machine (NeSI, a new laptop) would otherwise need a manual ~840 MB
+    copy from whoever holds them. S3 is the backup of record; already-present
+    files are left alone, so a partial copy resumes rather than restarts.
+    """
+    from spyfish.storage.s3_handler import S3Handler
+
+    s3 = S3Handler()
+    prefix = config.legacy_zooniverse_s3_prefix
+    keys = s3.get_objects_from_s3(
+        prefix=f"{prefix.rstrip('/')}/", suffixes=(".csv",), keys_only=True
+    )
+    if not keys:
+        logging.info(f"Legacy backfill: nothing on S3 under {prefix}/ either.")
+        return
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    for key in sorted(keys):
+        target = legacy_dir / Path(key).name
+        if target.exists():
+            continue
+        logging.info(f"Legacy backfill: downloading s3://{s3.bucket}/{key}")
+        s3.download_object_from_s3(key, str(target))
+
+
 def run_legacy_zooniverse_backfill() -> None:
     """
     End-to-end historical Zooniverse ingestion: load legacy CSVs → parse →
@@ -420,9 +447,12 @@ def run_legacy_zooniverse_backfill() -> None:
 
     All CSVs live flat in ``config.legacy_zooniverse_dir``. Classification
     exports are identified by ``*classification*`` in the filename; subjects
-    exports by ``*subject*``.
+    exports by ``*subject*``. When the directory is absent or empty, the
+    exports are pulled from S3 first (same path under the bucket).
     """
     legacy_dir = config.legacy_zooniverse_dir
+    if not legacy_dir.exists() or not any(legacy_dir.glob("*classification*.csv")):
+        _download_legacy_csvs_from_s3(legacy_dir)
     if not legacy_dir.exists():
         logging.info(
             f"Legacy backfill: {legacy_dir} does not exist. Nothing to ingest."

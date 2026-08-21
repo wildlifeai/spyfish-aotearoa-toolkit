@@ -1,5 +1,6 @@
 import logging
 import re
+from collections import Counter
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import pandas as pd
@@ -412,6 +413,52 @@ def _ingest_species(db, ann_db, drop_id: str, annotations_to_add: list) -> None:
     db.advance_status(drop_id, ExpertStatus.COLUMN, ExpertStatus.COMPLETE)
 
 
+def _drop_boundary_pattern(drop_id: str) -> re.Pattern:
+    """Match `drop_id` at a token boundary inside a filename.
+
+    A bare substring test false-matches across replicate numbers,
+    "..._085_01" is a substring of "..._085_010", the same pitfall
+    `db_refresh._volume_name_matches` guards against.
+    """
+    return re.compile(re.escape(drop_id) + r"(?![0-9A-Za-z])")
+
+
+def _rows_for_drop(report: pd.DataFrame, drop_id: str) -> pd.DataFrame:
+    """Rows of a SHARED (survey-pooled) volume report belonging to one drop.
+
+    Pooled volume filenames carry the ``{drop}/frames/`` segment and their
+    basenames start with the drop id, so a boundary match on the filename
+    column routes each row. A report with no filename-ish column cannot be
+    split; it is returned whole with a warning rather than silently losing
+    every row.
+    """
+    fname_cols = [c for c in report.columns if "filename" in str(c).lower()]
+    if not fname_cols:
+        logging.warning(
+            f"  {drop_id}: shared volume report has no filename column; "
+            "cannot split rows per deployment, using the full report."
+        )
+        return report
+    pattern = _drop_boundary_pattern(drop_id)
+    mask = report[fname_cols[0]].astype(str).apply(lambda f: bool(pattern.search(f)))
+    return report[mask]
+
+
+def _volume_has_drop_files(handler, volume_id: int, drop_id: str, cache: dict) -> bool:
+    """Whether the shared volume holds any file belonging to this drop.
+
+    Distinguishes "reviewed, nothing seen" (files present, no annotation
+    rows) from "never uploaded into the pooled volume" (no files), which
+    must NOT be recorded as an absence.
+    """
+    if volume_id not in cache:
+        cache[volume_id] = [
+            str(img.get("filename", "")) for img in handler.get_volume_images(volume_id)
+        ]
+    pattern = _drop_boundary_pattern(drop_id)
+    return any(pattern.search(name) for name in cache[volume_id])
+
+
 def sync_biigle_annotations():
     """
     Sync annotations from Biigle volumes that the annotator has marked as done.
@@ -448,6 +495,15 @@ def sync_biigle_annotations():
     # one routing rule to name-based handling rather than aborting the sync.
     trees = _fetch_label_trees(handler)
 
+    # Survey-pooled volumes (--survey-volume uploads): several deployments
+    # share one volume id. Each volume's report is downloaded once per run,
+    # and rows are routed to their deployment by filename.
+    volume_share_count = Counter(
+        int(d["biigle_volume_id"]) for d in deployments if d.get("biigle_volume_id")
+    )
+    report_cache: dict = {}
+    volume_files_cache: dict = {}
+
     processed_drops = []
     for dep in deployments:
         drop_id = dep["drop_id"]
@@ -461,14 +517,32 @@ def sync_biigle_annotations():
                 continue
 
             parser = BiigleParser()
-            report = parser.download_volume_annotations(
-                volume_id=volume_id,
-                type_id=(
-                    config.annotation_report_type_video
-                    if media_type == "video"
-                    else config.annotation_report_type_images
-                ),
-            )
+            if volume_id in report_cache:
+                report = report_cache[volume_id]
+            else:
+                report = parser.download_volume_annotations(
+                    volume_id=volume_id,
+                    type_id=(
+                        config.annotation_report_type_video
+                        if media_type == "video"
+                        else config.annotation_report_type_images
+                    ),
+                )
+                report_cache[volume_id] = report
+
+            if volume_share_count[volume_id] > 1:
+                report = _rows_for_drop(report, drop_id)
+                if report.empty and not _volume_has_drop_files(
+                    handler, volume_id, drop_id, volume_files_cache
+                ):
+                    # No rows AND no files: this drop was never uploaded into
+                    # the shared volume. Recording an absence here would fake
+                    # a "reviewed, nothing seen"; leave the drop as-is.
+                    logging.warning(
+                        f"  {drop_id}: shared volume {volume_id} holds no "
+                        "files for this drop; skipping (not reviewed)."
+                    )
+                    continue
 
             if report.empty:
                 _record_null_deployment(

@@ -127,6 +127,26 @@ def _attach_region(sites_df, storage):
 def run_ingestion():
     logging.info("Starting Spyfish Pipeline Ingestion...")
 
+    # Refresh the local BIIGLE label-tree snapshots (class_map.json +
+    # species_labels.csv) so tree edits propagate on the same cadence as
+    # SharePoint metadata — snapshots never update themselves. Guarded:
+    # BIIGLE being unreachable must not block metadata ingestion; a stale
+    # snapshot is the pre-existing condition, not a failure. Renumbered
+    # class ids are safe because every data prep regenerates all YOLO
+    # labels from the raw CSVs against the current map.
+    try:
+        from spyfish.biigle.class_map import (
+            refresh_species_labels_csv,
+            reseed_from_label_tree,
+        )
+
+        reseed_from_label_tree()
+        refresh_species_labels_csv()
+    except Exception as e:  # noqa: BLE001 — degrade to stale snapshots
+        logging.warning(
+            f"BIIGLE label-tree refresh skipped ({e}); using existing snapshots."
+        )
+
     mapping = config.csv_mapping
     if not mapping:
         raise ValueError(

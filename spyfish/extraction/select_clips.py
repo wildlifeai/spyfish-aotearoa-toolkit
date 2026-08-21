@@ -123,9 +123,24 @@ def select_clips_with_strategy(
     df[config.csv_confidence_agreement_column] = df[
         config.csv_confidence_agreement_column
     ].replace(0, 0.001)
-    df[config.csv_confusion_score_column] = (
-        df[config.csv_max_interval_column] / df[config.csv_confidence_agreement_column]
+    # Score from the UNFILTERED single-frame max when the persistence filter
+    # wrote one (ML MaxN CSVs): a suppressed spike has MaxInterval 0 but is
+    # exactly what this bucket exists to review — reporting is filtered,
+    # review selection is fed. Citsci CSVs lack the column; fall back.
+    raw_col = config.csv_raw_max_interval_column
+    confusion_basis = (
+        df[raw_col] if raw_col in df.columns else df[config.csv_max_interval_column]
     )
+    df[config.csv_confusion_score_column] = (
+        confusion_basis / df[config.csv_confidence_agreement_column]
+    )
+    # Persistence-suppressed rows are NOT empty moments — something was
+    # detected there — so keep them out of the false-negative "empty" buckets.
+    spike_col = config.csv_spike_flag_column
+    if spike_col in df.columns:
+        non_spike_df = df[~df[spike_col].fillna(False).astype(bool)]
+    else:
+        non_spike_df = df
 
     if not is_multiclass:
         # Binary Strategy
@@ -170,7 +185,7 @@ def select_clips_with_strategy(
                     added_confusing += 1
 
         # 3. Empty (0 fish)
-        empty_df = df[df[config.csv_max_interval_column] == 0]
+        empty_df = non_spike_df[non_spike_df[config.csv_max_interval_column] == 0]
         if not empty_df.empty:
             for _, row in _sample(empty_df, n_empty).iterrows():  # type: ignore
                 selector.add_interval(
@@ -224,7 +239,9 @@ def select_clips_with_strategy(
 
         # 3. Global Empty
         empty_df = (
-            df.groupby(config.csv_time_seconds_column)[config.csv_max_interval_column]
+            non_spike_df.groupby(config.csv_time_seconds_column)[
+                config.csv_max_interval_column
+            ]
             .sum()
             .reset_index()
         )

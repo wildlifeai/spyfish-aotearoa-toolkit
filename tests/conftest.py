@@ -79,6 +79,9 @@ csv_mapping:
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
   time_seconds_column: "TimeAbsSeconds"
+  raw_max_interval_column: "RawMaxInterval"
+  spike_flag_column: "SpikeFlag"
+  spike_time_seconds_column: "SpikeTimeSeconds"
 
 paths:
   base_dir: "process_files"
@@ -118,6 +121,9 @@ ml_inference:
   imgsz: 640
   confidence_threshold: 0.25
   maxn_confidence_threshold: 0.50
+  maxn_persistence_seconds: 1.0
+  maxn_gap_fill_seconds: 0.4
+  maxn_exclude_classes: ["bait"]
   remote_host: "mahuika"
   remote_user: "testuser"
   extraction:

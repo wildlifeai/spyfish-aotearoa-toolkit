@@ -109,19 +109,18 @@ def _promote_model_locally(model_path: str, model_type: str):
 
 def run_retraining(
     data_prep: bool = True,
-    binary: bool = True,
     species: bool = True,
     auto_promote: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """
     Run the retraining pipeline. Steps are composable, pass any subset of
-    `data_prep`, `binary`, `species` to scope the run.
+    `data_prep`, `species` to scope the run.
 
-    Defaults run all three. Skipping `data_prep` reuses the existing data.yaml
-    on disk (faster iteration on hyperparameter changes). Skipping `binary`
-    or `species` runs only the other model. The optimizer / lr / dropout
-    used for training come from `config.yaml` (training section).
+    Defaults run both. Skipping `data_prep` reuses the existing data.yaml
+    on disk (faster iteration on hyperparameter changes). Skipping `species`
+    stops after data prep. The optimizer / lr / dropout used for training
+    come from `config.yaml` (training section).
 
     `dry_run` runs the FAST part only, flatten labels, build the class map +
     data.yaml, compute the split, print the summary, then stops before the slow
@@ -131,7 +130,7 @@ def run_retraining(
     """
     logging.info("Starting Retraining Pipeline...")
     logging.info(
-        f"Steps: data_prep={data_prep}, binary={binary}, species={species}, "
+        f"Steps: data_prep={data_prep}, species={species}, "
         f"auto_promote={auto_promote}"
     )
 
@@ -142,19 +141,12 @@ def run_retraining(
     class_map_path = local_training_dir / "class_map.json"
     labels_staged_dir = local_training_dir / "labels_staged"
     species_yaml: Optional[Path] = local_training_dir / "species" / "data.yaml"
-    binary_yaml: Optional[Path] = local_training_dir / "binary" / "data.yaml"
 
     if not data_prep:
         # Reuse the existing dataset on disk, skip every walk/extract/flatten step.
         logging.info(
             "Skipping data prep (data_prep=False). Reusing existing data.yaml files."
         )
-        if binary and not binary_yaml.exists():
-            logging.error(
-                f"Binary data.yaml not found: {binary_yaml}\n"
-                "  Run with --data-prep first, or include binary in a full retrain."
-            )
-            return {}
         if species and not species_yaml.exists():
             logging.error(
                 f"Species data.yaml not found: {species_yaml}\n"
@@ -162,7 +154,6 @@ def run_retraining(
             )
             return {}
         return _train_and_evaluate(
-            binary_yaml=binary_yaml if binary else None,
             species_yaml=species_yaml if species else None,
             auto_promote=auto_promote,
         )
@@ -285,6 +276,7 @@ def run_retraining(
                 config.training_force_train_biigle_volumes
             ),
             overshoot_weight=config.training_val_balance_overshoot_weight,
+            max_share=config.training_val_balance_max_share,
         )
     else:
         train_drops, val_drops, test_drops = split_data(
@@ -312,7 +304,7 @@ def run_retraining(
 
     # 7. Assemble YOLO layout.
     logging.info("Assembling final YOLO dataset layout...")
-    species_yaml, binary_yaml = assemble_yolo_dataset(
+    species_yaml = assemble_yolo_dataset(
         train_drops=train_drops,
         val_drops=val_drops,
         test_drops=test_drops,
@@ -320,7 +312,6 @@ def run_retraining(
         species_labels_dir=labels_staged_dir,
         output_dir=local_training_dir,
         class_names=species_names,
-        build_binary=binary,
         source_class_map_path=class_map_path,
         extra_drops=set(extra_drops),
     )
@@ -351,44 +342,25 @@ def run_retraining(
                 extra_drops=set(extra_drops),
             )
 
-    if not (binary or species):
-        logging.info(
-            "Data prep complete; binary=False and species=False so skipping training."
-        )
+    if not species:
+        logging.info("Data prep complete; species=False so skipping training.")
         return {"data_prep_complete": True}
 
     return _train_and_evaluate(
-        binary_yaml=binary_yaml if binary else None,
-        species_yaml=species_yaml if species else None,
+        species_yaml=species_yaml,
         auto_promote=auto_promote,
     )
 
 
 def _train_and_evaluate(
-    binary_yaml: Optional[Path],
     species_yaml: Optional[Path],
     auto_promote: bool,
 ) -> dict:
-    """Train the requested models, evaluate each, optionally promote on improvement."""
-    logging.info("Training YOLO models...")
-    train_results = run_training_pipeline(
-        binary_data_yaml=str(binary_yaml) if binary_yaml else None,
-        species_data_yaml=str(species_yaml) if species_yaml else None,
-        train_binary=binary_yaml is not None,
-        train_species=species_yaml is not None,
-    )
+    """Train the species model, evaluate it, optionally promote on improvement."""
+    logging.info("Training YOLO model...")
+    train_results = run_training_pipeline(species_data_yaml=str(species_yaml))
 
     eval_results = {}
-    if "binary" in train_results:
-        logging.info("Evaluating binary model...")
-        eval_results["binary"] = run_evaluation_pipeline(
-            model_path=train_results["binary"]["local"],
-            data_yaml=str(binary_yaml),
-            model_type="binary",
-        )
-        if auto_promote and eval_results["binary"].get("should_promote"):
-            _promote_model_locally(train_results["binary"]["local"], "binary")
-
     if "species" in train_results:
         logging.info("Evaluating species model...")
         eval_results["species"] = run_evaluation_pipeline(
