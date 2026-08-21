@@ -220,6 +220,7 @@ def balance_val_drops(
     tolerance: float = 0.05,
     force_train: Optional[Set[str]] = None,
     overshoot_weight: float = 0.0,
+    max_share: float = 1.0,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Greedy species-balanced val selection (the in-pipeline suggester).
 
@@ -234,6 +235,11 @@ def balance_val_drops(
     species' remaining deficit — those boxes leave train for no val benefit, so
     with a positive weight the greedy prefers the smallest drop that covers a
     need over a box-heavy one. 0 scores by coverage gain alone (overshoot-blind).
+
+    ``max_share`` is a HARD feasibility cap: a candidate drop is refused when
+    adding it would push any multi-source species past this share of its boxes
+    in val. Drop-concentrated species then resolve train-heavy (small or zero
+    val, logged as under-covered) instead of 77-97% val. 1.0 disables.
     """
     force_train = set(force_train or set())
     per_drop = _per_drop_species_counts(
@@ -264,6 +270,15 @@ def balance_val_drops(
             break
         best, best_score = None, None
         for d, counts in remaining.items():
+            # Feasibility first: refuse any drop that would push a targeted
+            # species past max_share of its boxes in val. Concentrated species
+            # then stay train-heavy rather than val-heavy.
+            if max_share < 1.0 and any(
+                (current[s] + n) / total[s] > max_share
+                for s, n in counts.items()
+                if s in target
+            ):
+                continue
             gain = sum(
                 min(n, target[s] - current[s])
                 for s, n in counts.items()
@@ -277,6 +292,13 @@ def balance_val_drops(
             if best_score is None or score > best_score:
                 best, best_score = d, score
         if best is None:
+            uncovered = sorted(s for s in target if current[s] < target[s])
+            if uncovered:
+                logging.info(
+                    f"balance_val_drops: {len(uncovered)} species left "
+                    f"under-covered in val (max_share={max_share:.0%} refused "
+                    f"their drops; they stay train-heavy): {uncovered}"
+                )
             break
         val.append(best)
         current.update(remaining.pop(best))

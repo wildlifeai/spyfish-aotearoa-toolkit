@@ -1,5 +1,5 @@
 """
-train.py. Train binary and species YOLO detection models for Spyfish Aotearoa.
+train.py. Train the species YOLO detection model for Spyfish Aotearoa.
 
 Adapted from yolov12_comparison/train_models.py, with:
   - S3 download of base model weights if not cached locally
@@ -8,9 +8,7 @@ Adapted from yolov12_comparison/train_models.py, with:
   - Upload of trained weights to S3 after training
 
 Usage:
-    python -m spyfish.ml.training.train --binary-data /path/to/binary/data.yaml --species-data /path/to/species/data.yaml
-    python -m spyfish.ml.training.train --binary-only
-    python -m spyfish.ml.training.train --species-only
+    python -m spyfish.ml.training.train --species-data /path/to/species/data.yaml
 """
 
 import argparse
@@ -71,8 +69,8 @@ STABILITY_PARAMS = {
 
 def _clear_yolo_cache(training_dir: Path) -> None:
     """
-    Clear YOLO .cache files before switching between binary and species datasets.
-    YOLO gets confused when swapping datasets with the same directory structure.
+    Clear YOLO .cache files before training. YOLO gets confused when the
+    dataset changed under an unchanged directory structure between runs.
     """
     import torch
 
@@ -248,24 +246,14 @@ def freeze_dataset_snapshot(data_yaml: Path, best_weights: Path) -> Optional[Pat
         return None
 
 
-def run_training_pipeline(
-    binary_data_yaml: Optional[str] = None,
-    species_data_yaml: Optional[str] = None,
-    train_binary: bool = True,
-    train_species: bool = True,
-) -> dict:
+def run_training_pipeline(species_data_yaml: str) -> dict:
     """
-    Full training pipeline: train on local base model.
+    Full training pipeline: train the species model on the local base model.
     """
     local_training_dir = config.local_training_dir
-    epochs = config.training_epochs
-    patience = config.training_patience
-    imgsz = config.training_imgsz
-    batch = config.training_batch
 
     base_model_path = config.base_model_path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results = {}
 
     # Base model must exist locally
     if not base_model_path or not base_model_path.exists():
@@ -274,43 +262,21 @@ def run_training_pipeline(
         )
         raise FileNotFoundError(f"Base model missing: {base_model_path}")
 
-    base_model_path_str = str(base_model_path)
-
-    # Binary model
-    if train_binary and binary_data_yaml:
-        logging.info(f"Validating binary dataset: {binary_data_yaml}")
-        validate_dataset(binary_data_yaml)
-        _clear_yolo_cache(local_training_dir)
-        best_pt = train_model(
-            data_yaml=binary_data_yaml,
-            base_model_path=base_model_path_str,
-            project_dir=local_training_dir / "runs",
-            run_name=f"{timestamp}_binary",
-            epochs=epochs,
-            patience=patience,
-            imgsz=imgsz,
-            batch=batch,
-        )
-        freeze_dataset_snapshot(Path(binary_data_yaml), best_pt)
-        results["binary"] = {"local": str(best_pt)}
-
-    # Species model
-    if train_species and species_data_yaml:
-        logging.info(f"Validating species dataset: {species_data_yaml}")
-        validate_dataset(species_data_yaml)
-        _clear_yolo_cache(local_training_dir)
-        best_pt = train_model(
-            data_yaml=species_data_yaml,
-            base_model_path=base_model_path_str,
-            project_dir=local_training_dir / "runs",
-            run_name=f"{timestamp}_species",
-            epochs=epochs,
-            patience=patience,
-            imgsz=imgsz,
-            batch=batch,
-        )
-        freeze_dataset_snapshot(Path(species_data_yaml), best_pt)
-        results["species"] = {"local": str(best_pt)}
+    logging.info(f"Validating species dataset: {species_data_yaml}")
+    validate_dataset(species_data_yaml)
+    _clear_yolo_cache(local_training_dir)
+    best_pt = train_model(
+        data_yaml=species_data_yaml,
+        base_model_path=str(base_model_path),
+        project_dir=local_training_dir / "runs",
+        run_name=f"{timestamp}_species",
+        epochs=config.training_epochs,
+        patience=config.training_patience,
+        imgsz=config.training_imgsz,
+        batch=config.training_batch,
+    )
+    freeze_dataset_snapshot(Path(species_data_yaml), best_pt)
+    results = {"species": {"local": str(best_pt)}}
 
     logging.info(f"\nTraining pipeline complete: {results}")
     return results
@@ -318,36 +284,16 @@ def run_training_pipeline(
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(
-        description="Train binary and/or species YOLO models."
-    )
-    parser.add_argument(
-        "--binary-data", type=str, default=None, help="Path to binary data.yaml"
-    )
+    parser = argparse.ArgumentParser(description="Train the species YOLO model.")
     parser.add_argument(
         "--species-data", type=str, default=None, help="Path to species data.yaml"
     )
-    parser.add_argument("--binary-only", action="store_true")
-    parser.add_argument("--species-only", action="store_true")
     args = parser.parse_args()
 
-    train_binary = not args.species_only
-    train_species = not args.binary_only
-
-    if not args.binary_data and train_binary:
-        local_dir = config.local_training_dir
-        args.binary_data = str(local_dir / "binary" / "data.yaml")
-
-    if not args.species_data and train_species:
-        local_dir = config.local_training_dir
-        args.species_data = str(local_dir / "species" / "data.yaml")
-
-    run_training_pipeline(
-        binary_data_yaml=args.binary_data,
-        species_data_yaml=args.species_data,
-        train_binary=train_binary,
-        train_species=train_species,
+    species_data = args.species_data or str(
+        config.local_training_dir / "species" / "data.yaml"
     )
+    run_training_pipeline(species_data_yaml=species_data)
 
 
 if __name__ == "__main__":

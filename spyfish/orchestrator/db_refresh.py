@@ -253,6 +253,25 @@ def refresh_biigle(db: DatabaseManager) -> int:
             if drop_id not in volume_by_drop and _volume_name_matches(name, drop_id):
                 volume_by_drop[drop_id] = v
 
+    # Second pass: survey-pooled expert volumes ("--survey-volume" uploads),
+    # matched by their EXACT name, not by substring. A loose survey match
+    # would also hit sibling per-drop volumes, whose names start with the
+    # survey id at an underscore boundary. Per-drop matches above win.
+    # A pooled match can over-claim a drop that was never added to the
+    # volume; the sync side detects that (no files for the drop) and skips
+    # rather than faking an absence record.
+    volumes_by_name = {v.get("name", ""): v for v in all_volumes}
+    for drop_id in candidate_set - set(volume_by_drop):
+        try:
+            survey_id = config.get_survey_id_from_drop(drop_id)
+        except ValueError:
+            continue
+        pooled_name = config.expert_survey_volume_name_template.format(
+            survey_id=survey_id
+        )
+        if pooled_name in volumes_by_name:
+            volume_by_drop[drop_id] = volumes_by_name[pooled_name]
+
     updated = 0
     for drop_id in candidates:
         v = volume_by_drop.get(drop_id)

@@ -174,6 +174,20 @@ class StageRunner:
         records = self.db.get_deployments_eligible(stage.section, statuses, prereqs)
         drop_ids = [r["drop_id"] for r in records]
 
+        # --survey scopes every drop stage the same way it scopes --ml: only
+        # this survey's drops (DropID prefix). Without it, a stage like
+        # biigle-upload processes EVERY eligible drop across all surveys,
+        # which after a backfill can be a mass upload nobody intended.
+        survey_id = getattr(args, "survey", None)
+        if survey_id:
+            prefix = f"{survey_id}_"
+            before = len(drop_ids)
+            drop_ids = [d for d in drop_ids if d.startswith(prefix)]
+            logging.info(
+                f"--survey {survey_id}: {len(drop_ids)} of {before} eligible "
+                f"drop(s) belong to this survey."
+            )
+
         if not drop_ids:
             logging.info(f"No eligible deployments for {stage.flag}. Skipping.")
             return

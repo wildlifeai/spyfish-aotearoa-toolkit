@@ -604,6 +604,70 @@ def upload_frames_to_biigle(
     return volume_info
 
 
+def upload_frames_to_expert_survey_volume(
+    drop_id: str, frames_df: pd.DataFrame
+) -> Optional[dict]:
+    """Expert-review upload pooled into ONE Biigle volume per survey.
+
+    Same contract as `upload_frames_to_biigle` (None when the COCO holds no
+    annotations, else a dict with 'id'), but every drop of a survey lands in
+    a shared volume named for the survey, so the expert reviews a survey in
+    one place instead of jumping volume to volume.
+
+    The survey dir is the naming base: a frame at
+    ``deployment_data/{survey}/{drop}/frames/x.jpg`` is named
+    ``{drop}/frames/x.jpg`` in the volume, which is what lets the sync route
+    a shared volume's annotations back to each deployment by filename.
+    """
+    survey_id = config.get_survey_id_from_drop(drop_id)
+
+    coco_json_path = config.get_coco_annotations_path(drop_id)
+    if not coco_json_path.exists():
+        raise FileNotFoundError(
+            f"COCO annotations JSON not found: {coco_json_path}. "
+            "Run frame extraction before Biigle upload."
+        )
+    with open(coco_json_path) as f:
+        coco = json.load(f)
+    if not coco.get("annotations"):
+        logging.error(
+            f"COCO annotations for {drop_id} have 0 annotations, "
+            "no ML detections to review. Skipping Biigle upload."
+        )
+        return None
+
+    s3_prefix = f"{config.s3_deployment_data_dir}/{survey_id}/"
+    file_names = upload_frames_to_s3(
+        frames_df, s3_prefix, relative_to=config.deployment_data_dir / survey_id
+    )
+    if not file_names:
+        raise RuntimeError(
+            f"No frames uploaded to S3 for {drop_id}, aborting volume creation."
+        )
+
+    volume_name = config.expert_survey_volume_name_template.format(survey_id=survey_id)
+    volume_id, filename_to_id = find_or_create_volume_and_add_frames(
+        volume_name=volume_name,
+        s3_frames_prefix=s3_prefix,
+        file_names=file_names,
+        media_type="image",
+    )
+
+    # The COCO's image entries carry bare basenames while the shared volume
+    # names carry the {drop}/frames/ segment; basenames are unique across the
+    # survey (each starts with its drop_id), so a basename-keyed map bridges
+    # the two.
+    base_map = {Path(name).name: vid for name, vid in filename_to_id.items()}
+    upload_coco_annotations_to_biigle(volume_id, coco, filename_to_biigle_id=base_map)
+
+    db = DatabaseManager()
+    db.update_biigle_volume_id(drop_id, volume_id)
+    logging.info(
+        f"{drop_id}: frames in shared expert volume {volume_id} ({volume_name!r})"
+    )
+    return {"id": volume_id, "name": volume_name}
+
+
 def upload_to_survey_volume(drop_id: str, frame_paths: list, coco: dict) -> int:
     """Upload a drop's frames + COCO to its SURVEY-level Biigle volume.
 

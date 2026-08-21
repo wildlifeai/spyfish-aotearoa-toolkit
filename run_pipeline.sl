@@ -39,6 +39,10 @@ python run_pipeline.py --set-targets --ml --biigle-upload
 # python run_pipeline.py --set-targets --biigle-upload
 # python run_pipeline.py --set-targets --zooniverse-clip
 
+# python run_pipeline.py --ml --survey  ORA_20250121_BUV --force
+# python run_pipeline.py --ml --survey  OKA_20250121_BUV --force
+# python scripts/fetch_zooniverse_exports.py --generate --to-s3
+
 echo ""
 echo "============================================"
 echo "Pipeline complete!"

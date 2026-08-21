@@ -225,10 +225,39 @@ def reseed_from_label_tree(
     return out_path
 
 
+def refresh_species_labels_csv(tree_id: int = None, out_path: Path = None) -> Path:
+    """Rewrite species_labels.csv from the live BIIGLE label tree.
+
+    The uploader resolves class names against this snapshot (and the species
+    registry reads it), so it must be refreshed whenever labels are added to
+    the tree — BIIGLE edits never propagate on their own. Run alongside the
+    class_map reseed; the module CLI does both.
+    """
+    import csv
+
+    from spyfish.biigle.biigle_handler import BiigleHandler
+    from spyfish.config.wrapper import config
+
+    tree_id = tree_id or config.default_label_tree_id
+    out_path = out_path or config.species_labels_csv_path
+    labels = BiigleHandler().get_label_tree_labels(tree_id)
+    fields = ["id", "name", "parent_id", "color", "label_tree_id", "source_id"]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(labels)
+    logging.info(
+        f"Refreshed {out_path.name} from label tree {tree_id}: {len(labels)} labels"
+    )
+    return out_path
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
     parser = argparse.ArgumentParser(
-        description="Reseed class_map.json from a Biigle label tree."
+        description="Refresh both local snapshots of the Biigle label tree: "
+        "reseed class_map.json AND rewrite species_labels.csv."
     )
     parser.add_argument(
         "--tree-id",
@@ -244,6 +273,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     reseed_from_label_tree(tree_id=args.tree_id, out_path=args.out)
+    refresh_species_labels_csv(tree_id=args.tree_id)
 
 
 if __name__ == "__main__":
