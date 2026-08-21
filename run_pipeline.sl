@@ -2,8 +2,8 @@
 
 #SBATCH --job-name=run-spyfish-pipeline
 #SBATCH --account=wildlife03546
-#SBATCH --time=01:00:00
-#SBATCH --partition=genoa
+#SBATCH --time=12:00:00
+#SBATCH --partition=milan
 #SBATCH --gpus-per-node=a100:1   # lowercase a100 to match sinfo's GRES type exactl
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -30,7 +30,7 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 cd /nesi/project/wildlife03546/spyfish-aotearoa-toolkit
 
 # Run video preprocessing with YOLO detection and frame selection
-python run_pipeline.py --set-targets --ml --biigle-upload
+# python run_pipeline.py --set-targets --ml --biigle-upload
 # python run_pipeline.py --set-targets --ml --zooniverse-clip
 # python run_pipeline.py --set-targets --zooniverse-clip
 # python run_pipeline.py --set-targets --ingest --ml --zooniverse-clip
@@ -38,6 +38,10 @@ python run_pipeline.py --set-targets --ml --biigle-upload
 # python run_pipeline.py --set-targets --ml --biigle-upload
 # python run_pipeline.py --set-targets --biigle-upload
 # python run_pipeline.py --set-targets --zooniverse-clip
+
+# python run_pipeline.py --ml --survey  ORA_20250121_BUV --force
+# python run_pipeline.py --ml --survey  OKA_20250121_BUV --force
+# python scripts/fetch_zooniverse_exports.py --generate --to-s3
 
 echo ""
 echo "============================================"

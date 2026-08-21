@@ -1,9 +1,8 @@
 #!/bin/bash -e
 #SBATCH --job-name=spyfish_train
 #SBATCH --account=wildlife03546
-#SBATCH --time=12:00:00
-#SBATCH --mem=32G
-#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+
 # GPU choice (billing weight per GPU-hour in brackets — sinfo TRESBillingWeights):
 #   genoa: l4 [20], pro_6000 [130], h100 [200]; milan: a100 [90]. No a100 in genoa.
 # l4 (24GB) is ample for imgsz=640 batch=16 and the cheapest option.
@@ -11,11 +10,12 @@
 #SBATCH --gpus-per-node=l4:1
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.err
-#SBATCH --partition=genoa
-#SBATCH --gpus-per-node=h100:1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 
+
+#a SBATCH --partition=genoa
+#a SBATCH --gpus-per-node=h100:1
 
 # Spyfish Aotearoa training job wrapper.
 #
