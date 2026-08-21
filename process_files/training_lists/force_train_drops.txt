@@ -1,0 +1,15 @@
+ # DropIDs to force into the train split during training.
+# Overrides the survey-aware donation rule.
+#
+# Format: one DropID per line. '#' starts a comment (rest of line ignored).
+
+
+ # Canonical drops — diverse species in val
+  # AHE_20250513_BUV_AHE_060_01    # 643 boxes: Pagrus auratus 617, Pseudocaranx 25
+  # KOK_20240219_BUV_KOK_006_01    # 559: Parapercis 354, Evechinus 151, Notolabrus 46
+ 
+  # Big bulk extras — keep out of val so they don't dominate
+  volume_30505                   # 8443 boxes — most species but bulk training material
+  # volume_30196                   # 730 boxes — Scorpis + Girella
+  # volume_32414                   # 2880 boxes — bulk diverse
+  # volume_32392                   # 2534 boxes — bulk diverse

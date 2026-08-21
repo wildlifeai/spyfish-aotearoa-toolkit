@@ -268,7 +268,6 @@ def run_retraining(
         candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
         train_drops, val_drops, test_drops = balance_val_drops(
             labels_staged_dir=labels_staged_dir,
-            species_names=species_names,
             candidate_drops=candidate_drops,
             val_pct=config.training_val_balance_pct,
             tolerance=config.training_val_balance_tolerance,
