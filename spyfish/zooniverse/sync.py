@@ -125,5 +125,21 @@ def sync_zooniverse_drops(force: bool = False) -> None:
         logging.info("Completion data unavailable from Panoptes, nothing to do.")
         return
 
+    # Per-drop isolation: Panoptes throws transient 5xx errors under load,
+    # and one bad response must not kill the sync for every drop behind it
+    # in the list (a 502 once took out the whole stage with zero drops
+    # ingested). A failed drop stays at citsci_clips_uploaded and is picked
+    # up again on the next run; already-fetched sets come from the raw CSV
+    # cache, so retries are cheap.
+    failed: list[str] = []
     for drop_id in drop_ids:
-        _sync_one_drop(drop_id, completion, force)
+        try:
+            _sync_one_drop(drop_id, completion, force)
+        except Exception as e:  # noqa: BLE001, isolate per drop
+            logging.error(f"  {drop_id}: zooniverse-sync failed ({e}), continuing.")
+            failed.append(drop_id)
+    if failed:
+        logging.warning(
+            f"zooniverse-sync: {len(failed)} drop(s) failed and remain at "
+            f"{CitSciStatus.CLIPS_UPLOADED}: {failed}. Re-run to retry."
+        )

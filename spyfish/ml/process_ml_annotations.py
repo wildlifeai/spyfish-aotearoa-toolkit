@@ -21,14 +21,119 @@ from spyfish.utils import seconds_to_time
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
 
+def _build_sampled_grid(raw_df: pd.DataFrame):
+    """Rebuild the inference sampling grid from a raw CSV's frame indices.
+
+    The raw CSV only holds frames WITH detections, but the persistence filter
+    needs the frames without them (they are the zeros that expose a blip).
+    The sampling stride is recovered as the modal difference between
+    consecutive detected frame indices — robust to gaps, unlike a gcd, because
+    a majority of consecutive detections sit one stride apart on real drops.
+
+    Returns:
+        grid_times: absolute seconds per grid slot (synthetic slots interpolated).
+        grid_frame_ids: video frame index per slot, -1 for synthetic (no-detection) slots.
+        frame_to_idx: {video frame index -> grid slot} for the detected frames.
+        dt_grid: seconds between grid slots, or None when the CSV holds a single
+            frame and no spacing can be estimated.
+    """
+    per_frame_times = raw_df.groupby("frame")["time_seconds"].first().sort_index()
+    frames = per_frame_times.index.to_numpy(dtype=np.int64)
+    times = per_frame_times.to_numpy(dtype=float)
+
+    if len(frames) < 2:
+        return times, frames.copy(), {int(frames[0]): 0}, None
+
+    diffs = np.diff(frames)
+    stride = int(pd.Series(diffs).mode().iloc[0])
+    dt_grid = float(np.median(np.diff(times) / diffs)) * stride
+
+    grid_times: list = []
+    grid_frame_ids: list = []
+    frame_to_idx: dict = {}
+    for k in range(len(frames)):
+        frame_to_idx[int(frames[k])] = len(grid_times)
+        grid_times.append(times[k])
+        grid_frame_ids.append(int(frames[k]))
+        if k + 1 < len(frames):
+            n_slots = max(1, int(round(diffs[k] / stride)))
+            for s in range(1, n_slots):
+                grid_times.append(times[k] + (times[k + 1] - times[k]) * s / n_slots)
+                grid_frame_ids.append(-1)
+    return (
+        np.asarray(grid_times),
+        np.asarray(grid_frame_ids),
+        frame_to_idx,
+        dt_grid,
+    )
+
+
+def _gap_fill(counts: np.ndarray, max_gap: int) -> np.ndarray:
+    """Morphological closing on a count series: zero-runs up to `max_gap` slots
+    flanked by detections on BOTH sides take min(neighbours). Never invents a
+    detection — an isolated blip has zeros on both sides and stays exposed."""
+    if max_gap <= 0:
+        return counts
+    filled = counts.copy()
+    n = len(filled)
+    i = 0
+    while i < n:
+        if filled[i] != 0:
+            i += 1
+            continue
+        j = i
+        while j < n and filled[j] == 0:
+            j += 1
+        if 0 < i and j < n and (j - i) <= max_gap:
+            filled[i:j] = min(filled[i - 1], filled[j])
+        i = j
+    return filled
+
+
+def _centered_rolling_min(counts: np.ndarray, window: int) -> np.ndarray:
+    """Rolling min over `window` slots, value assigned to the window's middle
+    slot. Slots beyond the series edges count as zero, so a visit shorter than
+    the window is suppressed even when it touches the first or last detection."""
+    if window <= 1:
+        return counts
+    left = window // 2
+    right = window - 1 - left
+    padded = np.concatenate([np.zeros(left), counts, np.zeros(right)])
+    return np.lib.stride_tricks.sliding_window_view(padded, window).min(axis=1)
+
+
 def process_maxn(
-    raw_df, output_csv_path, drop_id, interval_seconds, confidence_threshold, model_name
+    raw_df,
+    output_csv_path,
+    drop_id,
+    interval_seconds,
+    confidence_threshold,
+    model_name,
+    persistence_seconds: float = 0.0,
+    gap_fill_seconds: float = 0.0,
+    exclude_classes: tuple = (),
+    union_class: Optional[str] = None,
 ):
     """
-    Processes raw ML detections into MaxN intervals.
+    Processes raw ML detections into MaxN intervals, with persistence filtering.
 
-    For each time interval × class combination, finds the frame with the highest count
-    of confident detections. Breaks ties by mean confidence across ALL detections in the frame.
+    A count only sets MaxN if it is sustained across a rolling window of
+    consecutive sampled frames (`persistence_seconds`, converted to frames from
+    the CSV's own spacing), computed on the FULL timeline before interval
+    binning so a visit straddling an interval boundary is not undercounted.
+    Single zero frames between detections are gap-filled first
+    (`gap_fill_seconds`) so detector flicker on a present animal is forgiven.
+
+    A suppressed spike does not disappear: its row keeps the persistent value
+    in MaxInterval (0 allowed) and records the unfiltered single-frame max in
+    RawMaxInterval with SpikeFlag/SpikeTimeSeconds, so review selection can
+    still surface the model's own confident mistakes while reporting ignores
+    them. Rows with MaxInterval 0 are kept in the CSV but not ingested to the
+    annotations DB.
+
+    With the defaults (persistence 0, no gap fill, no exclusions, no union)
+    the output matches the pre-filter behaviour exactly: single-frame max per
+    (interval × class), ties broken by mean confidence.
 
     Args:
         raw_df: DataFrame of raw ML detections (avoids double CSV read).
@@ -37,6 +142,14 @@ def process_maxn(
         interval_seconds: Width of each MaxN time window.
         confidence_threshold: Minimum confidence for counting fish.
         model_name: Name of the model used for annotation.
+        persistence_seconds: Rolling-min window; 0 disables (single-frame MaxN).
+        gap_fill_seconds: Max zero-gap between detections to close; 0 disables.
+        exclude_classes: Classes that never count toward MaxN and get no row.
+        union_class: When set, one derived row per interval counts ALL
+            non-excluded boxes per frame under this name (the "any fish" count
+            that used to be the binary model's MaxN). Absorbs the class of the
+            same name — requires cross-class NMS at inference so one animal
+            carries one box.
 
     Returns:
         DataFrame with MaxN results.
@@ -49,14 +162,9 @@ def process_maxn(
         logging.warning(f"Empty CSV for {drop_id}")
         return pd.DataFrame()
 
-    # Bin each detection into its interval
-    raw_df = raw_df.copy()
-    raw_df["interval_start"] = (
-        raw_df["time_seconds"] // interval_seconds
-    ) * interval_seconds
-
-    # Only count detections above the confidence threshold
     df_filtered = raw_df[raw_df["confidence"] >= confidence_threshold]
+    if exclude_classes:
+        df_filtered = df_filtered[~df_filtered["class"].isin(set(exclude_classes))]
 
     if df_filtered.empty:
         logging.warning(
@@ -64,49 +172,101 @@ def process_maxn(
         )
         return pd.DataFrame()
 
-    # Count detections per frame per class
-    frame_counts = (
-        df_filtered.groupby(["interval_start", "class", "frame"])
-        .size()
-        .reset_index(name="count")
-    )
+    # Grid from the FULL raw CSV (all classes, base confidence threshold):
+    # denser data gives a better stride estimate, and a frame whose only
+    # detections are sub-threshold is still a genuinely sampled frame.
+    grid_times, grid_frame_ids, frame_to_idx, dt_grid = _build_sampled_grid(raw_df)
+    if dt_grid and dt_grid > 0:
+        window = (
+            max(1, round(persistence_seconds / dt_grid))
+            if persistence_seconds > 0
+            else 1
+        )
+        max_gap = round(gap_fill_seconds / dt_grid) if gap_fill_seconds > 0 else 0
+    else:
+        # Single sampled frame in the whole CSV: nothing can be sustained.
+        window = 2 if persistence_seconds > 0 else 1
+        max_gap = 0
+    grid_intervals = (grid_times // interval_seconds) * interval_seconds
+
+    def _series_rows(sub_df: pd.DataFrame, class_name: str) -> list:
+        """MaxN rows for one count series (one class, or the union)."""
+        per_frame = sub_df.groupby("frame").agg(
+            count=("confidence", "size"),
+            mean_conf=("confidence", "mean"),
+            time=("time_seconds", "first"),
+        )
+        counts = np.zeros(len(grid_times))
+        for f, prow in per_frame.iterrows():
+            counts[frame_to_idx[int(f)]] = prow["count"]
+        rollmin = _centered_rolling_min(_gap_fill(counts, max_gap), window)
+
+        def _best_frame(candidate_frames: list) -> tuple:
+            """(time, mean_conf) of the candidate with the highest mean
+            confidence; earliest frame wins ties (matches the historical
+            tiebreak order)."""
+            best_conf, best_time = -1.0, 0.0
+            for f in sorted(candidate_frames):
+                prow = per_frame.loc[f]
+                if prow["mean_conf"] > best_conf:
+                    best_conf = float(prow["mean_conf"])
+                    best_time = float(prow["time"])
+            return best_time, best_conf
+
+        rows = []
+        per_frame_iv = (per_frame["time"] // interval_seconds) * interval_seconds
+        for interval in sorted(per_frame_iv.unique()):
+            in_iv = per_frame[per_frame_iv == interval]
+            raw_max = int(in_iv["count"].max())
+            raw_time, raw_conf = _best_frame(
+                in_iv.index[in_iv["count"] == raw_max].tolist()
+            )
+
+            iv_mask = grid_intervals == interval
+            persistent = int(rollmin[iv_mask].max())
+
+            if persistent > 0:
+                # Prefer a real detected frame whose centered window sustains
+                # the persistent value; gap-filled synthetic slots can carry it
+                # too, but have no boxes to point an expert at.
+                cand = [
+                    int(grid_frame_ids[i])
+                    for i in np.nonzero(iv_mask & (rollmin == persistent))[0]
+                    if grid_frame_ids[i] >= 0
+                    and int(grid_frame_ids[i]) in per_frame.index
+                ]
+                best_time, best_conf = (
+                    _best_frame(cand) if cand else (raw_time, raw_conf)
+                )
+            else:
+                # Fully suppressed: the raw peak is the only meaningful moment.
+                best_time, best_conf = raw_time, raw_conf
+
+            spike = raw_max > persistent
+            rows.append(
+                {
+                    config.drop_id_column: drop_id,
+                    config.csv_scientific_name_column: class_name,
+                    config.csv_maxn_time_column: seconds_to_time(best_time),
+                    config.csv_max_interval_column: persistent,
+                    config.csv_annotated_by_column: model_name,
+                    config.csv_interval_annotation_column: interval_seconds,
+                    config.csv_confidence_agreement_column: round(best_conf, 4),
+                    config.csv_maxn_time_seconds_column: best_time,
+                    config.csv_raw_max_interval_column: raw_max,
+                    config.csv_spike_flag_column: spike,
+                    config.csv_spike_time_seconds_column: raw_time if spike else np.nan,
+                }
+            )
+        return rows
 
     maxn_results = []
-    for (interval, cls), group in df_filtered.groupby(["interval_start", "class"]):
-        counts_in_interval = frame_counts[
-            (frame_counts["interval_start"] == interval)
-            & (frame_counts["class"] == cls)
-        ]
-
-        max_count = counts_in_interval["count"].max()
-        peak_frames = counts_in_interval[counts_in_interval["count"] == max_count][
-            "frame"
-        ].tolist()
-
-        # Break ties by highest mean confidence across ALL boxes in that frame
-        best_confidence = -1
-        best_second = 0
-
-        for frame_idx in peak_frames:
-            all_boxes_in_frame = group[group["frame"] == frame_idx]
-            mean_conf_all = all_boxes_in_frame["confidence"].mean()
-
-            if mean_conf_all > best_confidence:
-                best_confidence = mean_conf_all
-                best_second = all_boxes_in_frame["time_seconds"].iloc[0]
-
-        maxn_results.append(
-            {
-                config.drop_id_column: drop_id,
-                config.csv_scientific_name_column: cls,
-                config.csv_maxn_time_column: seconds_to_time(best_second),
-                config.csv_max_interval_column: max_count,
-                config.csv_annotated_by_column: model_name,
-                config.csv_interval_annotation_column: interval_seconds,
-                config.csv_confidence_agreement_column: round(best_confidence, 4),
-                config.csv_maxn_time_seconds_column: best_second,
-            }
-        )
+    for cls in df_filtered["class"].unique():
+        if union_class is not None and cls == union_class:
+            continue  # absorbed into the union series below
+        maxn_results.extend(_series_rows(df_filtered[df_filtered["class"] == cls], cls))
+    if union_class is not None:
+        maxn_results.extend(_series_rows(df_filtered, union_class))
 
     maxn_df = pd.DataFrame(maxn_results)
 
@@ -118,9 +278,15 @@ def process_maxn(
             ]
         )
 
+    n_spikes = (
+        int(maxn_df[config.csv_spike_flag_column].sum()) if not maxn_df.empty else 0
+    )
     Path(output_csv_path).parent.mkdir(parents=True, exist_ok=True)
     maxn_df.to_csv(output_csv_path, index=False)
-    logging.info(f" Saved MaxN {len(maxn_df)} rows for {drop_id} to {output_csv_path}")
+    logging.info(
+        f" Saved MaxN {len(maxn_df)} rows for {drop_id} to {output_csv_path}"
+        + (f" ({n_spikes} persistence-reduced)" if n_spikes else "")
+    )
 
     return maxn_df
 
@@ -132,6 +298,13 @@ def _ingest_ml_annotations(
     model_name: str,
 ):
     """Extracts ingestion logic into a helper method."""
+    # Persistence-suppressed rows (MaxInterval 0) stay CSV-only: they exist so
+    # review selection can surface the spike, but "reviewed, nothing sustained"
+    # must not become a named species observation in the annotations DB. A
+    # spike-only deployment therefore falls through to the null-deployment row
+    # below — a real zero, which is correct.
+    if not maxn_df.empty:
+        maxn_df = maxn_df[maxn_df[config.csv_max_interval_column] > 0]
     annotations_to_add = []
     for _, row in maxn_df.iterrows():
         annotations_to_add.append(
@@ -292,6 +465,10 @@ def process_one_drop(
         interval_seconds=interval,
         confidence_threshold=maxn_conf,
         model_name=model_name,
+        persistence_seconds=config.maxn_persistence_seconds,
+        gap_fill_seconds=config.maxn_gap_fill_seconds,
+        exclude_classes=tuple(config.maxn_exclude_classes),
+        union_class=config.catchall_class,
     )
 
     if maxn_df.empty:
@@ -308,6 +485,9 @@ def process_one_drop(
                 config.csv_interval_annotation_column,
                 config.csv_confidence_agreement_column,
                 config.csv_maxn_time_seconds_column,
+                config.csv_raw_max_interval_column,
+                config.csv_spike_flag_column,
+                config.csv_spike_time_seconds_column,
             ]
         )
         maxn_df.to_csv(maxn_csv, index=False)

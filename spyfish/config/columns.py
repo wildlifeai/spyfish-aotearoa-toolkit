@@ -206,3 +206,18 @@ class ColumnsConfig(BaseConfig):
     @property
     def csv_subject_id_column(self) -> str:
         return self._col("subject_id_column")
+
+    # ML MaxN CSV only — persistence-filter provenance (absent from citsci/expert
+    # MaxN CSVs, so consumers must guard on column presence).
+
+    @property
+    def csv_raw_max_interval_column(self) -> str:
+        return self._col("raw_max_interval_column")
+
+    @property
+    def csv_spike_flag_column(self) -> str:
+        return self._col("spike_flag_column")
+
+    @property
+    def csv_spike_time_seconds_column(self) -> str:
+        return self._col("spike_time_seconds_column")

@@ -374,6 +374,8 @@ and puts a meaningless row in every co-occurrence matrix.
 
 The ML model starts as a **binary classifier** (fish vs no-fish). Species-specific classes are added incrementally as training data for each species grows to a point where the model can reliably detect that species. This means the model naturally becomes multi-class over time as the annotation pipeline accumulates expert labels, without forcing multi-class detection before the training data supports it.
 
+**The binary model pipeline was retired (decided and deleted 2026-08-21).** "Binary" was never a different kind of model — it is the species model at the extreme end of the class-floor dial (`training.class_floor_min_images` merges weak species into the `fish` catchall; crank it high enough and *everything* blends into `fish`, with `bait` staying its own never-floored class). The separate binary training path (`make_binary_labels` + the binary dataset assembly + `--binary` retrain flags — all deleted) also carried a real defect: it remapped *every* class to 0, folding `bait` boxes into `fish` — exactly the count-inflating merge the species path's never-floor exemption exists to prevent. Validated before deletion: scored class-agnostically ("did it box each fish"), the species model beats the archived binary model P 0.96/R 0.94 vs P 0.84/R 0.60 at the production MaxN threshold — full numbers in `claude_docs/todo.md` ("Retire the binary model pipeline"). A fish-only generic count is derived from species-model output instead: `process_maxn` writes a derived any-fish row (named by `reporting.catchall_class`) counting all non-excluded boxes per frame, with `nms_agnostic: true` at inference so one animal never carries two class boxes. Old `binary_*.pt` weights stay in `archive_models/`; historical `AnnotatedBy = binary_*` DB rows are plain strings and unaffected.
+
 ### Config and orchestration
 
 ```mermaid
@@ -560,6 +562,12 @@ annotations/{DropID}/
     DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy,
     IntervalAnnotation, ConfidenceAgreement, TimeOfMaxAbsSeconds
     (TimeOfMaxAbsSeconds = absolute seconds from video start)
+  ML MaxN CSVs carry three extra persistence-filter columns (2026-08-21):
+    RawMaxInterval (single-frame max before filtering, >= MaxInterval),
+    SpikeFlag (true when the filter reduced the count),
+    SpikeTimeSeconds (absolute seconds of the suppressed raw peak).
+    MaxInterval 0 rows are suppressed spikes: kept in the CSV so clip
+    selection can review them, never ingested to the annotations DB.
 
   Selections CSV schema (clips and frames):
     DropID, SamplingStart, ClipStartAbsoluteSeconds, ClipEndAbsoluteSeconds,
@@ -579,7 +587,7 @@ deployment_data/{SurveyID}/{DropID}/
   qa_frames/                             JPEG frames with ML boxes drawn (for review)
   training_frames/                       LEGACY (pre-2026-08). New runs write frames/ instead:
     {DropID}__frame_{t:.3f}s.jpg           JPEGs from the old bootstrap extractor
-    {DropID}_{kind}_raw.csv                YOLO detections from training_extraction.annotation_type
+    {DropID}_{model_stem}_raw.csv          YOLO detections from the promoted pipeline model
     {DropID}_coco_annotations_for_biigle.json
                                            COCO sidecar uploaded with the JPEGs to Biigle
 
@@ -1062,7 +1070,7 @@ Sequenced by dependency, not assigned dates.
 - Training data preparation — drop exclusion + on-disk floor (rare → `fish` fallback)
 - Curated drop lists (`excluded_drops.txt`, `force_val_drops.txt`) for QA holds and val-split pinning
 - YOLOv12 retraining pipeline (train → evaluate → promote) with config-driven optimizer/lr/dropout
-- Composable retrain CLI: `--data-prep` / `--binary` / `--species` flags scope the run
+- Composable retrain CLI: `--data-prep` / `--species` flags scope the run
 - Slurm wrapper for NeSI submission (`train_job.sl`)
 - Per-species evaluation metrics surfaced in Streamlit dashboard
 - Formal per-species model promotion tracking
@@ -1263,7 +1271,7 @@ python run_pipeline.py --biigle-sync --retrain
 | `--check-arrivals`    | Cheap S3 poll for newly arrived videos — advances `ml_pending → ml_ready` without re-reading SharePoint      |
 | `--set-targets`       | Bulk-update deployment statuses from a CSV (`paths.pipeline_targets_csv`)                                    |
 | `--legacy-experts`    | Historical backfill: download `BUV Annotations Legacy Experts.csv` from S3 → ingest as `annotated_by='expert', external_id='legacy'` |
-| `--legacy-zooniverse` | Historical backfill: read classification CSV exports from `process_files/zooniverse/legacy_classifications/` → parse, aggregate, ingest as `annotated_by='citsci'` per drop |
+| `--legacy-zooniverse` | Historical backfill: read classification CSV exports from `process_files/zooniverse/legacy_classifications/` → parse, aggregate, ingest as `annotated_by='citsci'` per drop. When the dir is absent/empty, the exports are pulled from S3 first (same path under the bucket). `scripts/fetch_zooniverse_exports.py` downloads fresh exports from Panoptes into this dir (`--generate` to build new ones, `--to-s3` to refresh the bucket copy) — the bulk-export route for citsci catch-ups, vs `--zooniverse-sync` for small live increments |
 | `--db-refresh`        | Reconcile DB status with on-disk artifacts and live Zooniverse/Biigle API state (see `spyfish/orchestrator/db_refresh.py`; **needs validation** — see `claude_docs/todo.md`) |
 
 
@@ -1274,9 +1282,15 @@ python run_pipeline.py --biigle-sync --retrain
 | --------------- | -------------------------------------------------------------------------------------------- |
 | `--no-upload`   | Skip the final S3 sync (DB, models, results). Safe for local testing.                        |
 | `--test-run`    | Use test dataset. Also controlled by `is_test_run` in `config.yaml`.                         |
-| `--force`       | On `--zooniverse-sync`: re-fetch from Panoptes even if raw CSV exists on disk                |
+| `--force`       | On `--zooniverse-sync`: re-fetch from Panoptes even if raw CSV exists on disk. On `--ml --survey`: also reset the survey's `ml_complete`/`ml_error` drops to `ml_ready` and re-run them |
+| `--survey`      | Restrict processing to one survey (DropID prefix). On `--ml`: every `ml_ready` drop in the survey, bypassing `limit_processing`. On drop stages (`--zooniverse-clips`, `--biigle-upload`): only the survey's eligible drops |
+| `--survey-volume` | On `--biigle-upload`: pool each survey's frames into ONE shared Biigle volume named `{survey_id} ML` instead of one volume per deployment. Sync routes a shared volume's annotations back per drop by filename; a drop with no files in a done shared volume is skipped, never recorded as an absence |
 | `--ping`        | Print config summary (bucket, base dir, test mode) and exit — connectivity check.            |
 
+
+### Running on NeSI
+
+`scripts/pipeline_job.sl` is the generic SLURM job for any pipeline command: uncomment the wanted `CMD=` line and the CPU or GPU resource block inside the file, then `sbatch scripts/pipeline_job.sl`. It carries the module loads, venv activation and the repo-local `YOLO_CONFIG_DIR`. `scripts/annotate_video.sl` (demo-video rendering) and `spyfish/ml/training/{train,eval}_job.sl` are the only other job files.
 
 ### Biigle-direct path (skip Zooniverse)
 
@@ -1385,8 +1399,11 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 | --------------------------- | ------- | ------------------------------------------------------------------------ |
 | `limit_processing`          | 1       | Max videos processed per pipeline run. Increase for production.          |
 | `ml_fps`                    | 3       | Frames per second submitted to YOLO. Stride = `actual_fps / ml_fps`.     |
-| `confidence_threshold`      | 0.25    | YOLO detection threshold. Lower = more detections, more false positives. |
-| `maxn_confidence_threshold` | 0.50    | Min confidence to count a detection in MaxN computation.                 |
+| `confidence_threshold`      | 0.15    | YOLO detection threshold. Lower = more detections, more false positives. |
+| `maxn_confidence_threshold` | 0.40    | Min confidence to count a detection in MaxN computation.                 |
+| `maxn_persistence_seconds`  | 1.0     | Rolling-min window: a count must hold this long (3 sampled frames at `ml_fps` 3) to set MaxN. 0 restores single-frame MaxN. Suppressed spikes keep a CSV row (`RawMaxInterval`/`SpikeFlag`/`SpikeTimeSeconds`) for review selection. |
+| `maxn_gap_fill_seconds`     | 0.4     | Zero-gaps up to this long between detections take min(neighbours) before the window runs — forgives detector flicker without inventing detections. |
+| `maxn_exclude_classes`      | ["bait"] | Classes that never count toward MaxN and get no MaxN row (the bait fish is a real fish visually; only the class split keeps it out of abundance). |
 | `imgsz`                     | 640     | YOLO inference image size.                                               |
 
 
@@ -1543,7 +1560,7 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 
 `**MLRunner**`: `get_inference_targets()` queries `get_deployments_eligible("ml_status", [ml_ready])` → `run_inference_loop(targets)` advances `ml_ready → ml_running` before the batch starts, then `ml_running → ml_complete` on success or `ml_running → ml_error` on failure.
 
-`**run_post_ml(drop_ids, video_dir)**` (`process_ml_annotations.py`): Groups raw detections by 10-second intervals, applies `maxn_confidence_threshold`, computes MaxN per interval × species, stores in `spyfish_annotations.db` with `annotated_by = model_name`.
+`**run_post_ml(drop_ids, video_dir)**` (`process_ml_annotations.py`): Computes MaxN per interval × species and stores it in `spyfish_annotations.db` with `annotated_by = model_name`. Since 2026-08-21 `process_maxn` applies a **persistence filter** before the 10-second binning: detections above `maxn_confidence_threshold` are rebuilt onto the sampled-frame grid (missing frames are zeros), zero-gaps up to `maxn_gap_fill_seconds` are closed with min(neighbours), then a rolling min over `maxn_persistence_seconds` — computed on the full timeline so visits straddling interval boundaries aren't undercounted — becomes the interval's MaxN. Single-frame spikes are recorded (`RawMaxInterval`, `SpikeFlag`, `SpikeTimeSeconds`) but count 0; clip selection scores its Confusing bucket from `RawMaxInterval` so suppressed spikes still reach review. Classes in `maxn_exclude_classes` (bait) get no rows; a derived any-fish union row (named by `reporting.catchall_class`) replaces the old binary-model MaxN. Basis: across 19 drops, 40% of detection runs last exactly 1 frame while median peak confidence rises 0.49 → 0.79 with run length (`claude_docs/todo.md`, "min_run_length").
 
 ---
 
@@ -1688,14 +1705,12 @@ CLI flags: `--drop-id` / `--survey-id` (required, exclusive), `--force` (bypass 
 Run with `--retrain` (typically after `--biigle-sync`):
 
 ```bash
-python run_pipeline.py --retrain                              # data prep + binary + species + auto-promote
+python run_pipeline.py --retrain                              # data prep + species training + auto-promote
 python run_pipeline.py --retrain --data-prep                  # rebuild dataset only, no training
-python run_pipeline.py --retrain --binary                     # binary training using existing data.yaml
 python run_pipeline.py --retrain --species                    # species training using existing data.yaml
-python run_pipeline.py --retrain --data-prep --species        # rebuild + train species, skip binary
 ```
 
-**Compose-style flags**: passing no step flag runs all three steps; passing any step flag runs only the named subset. Skipping `--data-prep` reuses the existing `process_files/training/{species,binary}/data.yaml` — useful for fast hyperparameter iteration without re-walking the label tree.
+**Compose-style flags**: passing no step flag runs both steps; passing any step flag runs only the named subset. Skipping `--data-prep` reuses the existing `process_files/training/species/data.yaml` — useful for fast hyperparameter iteration without re-walking the label tree.
 
 ### Getting BIIGLE annotations into training — two-project workflow
 
@@ -1738,7 +1753,7 @@ The retrain run prints these markers to the log — scan them to confirm the pip
 
 ### NeSI / Slurm
 
-`spyfish/ml/training/train_job.sl` is a Slurm wrapper that runs the full retrain end-to-end under one `sbatch`. Three placeholders need to be set before first use: `--account`, venv path, project dir. To scope the run, edit the `python run_pipeline.py --retrain ...` line in the script with any subset of `--data-prep` / `--binary` / `--species`.
+`spyfish/ml/training/train_job.sl` is a Slurm wrapper that runs the full retrain end-to-end under one `sbatch`. Three placeholders need to be set before first use: `--account`, venv path, project dir. To scope the run, edit the `python run_pipeline.py --retrain ...` line in the script with any subset of `--data-prep` / `--species`.
 
 ```bash
 sbatch spyfish/ml/training/train_job.sl

@@ -7,9 +7,8 @@ Composable functions:
   flatten_and_remap_labels()        . Walk source labels, remap class IDs to unified ordering.
   discover_extra_drops()            . Find drops with labels but no MaxN data.
   copy_split_files()                . Copy images + labels into YOLO train/val/test layout.
-  make_binary_labels()              . Convert species labels → binary (all → class 0).
   generate_data_yaml()              . Write a YOLO data.yaml for a given split.
-  assemble_yolo_dataset()           . Top-level: builds species + binary datasets from drop lists.
+  assemble_yolo_dataset()           . Top-level: builds the species dataset from drop lists.
   apply_post_assembly_floor()       . Merge classes below class_floor_min_images train images into 'fish'.
 
 Typical orchestration order (see retrain_runner.py):
@@ -116,6 +115,17 @@ def prepare_from_annotations(
             )
             df["ScientificName"] = df["ScientificName"].map(lambda n: canon.get(n, n))
 
+    excluded_species = config.training_excluded_species
+    if excluded_species:
+        drop_rows = df["ScientificName"].isin(excluded_species)
+        if drop_rows.any():
+            logging.info(
+                f"Excluded {int(drop_rows.sum())} MaxN row(s) of "
+                f"{sorted(df.loc[drop_rows, 'ScientificName'].unique())} "
+                "per training.excluded_species."
+            )
+            df = df[~drop_rows]
+
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
 
@@ -153,8 +163,13 @@ def _build_id_remap(
     ).class_id_to_scientific()
     unified_ids = {name: idx for idx, name in enumerate(unified_names)}
     fallback_id = unified_ids.get(fallback_species)
+    excluded = config.training_excluded_species
     return {
-        old_id: unified_ids.get(canonicalize_species(species), fallback_id)
+        old_id: (
+            None  # excluded species: boxes dropped, NOT merged into 'fish'
+            if canonicalize_species(species) in excluded
+            else unified_ids.get(canonicalize_species(species), fallback_id)
+        )
         for old_id, species in src_map.items()
     }
 
@@ -299,7 +314,11 @@ def discover_extra_drops(
                             drop_species.add(id_to_name[cid])
 
         extras.append(drop_id)
-        species_set.update(canonicalize_species(s) for s in drop_species)
+        species_set.update(
+            c
+            for s in drop_species
+            if (c := canonicalize_species(s)) not in config.training_excluded_species
+        )
 
     if extras:
         logging.info(
@@ -383,69 +402,12 @@ def flatten_and_remap_labels(
     return n
 
 
-# ---------------------------------------------------------------------------
-# Binary label creation from existing YOLO labels
-# ---------------------------------------------------------------------------
-
-
-def make_binary_labels(
-    species_labels_dir: Path,
-    binary_labels_dir: Path,
-    overwrite: bool = False,
-) -> int:
-    """
-    Convert existing multi-class YOLO .txt label files → binary labels.
-
-    Each annotation's class ID is remapped to 0 (regardless of original class).
-    Empty label files (no detections) are preserved as-is.
-
-    This means you can train a binary fish-detector from the same images
-    without re-downloading or re-annotating anything.
-
-    Args:
-        species_labels_dir: Directory containing multi-class YOLO .txt files.
-        binary_labels_dir: Output directory for binary .txt files.
-        overwrite: If False, skip files that already exist in binary_labels_dir.
-
-    Returns:
-        Number of label files processed.
-    """
-    binary_labels_dir.mkdir(parents=True, exist_ok=True)
-
-    # species_labels_dir has per-drop subdirs (from flatten_and_remap_labels);
-    # mirror that structure in binary_labels_dir so copy_split_files() finds them.
-    label_files = list(species_labels_dir.glob("*/*.txt"))
-    if not label_files:
-        logging.warning(f"No .txt files found in {species_labels_dir}")
-        return 0
-
-    processed = 0
-    for src_path in label_files:
-        drop_id = src_path.parent.name
-        dst_drop_dir = binary_labels_dir / drop_id
-        dst_drop_dir.mkdir(parents=True, exist_ok=True)
-        dst_path = dst_drop_dir / src_path.name
-
-        if dst_path.exists() and not overwrite:
-            continue
-
-        lines = src_path.read_text().strip().splitlines()
-        binary_lines = []
-        for line in lines:
-            parts = line.strip().split()
-            if len(parts) == 5:
-                # Replace class_id (index 0) with 0, keep cx cy w h
-                binary_lines.append("0 " + " ".join(parts[1:]))
-            elif parts:
-                logging.debug(f"Unexpected label format in {src_path.name}: {line!r}")
-
-        dst_path.write_text("\n".join(binary_lines))
-        processed += 1
-
-    logging.info(
-        f"make_binary_labels: wrote {processed} binary label files → {binary_labels_dir}/<drop_id>/"
-    )
-    return processed
+# NOTE: `make_binary_labels` (remap every class → 0 for a separate binary
+# dataset) was deleted with the binary pipeline's retirement (2026-08-21). It
+# also folded `bait` boxes into `fish`, giving the binary model conflicting
+# supervision on the bait canister — the defect that made retirement easy.
+# A fish-only model is a config choice now: raise `training.class_floor_min_images`
+# and every species floors into `fish` while `bait` stays its own class.
 
 
 # ---------------------------------------------------------------------------
@@ -922,17 +884,15 @@ def assemble_yolo_dataset(
     species_labels_dir: Path,
     output_dir: Path,
     class_names: List[str],
-    build_binary: bool = True,
     symlink: bool = True,
     source_class_map_path: Optional[Path] = None,
     extra_drops: Optional[Set[str]] = None,
-) -> Tuple[Path, Optional[Path]]:
+) -> Path:
     """
-    Assemble a complete YOLO dataset (species + optional binary) from pre-split drop lists.
+    Assemble a complete YOLO dataset from pre-split drop lists.
 
     Creates:
         output_dir/species/{images,labels}/{train,val,test}/   + data.yaml + class_map.json
-        output_dir/binary/{images,labels}/{train,val,test}/    + data.yaml  (if build_binary=True)
 
     Extras (drops discovered via `discover_extra_drops`) should be appended to
     `train_drops` before calling this function, they flow through the normal
@@ -944,27 +904,22 @@ def assemble_yolo_dataset(
         species_labels_dir: Directory of multi-class YOLO .txt files (already remapped to `class_names`).
         output_dir: Root output directory.
         class_names: Ordered species class names (unified ID space).
-        build_binary: Also build a binary (fish/no-fish) dataset.
         symlink: When True (default), images/labels are symlinked instead of
-            copied, saves ~30 GB on each retrain since species + binary splits
-            no longer duplicate the same JPEGs. Source dirs (images_dir,
-            species_labels_dir, binary_labels_staging) must remain in place
-            during training. Set False if you need a portable, self-contained
-            dataset bundle (e.g. for archival or moving to another machine).
+            copied, saving ~30 GB on each retrain. Source dirs (images_dir,
+            species_labels_dir) must remain in place during training. Set
+            False if you need a portable, self-contained dataset bundle
+            (e.g. for archival or moving to another machine).
         source_class_map_path: Canonical class_map used as metadata source for the sidecar.
 
     Returns:
-        (species_data_yaml_path, binary_data_yaml_path), binary path is None if not built.
+        Path to the species data.yaml.
     """
     species_dir = output_dir / "species"
-    binary_dir = output_dir / "binary"
 
     # Wipe previous split output so re-runs don't accumulate stale files (e.g.
     # files from drops that have since been removed from the train/val/test
     # lists or excluded via training_excluded_drops.txt).
     _clean_yolo_split_dirs(species_dir)
-    if build_binary:
-        _clean_yolo_split_dirs(binary_dir)
 
     # Index only the drops in this split (not the whole deployment tree), the
     # full rglob over videos + every drop is the slowest step on Lustre/NeSI.
@@ -1094,27 +1049,6 @@ def assemble_yolo_dataset(
     species_yaml = generate_data_yaml(class_names, species_dir)
     _write_sidecar_class_map(class_names, species_dir, source_class_map_path)
 
-    binary_yaml = None
-    if build_binary:
-        binary_labels_dir = output_dir / "binary_labels_staging"
-        make_binary_labels(species_labels_dir, binary_labels_dir)
-        for split_name, drops in [
-            ("train", train_drops),
-            ("val", val_drops),
-            ("test", test_drops),
-        ]:
-            copy_split_files(
-                drops,
-                images_dir,
-                binary_labels_dir,
-                binary_dir,
-                split_name,
-                symlink=symlink,
-                image_index=image_index,
-                frame_filter=frame_filter,
-            )
-        binary_yaml = generate_data_yaml(["fish"], binary_dir)
-
     print_assembled_summary(
         species_dir=species_dir,
         class_names=class_names,
@@ -1124,7 +1058,7 @@ def assemble_yolo_dataset(
         extra_drops=extra_drops,
     )
 
-    return species_yaml, binary_yaml
+    return species_yaml
 
 
 def apply_post_assembly_floor(

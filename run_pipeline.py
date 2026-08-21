@@ -39,7 +39,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from spyfish.biigle.sync_annotations import sync_biigle_annotations
-from spyfish.biigle.upload_frames import upload_frames_to_biigle
+from spyfish.biigle.upload_frames import (
+    upload_frames_to_biigle,
+    upload_frames_to_expert_survey_volume,
+)
 from spyfish.config.base import CitSciStatus, ExpertStatus, MlStatus
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
@@ -116,13 +119,11 @@ def _run_biigle_sync() -> None:
 
 def _run_retrain(
     data_prep: bool = True,
-    binary: bool = True,
     species: bool = True,
     dry_run: bool = False,
 ) -> None:
     run_retraining(
         data_prep=data_prep,
-        binary=binary,
         species=species,
         auto_promote=True,
         dry_run=dry_run,
@@ -162,7 +163,7 @@ def _run_zooniverse_clips_drop(drop_id: str) -> str | None:
     return CitSciStatus.CLIPS_UPLOADED
 
 
-def _run_biigle_upload_drop(drop_id: str) -> str | None:
+def _run_biigle_upload_drop(drop_id: str, survey_volume: bool = False) -> str | None:
     """Biigle frame extraction + volume upload.
 
     Routing is "use the best available data" — independent of which CLI
@@ -178,8 +179,8 @@ def _run_biigle_upload_drop(drop_id: str) -> str | None:
     alone both take the Zooniverse path when the volunteer data exists.
 
     On the Zooniverse path, frames are extracted at volunteer-identified
-    timestamps where the ML raw CSV has no detections, so we re-run YOLO
-    (species + binary ensemble, IoU-merged) on each extracted JPEG and
+    timestamps where the ML raw CSV has no detections, so we re-run the
+    pipeline model on each extracted JPEG and
     rebuild the COCO JSON before upload — see
     ``rerun_inference_on_extracted_frames``. Without that step the
     BIIGLE upload would carry blank frames and experts would annotate
@@ -248,7 +249,7 @@ def _run_biigle_upload_drop(drop_id: str) -> str | None:
 
     # Zooniverse-selected timestamps don't align with ML raw CSV detections,
     # so on that path we skip the COCO write here and let the rerun-inference
-    # step write the COCO from a fresh ensemble pass.
+    # step write the COCO from a fresh inference pass.
     frames_df = extract_frames_from_selections(
         selections_csv_path=str(biigle_selections_path),
         video_path=video_path,
@@ -259,7 +260,14 @@ def _run_biigle_upload_drop(drop_id: str) -> str | None:
     if use_zooniverse:
         rerun_inference_on_extracted_frames(drop_id, frames_df)
 
-    volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
+    # Pooled mode: every drop of a survey shares one volume named for the
+    # survey, so the expert reviews survey by survey instead of volume by
+    # volume. Set from --survey-volume in main(); a module global because
+    # DropStage.fn only receives the drop_id.
+    if SURVEY_VOLUME_MODE:
+        volume_info = upload_frames_to_expert_survey_volume(drop_id, frames_df)
+    else:
+        volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
     if volume_info is None:
         # upload_frames_to_biigle returns None when the COCO has zero
         # annotations — no boxes for experts to correct. Skip cleanly
@@ -396,12 +404,7 @@ def main() -> None:
         "--data-prep",
         action="store_true",
         help="On --retrain, include the data prep step. If no step flags "
-        "(--data-prep, --binary, --species) are passed, all three run.",
-    )
-    parser.add_argument(
-        "--binary",
-        action="store_true",
-        help="On --retrain, include the binary training step.",
+        "(--data-prep, --species) are passed, both run.",
     )
     parser.add_argument(
         "--species",
@@ -426,9 +429,20 @@ def main() -> None:
     parser.add_argument(
         "--survey",
         metavar="SURVEY_ID",
-        help="On --ml: run inference on every ml_ready drop in this survey "
-        "(bypasses limit_processing). Drops still awaiting video confirmation "
-        "are reported; run --check-arrivals first to advance them.",
+        help="Restrict processing to one survey (DropID prefix). On --ml: "
+        "run inference on every ml_ready drop in this survey (bypasses "
+        "limit_processing; drops still awaiting video confirmation are "
+        "reported, run --check-arrivals first to advance them). On drop "
+        "stages (--zooniverse-clips, --biigle-upload): only this survey's "
+        "eligible drops are processed.",
+    )
+    parser.add_argument(
+        "--survey-volume",
+        action="store_true",
+        help="On --biigle-upload: pool each survey's frames into ONE shared "
+        "Biigle volume named '{survey_id} ML' instead of one volume per "
+        "deployment. Combine with --survey to upload exactly one survey's "
+        "worth.",
     )
     parser.add_argument(
         "--ping",
@@ -436,6 +450,9 @@ def main() -> None:
         help="Connectivity check: print config summary and exit without running the pipeline",
     )
     args = parser.parse_args()
+
+    global SURVEY_VOLUME_MODE
+    SURVEY_VOLUME_MODE = args.survey_volume
 
     logging.info("═" * 60)
     logging.info(" SPYFISH AOTEAROA PIPELINE ".center(60, "═"))
@@ -464,16 +481,14 @@ def main() -> None:
             )
         if s.flag == "retrain":
             # Compose-style: no flags = all steps; any flag = only those steps.
-            no_step_specified = not (args.data_prep or args.binary or args.species)
+            no_step_specified = not (args.data_prep or args.species)
             do_data_prep = args.data_prep or no_step_specified
-            do_binary = args.binary or no_step_specified
             do_species = args.species or no_step_specified
             return replace(
                 s,
                 fn=functools.partial(
                     _run_retrain,
                     data_prep=do_data_prep,
-                    binary=do_binary,
                     species=do_species,
                     dry_run=args.dry_run,
                 ),

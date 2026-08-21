@@ -63,6 +63,14 @@ class BiigleConfig(BaseConfig):
         return get_required(self.biigle_section, "genus_level_label_pattern", "biigle")
 
     @property
+    def expert_survey_volume_name_template(self) -> str:
+        """Name template for survey-pooled expert-review volumes — see
+        config.yaml for why the exact string is a matching contract."""
+        return get_required(
+            self.biigle_section, "expert_survey_volume_name_template", "biigle"
+        )
+
+    @property
     def biigle_require_done_label(self) -> bool:
         """When True, --biigle-sync gates on the Done-label whole-file check.
         When False, every volume awaiting sync is ingested (project membership
