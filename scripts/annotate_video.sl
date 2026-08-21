@@ -5,15 +5,13 @@
 #SBATCH --time=00:30:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
-#SBATCH --partition=genoa
-#SBATCH --gpus-per-node=a100:1
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/annotate_video_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/annotate_video_%j.err
 
 # ─── Parameters (override at submit, e.g. `DROP=... START=... sbatch annotate_video.sl`) ───
-DROP="${DROP:-SLI_20260114_BUV_SLI_073_01}"   # deployment to annotate
-START="${START:-250}"                          # segment start, seconds
-END="${END:-600}"                              # segment end, seconds
+DROP="${DROP:-AHE_20250513_BUV_AHE_093_01}"   # deployment to annotate
+START="${START:-1750}"                          # segment start, seconds
+END="${END:-1755}"                              # segment end, seconds
 STRIDE="${STRIDE:-1}"                          # 1 = every frame (full/smooth/real-time); 3-5 = lighter, fewer frames (output fps scaled so playback stays real-time)
 # ───────────────────────────────────────────────────────────────────────────────────────────
 

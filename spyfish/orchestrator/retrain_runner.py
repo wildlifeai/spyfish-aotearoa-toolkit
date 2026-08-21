@@ -26,6 +26,7 @@ from spyfish.ml.training.prepare_training_data import (
     prepare_from_annotations,
     print_assembled_summary,
     print_per_drop_species_inventory,
+    _write_sidecar_class_map,
 )
 from spyfish.ml.training.split_data import (
     balance_val_drops,
@@ -277,7 +278,6 @@ def run_retraining(
         candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
         train_drops, val_drops, test_drops = balance_val_drops(
             labels_staged_dir=labels_staged_dir,
-            species_names=species_names,
             candidate_drops=candidate_drops,
             val_pct=config.training_val_balance_pct,
             tolerance=config.training_val_balance_tolerance,

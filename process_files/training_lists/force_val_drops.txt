@@ -4,7 +4,4 @@
 #
 # Format: one DropID per line. '#' starts a comment (rest of line ignored).
 
-AHE_20250513_BUV_AHE_060_01   # singleton survey; force into val for rare-species coverage
-KOK_20240219_BUV_KOK_055_01   # densest Trachurus drop (MaxInterval=39); val needs Trachurus signal
-TON_20241125_BUV_TON_001_01   # singleton survey; 690 Parapercis boxes — boosts val Parapercis coverage
-TON_20221205_BUV_TON_044_01   # singleton survey; 243 Parapercis + 12 Pseudolabrus — adds val Pseudolabrus signal
+  volume_30184                   # 459: Scorpis 299, Girella 108, Trachurus 28, Kyphosus

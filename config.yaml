@@ -198,13 +198,13 @@ paths:
 
 
 ml_inference:
-  limit_processing: 1 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 5 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
-  confidence_threshold: 0.15      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
+  confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
   maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
-  max_boxes_per_frame: 80          # Sanity ceiling: if a drop's inference averages more detections/frame than this, treat it as degenerate (model saturating max_det on out-of-distribution footage, or confidence_threshold mis-set to ~0) and fail the drop instead of building a giant COCO. No real BUV frame has 80 fish; the flood case hits YOLO's max_det=300.
+  max_boxes_per_frame: 80          # Ceiling: if a drop's inference averages more detections/frame than this, treat it as erroneous (model saturating max_det on out-of-distribution footage, or confidence_threshold mis-set to ~0) and fail the drop instead of building a giant COCO. No real BUV frame has 80 fish; the flood case hits YOLO's max_det=300.
   batch_size: 32                   # Frames per YOLO predict() call during video inference. Batching amortises per-call overhead and keeps the GPU fed (single-frame calls leave an A100 at ~0% util). 32 fits comfortably at imgsz=640 on a 40GB A100; lower to 8–16 for larger imgsz or smaller GPUs.
   # YOLO NMS, applied at inference (passed to model.predict). Cleans overlapping/stacked
   # boxes at the source, so the raw CSV — and therefore MaxN counts, frame selection AND
@@ -283,8 +283,8 @@ extraction:
     start_export: 1          # Clips from the start of the video (health check)
     temporal_spacing_seconds: 10  # Minimum seconds between selected clips
   multiclass_strategy:
-    per_species_maxn_export: 5       # MaxN clips per species
-    per_species_confusing_export: 10 # Confusing clips per species
+    per_species_maxn_export: 4       # MaxN clips per species
+    per_species_confusing_export: 3 # Confusing clips per species
     per_video_empty_export: 3        # Empty clips per video
     per_video_start_export: 2        # Start clips per video
     temporal_spacing_seconds: 10     # Minimum seconds between selected clips
@@ -329,7 +329,7 @@ biigle:
   # Default project for generic handler methods (used when no role is specified).
   # Points at in_progress so plain `config.biigle_project_id` = upload target.
   project_id: 4942
-  disk_id: 134           #  134 doc, 98 test, S3 bucket disk reference
+  disk_id: 134          #  134 doc, 98 test, S3 bucket disk reference
   annotation_report_type_video: 8          # Video annotation CSV report
   annotation_report_type_images: 3         # Image annotation CSV report
   # Done labels — whole-file labels that signal a volume is ready for ingestion.
@@ -419,7 +419,7 @@ training:
   epochs: 100
   patience: 25
   imgsz: 640
-  batch: 16                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  batch: 32                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
   optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
   lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
   dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
