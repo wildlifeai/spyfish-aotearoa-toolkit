@@ -453,9 +453,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global SURVEY_VOLUME_MODE
-    SURVEY_VOLUME_MODE = args.survey_volume
-
     logging.info("═" * 60)
     logging.info(" SPYFISH AOTEAROA PIPELINE ".center(60, "═"))
     logging.info(f" NO-UPLOAD: {args.no_upload} ".center(60, "═"))

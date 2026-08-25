@@ -7,7 +7,6 @@ name for and then indexes past the end of the shortened dict. Even without the
 crash the numbers are meaningless: the same id names a different species on
 each side.
 """
-
 from unittest.mock import MagicMock, patch
 
 import yaml
