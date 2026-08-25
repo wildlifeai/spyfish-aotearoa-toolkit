@@ -1100,10 +1100,25 @@ def assemble_yolo_dataset(
             for txt in d.glob("*.txt"):
                 for cid in set(_iter_class_ids(txt)):
                     frames_per_class[cid] = frames_per_class.get(cid, 0) + 1
+        # Bucket classes ('fish', 'bait') are never "rare species", whatever
+        # their frame count. Both are widespread - 'fish' is the catch-all that
+        # absorbs every floored species and 'bait' is in essentially every frame
+        # of every deployment - so exempting them exempts almost every frame and
+        # the cap stops applying at all. Measured 2026-08-25: with them included,
+        # drops sampled down by the cap fell 20 -> 6 and 2541 extra frames came
+        # in, which is not the targeted change this exemption is for.
+        registry = species_registry()
+        bucket_ids = {
+            i
+            for i, n in enumerate(class_names)
+            if (sp := registry.get(n)) is not None and sp.is_bucket
+        }
         rare_class_ids = {
             cid
             for cid, n in frames_per_class.items()
-            if n < rare_below and cid not in dominant_class_ids
+            if n < rare_below
+            and cid not in dominant_class_ids
+            and cid not in bucket_ids
         }
         if rare_class_ids:
             logging.info(
@@ -1130,7 +1145,8 @@ def assemble_yolo_dataset(
     logging.info(
         f"assemble_yolo_dataset: per-drop cap={cap} "
         f"({n_under_budget} drop(s) under budget; "
-        f"{n_interesting_sampled} drop(s) sampled from interesting only; "
+        f"{n_interesting_sampled} drop(s) trimmed to the cap from their "
+        f"non-dominant frames; "
         f"{n_dom_dropped} dominant-only frame(s) dropped overall; "
         f"{n_extras_uncapped} extras drop(s) bypassed the cap; "
         f"{n_rare_exempt} frame(s) kept as cap-exempt rare). "

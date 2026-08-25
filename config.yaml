@@ -574,6 +574,9 @@ training:
     - Mustelus lenticulatus     # 19  rig: floored into 'fish' at 39 train images, slot held
     - Squalus acanthias         # 20  spiny dogfish: promoted out of Elasmobranchii 2026-08-22
     - bait                      # 21  not a species, last slot on purpose
+    - Anguilliformes            # 22  eels: morays + congers pooled 2026-08-25.
+                                #     Muraenidae (11) and Conger verreauxi (18)
+                                #     keep their seats but are now always empty.
 
   # One canonical class per animal. Applied to every species name BEFORE
   # counting, balancing, flooring, and class-list building. Without this,
@@ -610,12 +613,34 @@ training:
     # 3511, so it has no alias to resolve through and needs naming here.
     # Found 2026-08-22 in KOK_20240219_BUV_KOK_013_01, 1 row.
     Interesting Sighting: fish
-    # Morays: family label is the busy pile (174 boxes).
-    Gymnothorax prionodon: Muraenidae       # 5 vs 174
-    Gymnothorax nubilus: Muraenidae         # tree child, unseen in data yet
-    Gymnothorax obesus: Muraenidae          # tree child, unseen in data yet
-    Gymnothorax prasinus: Muraenidae        # tree child, unseen in data yet
-    Enchelycore ramosa: Muraenidae          # tree child, unseen in data yet
+    # EELS. Morays (Muraenidae) and congers (Congridae) both sit in
+    # Anguilliformes, so this is a real taxon rather than a shape-based
+    # grouping — a conger reported as a moray would be a genuine
+    # misidentification, "an eel" is not. Rationale (2026-08-25):
+    #   * Conger verreauxi has 64 frames and floors into 'fish' on its own,
+    #     so as a separate class it holds nothing.
+    #   * Muraenidae has ~200 frames but is WEAK on its own: recall 0.28-0.34,
+    #     mAP 0.256 across the last three runs.
+    #   * Pooled they are ~264 frames, and "elongate body in a crevice" is a
+    #     more learnable concept than the moray/conger distinction, so the
+    #     merged class may well beat either alone.
+    # Experts keep annotating morays and congers separately in Biigle — this
+    # pooling is training-time only, so species detail survives in the MaxN
+    # CSVs and in reporting. Hagfish (Myxinidae) are deliberately NOT here:
+    # they are class Myxini, not eels at all, and at 200 frames / 0.72 recall
+    # they are already one of the better classes.
+    # NOTE: canonicalize_species is a SINGLE dict lookup, not transitive
+    # (`.get(resolved, resolved)`), so every child must point at Anguilliformes
+    # DIRECTLY. Pointing them at Muraenidae would stop there and never arrive.
+    Muraenidae: Anguilliformes              # ~200 frames, weak alone
+    Conger verreauxi: Anguilliformes        # 64 frames, floors into 'fish' alone
+    Conger wilsoni: Anguilliformes          # 1 drop
+    Ophisurus serpens: Anguilliformes       # snake eel, tree child, unseen in data yet
+    Gymnothorax prionodon: Anguilliformes   # repointed from Muraenidae 2026-08-25
+    Gymnothorax nubilus: Anguilliformes     # tree child, unseen in data yet
+    Gymnothorax obesus: Anguilliformes      # tree child, unseen in data yet
+    Gymnothorax prasinus: Anguilliformes    # tree child, unseen in data yet
+    Enchelycore ramosa: Anguilliformes      # tree child, unseen in data yet
     # Triplefins: common triplefin is the busy pile (111 boxes).
     Tripterygiidae: Forsterygion lapillum   # 47 vs 111; species pile dominates
     Forsterygion varium: Forsterygion lapillum     # tree child, unseen in data yet
@@ -626,18 +651,6 @@ training:
     Mullidae: Upeneichthys lineatus         # 1 vs 48; species pile dominates
     Upeneus francisi: Upeneichthys lineatus        # tree child, unseen in data yet
     Parupeneus spilurus: Upeneichthys lineatus     # tree child, unseen in data yet
-    # Congers. Southern (verreauxi) is the busy pile at 17 drops / 64 frames;
-    # Cape (wilsoni) has 1 drop. On 2026-08-24 BOTH still fell under the class
-    # floor after capping and the val split, so the tree was carrying two named
-    # classes that each held nothing — the worst of both worlds. Pooled they are
-    # ~70 frames, still short of the 50 TRAIN-image floor once val is taken, so
-    # this is for correctness (one animal, one class) rather than an expectation
-    # that congers become trainable. Unlike the Gymnothorax and Forsterygion
-    # entries above, these are two species an expert can genuinely tell apart,
-    # so this knowingly trades species precision for not splitting the pile —
-    # same accepted tradeoff as the sibling-species entries. Revisit when
-    # verreauxi alone clears the floor.
-    Conger wilsoni: Conger verreauxi        # 1 drop vs 17
     # Sharks without enough data pool as "shark, not otherwise classified" —
     # the fish-bucket pattern one level down. Carpet shark (Cephaloscyllium,
     # 226 frames) is strong enough to stand alone and is deliberately NOT
