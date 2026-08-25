@@ -52,7 +52,6 @@ module load FFmpeg/5.1.1-GCC-11.3.0
 # Activate your virtual environment
 source /nesi/project/wildlife03546/kso_venv_0627/bin/activate
 
-
 # `aws` lives at /opt/nesi/bin and is on PATH in LOGIN shells only. Without this
 # the end-of-run S3 sync dies with "No such file or directory: 'aws'" after all
 # the work is done (run 8598080, 2026-08-23).
@@ -65,8 +64,6 @@ python -c "import torch, sys; ok = torch.cuda.is_available(); print('GPU:', torc
 
 # Change to script directory
 cd /nesi/project/wildlife03546/spyfish-aotearoa-toolkit
-
-
 
 if [ -n "${SURVEY}" ]; then
     echo "=== ML run for survey ${SURVEY} ==="

@@ -141,6 +141,17 @@ def prepare_from_annotations(
             )
             df = df[~drop_rows]
 
+    excluded_species = config.training_excluded_species
+    if excluded_species:
+        drop_rows = df["ScientificName"].isin(excluded_species)
+        if drop_rows.any():
+            logging.info(
+                f"Excluded {int(drop_rows.sum())} MaxN row(s) of "
+                f"{sorted(df.loc[drop_rows, 'ScientificName'].unique())} "
+                "per training.excluded_species."
+            )
+            df = df[~drop_rows]
+
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
 
@@ -907,6 +918,95 @@ def _sample_background_frames(
     return out
 
 
+def select_frames_per_drop(
+    drops: Set[str],
+    species_labels_dir: Path,
+    extras_set: Set[str],
+    dominant_class_ids: Set[int],
+    rare_class_ids: Set[int],
+    cap: int,
+    rng: random.Random,
+) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]], Dict[str, int]]:
+    """Choose which frames of each drop enter the dataset.
+
+    Four buckets per drop, in priority order:
+
+    * ``rare``  - holds a species in ``rare_class_ids``. Kept unconditionally and
+      does NOT consume the cap. The cap exists to stop one deployment's redundant
+      frames dominating, and a scarce species' frames are the opposite of
+      redundant. Taking more real frames of the same animal (different positions,
+      different individuals) beats duplicating one frame, which only adds
+      memorisation pressure.
+    * ``interesting`` - holds some non-dominant species. Sampled down to ``cap``.
+    * ``dominant_only`` - only ``dominant_species`` (blue cod). Fills whatever
+      cap budget is left, so these go first when trimming.
+    * ``background`` - empty .txt. Returned separately; the train-split share is
+      decided globally by ``background_ratio``.
+
+    Extras bypass the cap entirely: externally curated bulk imports where every
+    annotated frame is high-signal.
+
+    Returns ``(frame_filter, background_by_drop, stats)``.
+    """
+    frame_filter: Dict[str, Set[str]] = {}
+    background_by_drop: Dict[str, List[str]] = {}
+    stats = {
+        "dom_dropped": 0,
+        "interesting_sampled": 0,
+        "under_budget": 0,
+        "extras_uncapped": 0,
+        "rare_exempt": 0,
+    }
+
+    for drop_id in sorted(drops):
+        drop_lbl_dir = species_labels_dir / drop_id
+        if not drop_lbl_dir.is_dir():
+            continue
+
+        rare: List[str] = []
+        interesting: List[str] = []
+        dominant_only: List[str] = []
+        background: List[str] = []
+        for txt in drop_lbl_dir.glob("*.txt"):
+            cls_ids = set(_iter_class_ids(txt))
+            if not cls_ids:
+                background.append(txt.stem)
+            elif cls_ids & rare_class_ids:
+                rare.append(txt.stem)
+            elif cls_ids <= dominant_class_ids:
+                dominant_only.append(txt.stem)
+            else:
+                interesting.append(txt.stem)
+        if background:
+            background_by_drop[drop_id] = background
+        stats["rare_exempt"] += len(rare)
+
+        if drop_id in extras_set:
+            kept = set(rare) | set(interesting) | set(dominant_only)
+            stats["extras_uncapped"] += 1
+        else:
+            total = len(interesting) + len(dominant_only)
+            if total <= cap:
+                kept = set(rare) | set(interesting) | set(dominant_only)
+                stats["under_budget"] += 1
+            elif len(interesting) >= cap:
+                kept = set(rare) | set(rng.sample(interesting, cap))
+                stats["dom_dropped"] += len(dominant_only)
+                stats["interesting_sampled"] += 1
+            else:
+                budget = cap - len(interesting)
+                kept = (
+                    set(rare)
+                    | set(interesting)
+                    | set(rng.sample(dominant_only, budget))
+                )
+                stats["dom_dropped"] += len(dominant_only) - budget
+
+        frame_filter[drop_id] = kept
+
+    return frame_filter, background_by_drop, stats
+
+
 def assemble_yolo_dataset(
     train_drops: List[str],
     val_drops: List[str],
@@ -985,57 +1085,55 @@ def assemble_yolo_dataset(
     rng = random.Random(config.training_split_seed)  # None = system entropy
     extras_set = set(extra_drops or [])
 
-    frame_filter: Dict[str, Set[str]] = {}
-    background_by_drop: Dict[str, List[str]] = {}
-    n_dom_dropped = 0
-    n_interesting_sampled = 0
-    n_under_budget = 0
-    n_extras_uncapped = 0
+    # Which classes are scarce enough that their frames should never be thinned.
+    # Counted corpus-wide (frames, not boxes, matching the class floor) in one
+    # pre-pass so the decision is a property of the dataset rather than of
+    # whichever drop we happen to be looking at.
+    rare_below = config.training_cap_exempt_rare_below_frames
+    rare_class_ids: Set[int] = set()
+    if rare_below:
+        frames_per_class: Dict[int, int] = {}
+        for drop_id in sorted(set(train_drops) | set(val_drops) | set(test_drops)):
+            d = species_labels_dir / drop_id
+            if not d.is_dir():
+                continue
+            for txt in d.glob("*.txt"):
+                for cid in set(_iter_class_ids(txt)):
+                    frames_per_class[cid] = frames_per_class.get(cid, 0) + 1
+        rare_class_ids = {
+            cid
+            for cid, n in frames_per_class.items()
+            if n < rare_below and cid not in dominant_class_ids
+        }
+        if rare_class_ids:
+            logging.info(
+                f"assemble_yolo_dataset: cap-exempt rare classes (<{rare_below} "
+                f"frames): "
+                f"{sorted(class_names[c] for c in rare_class_ids if c < len(class_names))}"
+            )
 
-    for drop_id in sorted(set(train_drops) | set(val_drops) | set(test_drops)):
-        drop_lbl_dir = species_labels_dir / drop_id
-        if not drop_lbl_dir.is_dir():
-            continue
-
-        interesting: List[str] = []
-        dominant_only: List[str] = []
-        background: List[str] = []
-        for txt in drop_lbl_dir.glob("*.txt"):
-            cls_ids = set(_iter_class_ids(txt))
-            if not cls_ids:
-                background.append(txt.stem)  # empty .txt, background candidate
-            elif cls_ids <= dominant_class_ids:
-                dominant_only.append(txt.stem)
-            else:
-                interesting.append(txt.stem)
-        if background:
-            background_by_drop[drop_id] = background
-
-        if drop_id in extras_set:
-            kept = set(interesting) | set(dominant_only)
-            n_extras_uncapped += 1
-        else:
-            total = len(interesting) + len(dominant_only)
-            if total <= cap:
-                kept = set(interesting) | set(dominant_only)
-                n_under_budget += 1
-            elif len(interesting) >= cap:
-                kept = set(rng.sample(interesting, cap))
-                n_dom_dropped += len(dominant_only)
-                n_interesting_sampled += 1
-            else:
-                budget = cap - len(interesting)
-                kept = set(interesting) | set(rng.sample(dominant_only, budget))
-                n_dom_dropped += len(dominant_only) - budget
-
-        frame_filter[drop_id] = kept
+    frame_filter, background_by_drop, _stats = select_frames_per_drop(
+        drops=set(train_drops) | set(val_drops) | set(test_drops),
+        species_labels_dir=species_labels_dir,
+        extras_set=extras_set,
+        dominant_class_ids=dominant_class_ids,
+        rare_class_ids=rare_class_ids,
+        cap=cap,
+        rng=rng,
+    )
+    n_dom_dropped = _stats["dom_dropped"]
+    n_interesting_sampled = _stats["interesting_sampled"]
+    n_under_budget = _stats["under_budget"]
+    n_extras_uncapped = _stats["extras_uncapped"]
+    n_rare_exempt = _stats["rare_exempt"]
 
     logging.info(
         f"assemble_yolo_dataset: per-drop cap={cap} "
         f"({n_under_budget} drop(s) under budget; "
         f"{n_interesting_sampled} drop(s) sampled from interesting only; "
         f"{n_dom_dropped} dominant-only frame(s) dropped overall; "
-        f"{n_extras_uncapped} extras drop(s) bypassed the cap). "
+        f"{n_extras_uncapped} extras drop(s) bypassed the cap; "
+        f"{n_rare_exempt} frame(s) kept as cap-exempt rare). "
         f"Dominant species deprioritized: {sorted(dominant_names) if dominant_names else 'none'}"
     )
 
@@ -1240,9 +1338,7 @@ def prune_unpinned_empty_classes(
         for txt in split_dir.glob("*.txt"):
             used.update(_iter_class_ids(txt))
 
-    prune_ids = {
-        cid for cid in range(roster_size, len(class_names)) if cid not in used
-    }
+    prune_ids = {cid for cid in range(roster_size, len(class_names)) if cid not in used}
     if not prune_ids:
         logging.info(
             "prune_unpinned_empty_classes: no empty unpinned classes to remove"
@@ -1260,9 +1356,10 @@ def prune_unpinned_empty_classes(
     )
     shifted = {o: n for o, n in id_remap.items() if o != n}
     if shifted:
+        moves = {class_names[o]: f"{o}->{n}" for o, n in shifted.items()}
         logging.info(
             f"prune_unpinned_empty_classes: {len(shifted)} surviving extra(s) "
-            f"renumbered: { {class_names[o]: f'{o}->{n}' for o, n in shifted.items()} }"
+            f"renumbered: {moves}"
         )
         for split in ("train", "val", "test"):
             split_dir = species_dir / "labels" / split

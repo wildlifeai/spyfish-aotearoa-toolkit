@@ -27,10 +27,5 @@
 # TON_20211026_BUV_TON_050_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080
 # TON_20211026_BUV_TON_053_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080
 # TON_20211026_BUV_TON_071_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080
-# UoA legacy BUV (Underwood & Jeffs, Jan 2022), not Spyfish deployments: different
-# sites, rig, and label vocabulary, and the filenames are UoA-format
-# (ESK_X_B_20220118_PM_v003_f030900_t000515.51s.jpg), not DropIDs. They belong to
-# the UoA ML->Biigle workflow, not to the Spyfish species model.
-# 30184 leaked 103 frames (53 MOT + 50 ESK) into the 2026-08-22 training set.
-volume_30196   # 348 UoA-named frames
-volume_30184   # 287 UoA-named frames (169 ESK + 118 MOT)
+volume_30196   # UoA
+volume_30184   # UoA

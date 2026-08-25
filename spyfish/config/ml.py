@@ -342,6 +342,16 @@ class MLConfig(BaseConfig):
         )
 
     @property
+    def training_cap_exempt_rare_below_frames(self) -> int:
+        """Frames holding a species this rare (corpus-wide frame count) skip the
+        per-drop cap. 0 disables."""
+        return int(
+            get_required(
+                self.training_config, "cap_exempt_rare_below_frames", "training"
+            )
+        )
+
+    @property
     def training_val_min_boxes_per_species(self) -> int:
         """Absolute floor on a species' val boxes, on top of val_balance_pct.
 
@@ -350,9 +360,7 @@ class MLConfig(BaseConfig):
         floor cannot drag extra drops into val.
         """
         return int(
-            get_required(
-                self.training_config, "val_min_boxes_per_species", "training"
-            )
+            get_required(self.training_config, "val_min_boxes_per_species", "training")
         )
 
     @property

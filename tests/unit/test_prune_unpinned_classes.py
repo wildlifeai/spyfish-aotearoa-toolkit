@@ -27,7 +27,8 @@ def test_prunes_only_empty_extras(tmp_path):
     names = ROSTER + ["Zeus faber", "Thyrsites atun"]
     # id 1 (roster) and both extras have no boxes; only the extras may be cut.
     species_dir = _dataset(
-        tmp_path, names,
+        tmp_path,
+        names,
         {"train": [["0 .5 .5 .1 .1", "2 .4 .4 .1 .1"], ["3 .2 .2 .1 .1"]]},
     )
 
@@ -41,8 +42,9 @@ def test_prunes_only_empty_extras(tmp_path):
     # Roster ids must be untouched - that is the whole point of the frozen list.
     assert (species_dir / "labels" / "train").glob("*.txt")
     lines = sorted(
-        l for f in (species_dir / "labels" / "train").glob("*.txt")
-        for l in f.read_text().splitlines()
+        line
+        for f in (species_dir / "labels" / "train").glob("*.txt")
+        for line in f.read_text().splitlines()
     )
     assert lines == ["0 .5 .5 .1 .1", "2 .4 .4 .1 .1", "3 .2 .2 .1 .1"]
 
@@ -51,7 +53,8 @@ def test_surviving_extra_is_renumbered_and_labels_follow(tmp_path):
     """A populated extra shifts down into the gap, and its labels shift with it."""
     names = ROSTER + ["Zeus faber", "Thyrsites atun"]  # ids 4, 5
     species_dir = _dataset(
-        tmp_path, names,
+        tmp_path,
+        names,
         {"train": [["5 .5 .5 .1 .1", "0 .1 .1 .1 .1"]]},  # only id 5 has data
     )
 
@@ -60,8 +63,9 @@ def test_surviving_extra_is_renumbered_and_labels_follow(tmp_path):
     assert pruned == ["Zeus faber"]
     assert class_names == ROSTER + ["Thyrsites atun"]
     lines = sorted(
-        l for f in (species_dir / "labels" / "train").glob("*.txt")
-        for l in f.read_text().splitlines()
+        line
+        for f in (species_dir / "labels" / "train").glob("*.txt")
+        for line in f.read_text().splitlines()
     )
     assert lines == ["0 .1 .1 .1 .1", "4 .5 .5 .1 .1"]  # 5 -> 4, roster 0 stays
 
@@ -71,7 +75,8 @@ def test_val_only_class_is_kept(tmp_path):
     would leave those labels pointing at another species."""
     names = ROSTER + ["Zeus faber"]
     species_dir = _dataset(
-        tmp_path, names,
+        tmp_path,
+        names,
         {"train": [["0 .5 .5 .1 .1"]], "val": [["4 .5 .5 .1 .1"]]},
     )
 

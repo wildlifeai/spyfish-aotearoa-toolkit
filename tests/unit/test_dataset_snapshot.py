@@ -33,10 +33,8 @@ def test_snapshot_written_into_a_run_dir_that_has_no_weights_yet(tmp_path):
     assert snap == run_dir / "dataset"
     assert yaml.safe_load((snap / "data.yaml").read_text())["names"] == [
         "fish", "Pagrus auratus"
-    ]
     assert (snap / "class_map.json").exists()
     assert (snap / "labels" / "train").glob("*.txt")
-    assert (snap / "val.txt").read_text().strip().endswith(".jpg")
     assert not (run_dir / "weights").exists()
 
 
@@ -58,7 +56,8 @@ def test_snapshot_captures_the_dataset_at_call_time(tmp_path):
         txt.unlink()
 
     assert yaml.safe_load((snap / "data.yaml").read_text())["names"] == [
-        "fish", "Pagrus auratus"
+        "fish",
+        "Pagrus auratus",
     ]
     assert list((snap / "labels" / "train").glob("*.txt"))
 

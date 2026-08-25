@@ -120,7 +120,6 @@ def evaluate_model(
     return result
 
 
-
 def _class_list_mismatch(model_path: str, data_yaml: str) -> Optional[str]:
     """Describe how a checkpoint's class list differs from a dataset's, or None.
 
@@ -148,9 +147,13 @@ def _class_list_mismatch(model_path: str, data_yaml: str) -> Optional[str]:
     ]
     parts = [f"model has {len(model_names)} classes, dataset has {len(data_map)}."]
     if missing:
-        parts.append(f"{len(missing)} dataset id(s) unknown to the model, e.g. {missing[:3]}.")
+        parts.append(
+            f"{len(missing)} dataset id(s) unknown to the model, e.g. {missing[:3]}."
+        )
     if renamed:
-        parts.append(f"{len(renamed)} id(s) name a different species, e.g. {renamed[:3]}.")
+        parts.append(
+            f"{len(renamed)} id(s) name a different species, e.g. {renamed[:3]}."
+        )
     return " ".join(parts)
 
 

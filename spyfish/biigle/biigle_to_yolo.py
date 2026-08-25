@@ -569,7 +569,6 @@ def biigle_to_yolo(
     return class_map
 
 
-
 def _write_background_labels(drop_dir: Path, labels_dir: Path) -> int:
     """Write an empty .txt for every reviewed frame the report never mentioned.
 
@@ -589,8 +588,10 @@ def _write_background_labels(drop_dir: Path, labels_dir: Path) -> int:
 
     Returns the number of background labels written.
     """
-    universe_path = drop_dir / "annotations" / (
-        f"{drop_dir.name}{config.biigle_expert_universe_suffix}"
+    universe_path = (
+        drop_dir
+        / "annotations"
+        / (f"{drop_dir.name}{config.biigle_expert_universe_suffix}")
     )
     if not universe_path.exists():
         return 0

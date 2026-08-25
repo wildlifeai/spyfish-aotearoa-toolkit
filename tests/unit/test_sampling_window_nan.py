@@ -36,9 +36,9 @@ def test_valid_window_still_passes():
 def test_the_nan_semantics_that_caused_this():
     """Documents why each guard failed, so nobody 'simplifies' them back."""
     nan = float("nan")
-    assert math.isnan(float(nan))      # float() does not raise on NaN
-    assert not (nan == 0)              # so sampling_start == 0 never fires
-    assert not (nan < 1800)            # so the short-window rule never fires
-    assert bool(nan)                   # so `if sampling_end` passes
+    assert math.isnan(float(nan))  # float() does not raise on NaN
+    assert not (nan == 0)  # so sampling_start == 0 never fires
+    assert not (nan < 1800)  # so the short-window rule never fires
+    assert bool(nan)  # so `if sampling_end` passes
     with pytest.raises(ValueError):
-        int(nan)                       # and this is where it finally blows up
+        int(nan)  # and this is where it finally blows up

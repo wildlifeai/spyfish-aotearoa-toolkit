@@ -300,11 +300,7 @@ def balance_val_drops(
             for s, n in total.items()
             if s in target and target[s] > max(1, round(n * val_pct))
         }
-        skipped = sorted(
-            s
-            for s in target
-            if frames_per_species[s] < floor_min_frames
-        )
+        skipped = sorted(s for s in target if frames_per_species[s] < floor_min_frames)
         if skipped:
             logging.info(
                 f"balance_val_drops: floor NOT lifted for {len(skipped)} species "
@@ -312,10 +308,13 @@ def balance_val_drops(
                 f"post-assembly floor): {skipped}"
             )
         if lifted:
+            moves = {
+                s: f"{round(total[s] * val_pct)}->{t}"
+                for s, t in sorted(lifted.items())
+            }
             logging.info(
                 f"balance_val_drops: min_boxes={min_boxes} lifted the val target "
-                f"for {len(lifted)} rare species: "
-                f"{ {s: f'{round(total[s] * val_pct)}->{t}' for s, t in sorted(lifted.items())} }"
+                f"for {len(lifted)} rare species: {moves}"
             )
 
     current: Counter = Counter()

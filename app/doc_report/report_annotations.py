@@ -81,9 +81,18 @@ def render(ctx: dict) -> None:
         f"**{len(by_drop):,} deployments** carry at least one empty review "
         f"({len(empty):,} source-reviews in total)."
     )
+    # Protection status is here for the same reason the reserve name is: an
+    # empty review inside a marine reserve and one in unprotected water are
+    # different findings, and a run of zeros concentrated in one protection
+    # class is worth seeing without re-joining the table by hand.
     meta_cols = [
         c
-        for c in ("link_to_marine_reserve", "site_id", "survey_year")
+        for c in (
+            "link_to_marine_reserve",
+            "protection_status",
+            "site_id",
+            "survey_year",
+        )
         if c in dep.columns
     ]
     table = by_drop.merge(
@@ -106,6 +115,7 @@ def render(ctx: dict) -> None:
                 "those conflicts.",
             ),
             "link_to_marine_reserve": st.column_config.TextColumn("Marine reserve"),
+            "protection_status": st.column_config.TextColumn("Protection"),
             "site_id": st.column_config.TextColumn("SiteID", width="small"),
             "survey_year": st.column_config.NumberColumn(
                 "Year", format="%d", width="small"

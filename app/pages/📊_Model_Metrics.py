@@ -135,10 +135,7 @@ def render_training_curves(results_df: pd.DataFrame) -> None:
         st.line_chart(chart_df)
 
 
-def render_promote_button(
-    model_path: str,
-    model_type: str,
-) -> None:
+def render_promote_button(model_path: str) -> None:
     """Render a promote button that copies the selected model to the local production path."""
     st.divider()
     st.subheader("🚀 Promote Model")
@@ -230,10 +227,6 @@ def main():
     is_local = selected_run.startswith("[local] ")
     run_name = selected_run.replace("[local] ", "")
 
-    # Infer model type from run name (e.g. '20260304_155200_binary' → 'binary')
-    model_type = "binary" if "binary" in run_name else "species"
-    st.sidebar.caption(f"Detected model type: **{model_type}**")
-
     if st.sidebar.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
@@ -296,7 +289,7 @@ def main():
             new_rows = metrics_df[metrics_df["role"] == "new"]
             if not new_rows.empty:
                 new_model_path = str(new_rows["model_path"].iloc[0])
-                render_promote_button(new_model_path, model_type)
+                render_promote_button(new_model_path)
 
     with tab_curves:
         st.header("Training Curves")

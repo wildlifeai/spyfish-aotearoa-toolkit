@@ -4,7 +4,6 @@ val_pct alone is scale-invariant, so it is right for common species and useless
 for rare ones: 8% of Batoidea's 71 boxes is 6, and 5 val boxes is what the
 2026-08-23 run actually produced for it.
 """
-from pathlib import Path
 
 from spyfish.ml.training.split_data import balance_val_drops
 
@@ -73,12 +72,21 @@ def test_floor_does_not_disturb_a_common_species(tmp_path):
     """A species already above the floor keeps its percentage target."""
     root, drops = _rare_corpus(tmp_path)
     _, val_without, _ = balance_val_drops(
-        root, ["fish", "Pagrus auratus"], drops, val_pct=0.08, tolerance=0.2,
+        root,
+        ["fish", "Pagrus auratus"],
+        drops,
+        val_pct=0.08,
+        tolerance=0.2,
         max_share=0.4,
     )
     _, val_with, _ = balance_val_drops(
-        root, ["fish", "Pagrus auratus"], drops, val_pct=0.08, tolerance=0.2,
-        max_share=0.4, min_boxes=4,
+        root,
+        ["fish", "Pagrus auratus"],
+        drops,
+        val_pct=0.08,
+        tolerance=0.2,
+        max_share=0.4,
+        min_boxes=4,
     )
     # Pagrus has 400 boxes; 8% = 32, already far above a floor of 4.
     assert len(val_with) == len(val_without)
@@ -101,12 +109,24 @@ def test_floor_skips_species_the_class_floor_will_merge(tmp_path):
     drops = sorted(layout)
 
     _, val_lifted, _ = balance_val_drops(
-        root, species, drops, val_pct=0.08, tolerance=0.2, max_share=0.4,
-        min_boxes=20, floor_min_frames=50,
+        root,
+        species,
+        drops,
+        val_pct=0.08,
+        tolerance=0.2,
+        max_share=0.4,
+        min_boxes=20,
+        floor_min_frames=50,
     )
     _, val_all, _ = balance_val_drops(
-        root, species, drops, val_pct=0.08, tolerance=0.2, max_share=0.4,
-        min_boxes=20, floor_min_frames=0,   # no guard: lift everything
+        root,
+        species,
+        drops,
+        val_pct=0.08,
+        tolerance=0.2,
+        max_share=0.4,
+        min_boxes=20,
+        floor_min_frames=0,  # no guard: lift everything
     )
     # Without the guard the doomed species drags in extra drops.
     assert len(val_lifted) < len(val_all)

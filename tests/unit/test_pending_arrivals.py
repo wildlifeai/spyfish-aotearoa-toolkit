@@ -4,7 +4,8 @@ Guards the dead state found 2026-08-23: ml_pending + video_presence=present
 matched neither branch of the old (absent, archived) filter, so those drops
 were never advanced and never processed.
 """
-from unittest.mock import MagicMock, patch
+
+from unittest.mock import patch
 
 from spyfish.config.base import MlStatus, VideoPresence
 from spyfish.orchestrator.ingest import check_pending_arrivals

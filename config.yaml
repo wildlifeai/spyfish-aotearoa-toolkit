@@ -206,7 +206,7 @@ ml_inference:
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
-  confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
+  confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection AND every box uploaded to BIIGLE (build_coco_from_raw_csv applies no further confidence filter, it just takes the raw row nearest the frame time). So a box visible in BIIGLE is a detection at or above THIS value, currently 0.25. NOTE 2026-08-24: this comment previously read "Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review" while the value sat at 0.25 — either the change was reverted or never applied. Decide whether 0.15 was intended before trusting the recall-leaning rationale.
   maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
   # Persistence filter (2026-08-21): a count only sets MaxN if sustained across a rolling
   # window of sampled frames; single-frame spikes are recorded (RawMaxInterval/SpikeFlag
@@ -626,6 +626,18 @@ training:
     Mullidae: Upeneichthys lineatus         # 1 vs 48; species pile dominates
     Upeneus francisi: Upeneichthys lineatus        # tree child, unseen in data yet
     Parupeneus spilurus: Upeneichthys lineatus     # tree child, unseen in data yet
+    # Congers. Southern (verreauxi) is the busy pile at 17 drops / 64 frames;
+    # Cape (wilsoni) has 1 drop. On 2026-08-24 BOTH still fell under the class
+    # floor after capping and the val split, so the tree was carrying two named
+    # classes that each held nothing — the worst of both worlds. Pooled they are
+    # ~70 frames, still short of the 50 TRAIN-image floor once val is taken, so
+    # this is for correctness (one animal, one class) rather than an expectation
+    # that congers become trainable. Unlike the Gymnothorax and Forsterygion
+    # entries above, these are two species an expert can genuinely tell apart,
+    # so this knowingly trades species precision for not splitting the pile —
+    # same accepted tradeoff as the sibling-species entries. Revisit when
+    # verreauxi alone clears the floor.
+    Conger wilsoni: Conger verreauxi        # 1 drop vs 17
     # Sharks without enough data pool as "shark, not otherwise classified" —
     # the fish-bucket pattern one level down. Carpet shark (Cephaloscyllium,
     # 226 frames) is strong enough to stand alone and is deliberately NOT
@@ -679,6 +691,22 @@ training:
   retrain_min_improvement_pct: 2.0
   # Per-drop frame filter (applied in assemble_yolo_dataset)
   cap_frames_per_drop: 50                # max frames per drop in the assembled YOLO dataset (extras bypass this cap). BUV is a fixed camera, so frames within a drop share one background + repeat individuals; beyond ~50 they're largely redundant (lowered 100→50, 2026-08-21). dominant_species frames are dropped first, so blue-cod-only frames go before multi-species ones.
+  # Frames holding a species with fewer than this many frames CORPUS-WIDE are
+  # exempt from cap_frames_per_drop. `dominant_species` already drops blue-cod-
+  # only frames first, but once a drop has more than `cap` frames that contain
+  # SOME non-dominant species, the sampler thins them at random — so a
+  # deployment's only lobster frames compete on equal terms with its snapper
+  # frames and can be thrown away. Exempting them keeps real, varied frames of
+  # the scarce animal (different positions, different individuals) rather than
+  # duplicating one frame, which only adds memorisation pressure.
+  # Frame counts on the 2026-08-24 corpus: Parapercis 5432, Pseudolabrus 2287,
+  # Pagrus 1876, Notolabrus celidotus 963, fish 722, Jasus 514, Nemadactylus
+  # 282, Scorpis 273, Cephaloscyllium 247, Triglidae 214, Myxinidae 201,
+  # Muraenidae 200, Squalus 176, Forsterygion 146, Batoidea 71, Conger 64.
+  # 600 is set to just include rock lobster (514), a reporting-priority species
+  # sitting at mAP 0.199. Raise it and blue cod eventually qualifies, which
+  # would defeat the cap entirely. 0 disables the exemption.
+  cap_exempt_rare_below_frames: 600
   dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
     - "Parapercis colias"                # blue cod — overrepresented (~59% of all boxes); drop blue-cod-only frames first so the cap keeps frames with rarer species
     # - "Pagrus auratus"                   # snapper — enable if it starts dominating too

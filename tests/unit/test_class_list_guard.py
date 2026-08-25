@@ -53,7 +53,9 @@ def test_same_length_different_order_is_caught(mock_yolo, tmp_path):
 
 @patch("spyfish.ml.training.evaluate.evaluate_model")
 @patch("ultralytics.YOLO")
-def test_compare_skips_and_refuses_promotion_on_mismatch(mock_yolo, mock_eval, tmp_path):
+def test_compare_skips_and_refuses_promotion_on_mismatch(
+    mock_yolo, mock_eval, tmp_path
+):
     """A mismatch must not promote, and must never reach model.val()."""
     mock_yolo.return_value = _model(ROSTER)
     prod = tmp_path / "prod.pt"
