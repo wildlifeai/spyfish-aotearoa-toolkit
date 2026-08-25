@@ -280,7 +280,6 @@ def balance_val_drops(
         for s in c:
             drops_per_species[s] += 1
     single_source = {s for s, n in drops_per_species.items() if n <= 1}
-
     # Floor first, then clamp to the most val boxes max_share will ever allow,
     # so every target in this dict is actually reachable.
     def _target(name: str, n: int) -> int:

@@ -6,7 +6,6 @@ training. The corpus held 1 background frame in 5054 while the frame selector
 was deliberately picking "Blind (False Negative Check)" frames for review
 (found 2026-08-24).
 """
-
 import pandas as pd
 
 from spyfish.biigle.biigle_to_yolo import _write_background_labels

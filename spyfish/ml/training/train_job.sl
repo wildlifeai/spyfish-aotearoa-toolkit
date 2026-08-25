@@ -1,7 +1,7 @@
 #!/bin/bash -e
 #SBATCH --job-name=spyfish_train
 #SBATCH --account=wildlife03546
-#SBATCH --time=24:00:00
+#SBATCH --time=7:00:00
 
 # GPU choice (billing weight per GPU-hour in brackets — sinfo TRESBillingWeights):
 #   genoa: l4 [20], pro_6000 [130], h100 [200]; milan: a100 [90]. No a100 in genoa.

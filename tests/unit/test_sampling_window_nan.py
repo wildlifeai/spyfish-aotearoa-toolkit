@@ -5,7 +5,6 @@ True - so a NaN slipped past the ingest parse guard, past all three window
 rules, and died on int(nan) inside ML hours later. 1046 deployments were
 ingest_status=ok with no sampling window this way (2026-08-23).
 """
-
 import math
 
 import pytest
