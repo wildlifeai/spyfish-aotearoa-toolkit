@@ -71,6 +71,37 @@ class BiigleConfig(BaseConfig):
         )
 
     @property
+    def expert_drop_volume_name_template(self) -> str:
+        """Name template for per-drop expert-review volumes (bare drop_id)."""
+        return get_required(
+            self.biigle_section, "expert_drop_volume_name_template", "biigle"
+        )
+
+    @property
+    def training_survey_volume_name_template(self) -> str:
+        """Name template for survey-pooled training volumes (bare survey_id)."""
+        return get_required(
+            self.biigle_section, "training_survey_volume_name_template", "biigle"
+        )
+
+    @property
+    def scale_bar_label_name(self) -> str:
+        """BIIGLE label marking the in-frame physical scale bar — an external
+        contract with the label tree, see config.yaml."""
+        return get_required(self.biigle_section, "scale_bar_label_name", "biigle")
+
+    @property
+    def scale_bar_length_cm(self) -> float:
+        """Real-world length of the in-frame scale bar the field protocol uses."""
+        return float(get_required(self.biigle_section, "scale_bar_length_cm", "biigle"))
+
+    @property
+    def rect_shrink_safety(self) -> float:
+        """Per-axis AABB shrink fraction for rotated-Rectangle → YOLO boxes —
+        see config.yaml for the geometry rationale."""
+        return float(get_required(self.biigle_section, "rect_shrink_safety", "biigle"))
+
+    @property
     def biigle_require_done_label(self) -> bool:
         """When True, --biigle-sync gates on the Done-label whole-file check.
         When False, every volume awaiting sync is ingested (project membership
@@ -137,6 +168,33 @@ class BiigleConfig(BaseConfig):
                 self.biigle_section, "workflow_tree_keep_labels", "biigle"
             ).items()
         }
+
+    @property
+    def selection_reason_include_species(self) -> bool:
+        """Whether a MaxN / Uncertain frame also gets its species image label.
+
+        Off means only the "Pick" reason label is attached. On roughly doubles
+        the image-label POST count, since most such frames earn two labels.
+        """
+        return bool(
+            get_required(
+                self.biigle_section, "selection_reason_include_species", "biigle"
+            )
+        )
+
+    @property
+    def selection_reason_label_ids(self) -> dict:
+        """Canonical selection-reason key → Biigle whole-image label ID.
+
+        Buckets whose label has not been created in Biigle yet are configured
+        as `null` and dropped here, so callers see "no label for this bucket"
+        rather than a None to guard against. An empty dict therefore means the
+        feature is simply off, which is the state before the labels exist.
+        """
+        raw = get_required(self.biigle_section, "selection_reason_labels", "biigle")
+        if not raw:
+            return {}
+        return {str(k): int(v) for k, v in raw.items() if v is not None}
 
     @property
     def request_timeout_secs(self) -> int:

@@ -5,17 +5,26 @@
 
 # GPU choice (billing weight per GPU-hour in brackets — sinfo TRESBillingWeights):
 #   genoa: l4 [20], pro_6000 [130], h100 [200]; milan: a100 [90]. No a100 in genoa.
-# l4 (24GB) is ample for imgsz=640 batch=16 and the cheapest option.
+# l4 (22.5GB) OOMs at imgsz=640 batch=16 AND batch=32 and silently falls back to
+# batch 8 (~3.4x slower per epoch, worse convergence) - do not train on it.
+# pro_6000 is Blackwell/sm_120 and cannot run this venv's torch 2.5.1+cu124.
+# h100 chosen 2026-08-24: sbatch --test-only put its start 6.5 h earlier than
+# a100 (02:07 vs 08:45) - milan had 218 a100 jobs queued on 16 GPUs, genoa 19
+# h100 jobs on 6 - and it is faster once running, so 200 vs 90 billing is close
+# to cost-neutral. Swap the blocks below to move between GPUs.
 #SBATCH --partition=genoa
-#SBATCH --gpus-per-node=l4:1
+#SBATCH --gpus-per-node=h100:1
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.err
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 
 
-#a SBATCH --partition=genoa
-#a SBATCH --gpus-per-node=h100:1
+##SBATCH --partition=genoa
+##SBATCH --gpus-per-node=l4:1
+
+##SBATCH --partition=milan
+##SBATCH --gpus-per-node=a100:1
 
 # Spyfish Aotearoa training job wrapper.
 #
@@ -31,6 +40,13 @@
 
 
 module purge
+# `module purge` on a zen3/milan node leaves NeSI/zen3 loaded, and that tree
+# carries only Python 3.14/foss-2026, so the 3.10.5 module kso_venv_0627 was
+# built against drops off MODULEPATH and the load below fails with "exists but
+# cannot be loaded as requested". With `#!/bin/bash -e` that kills the job in
+# about a second. Re-adding the mahuika tree fixes milan and is a no-op on
+# genoa, so it stays in regardless of which GPU block is active (2026-08-22).
+module use /opt/nesi/lmod/mahuika
 # module load Python/3.11.6-foss-2023a
 module load Python/3.10.5-gimkl-2022a
 module load CUDA/11.0.2
@@ -54,6 +70,12 @@ cd "${PROJECT_DIR}"
 # var is silently ignored and everything falls back to /tmp.
 export YOLO_CONFIG_DIR="${PROJECT_DIR}/.ultralytics"
 mkdir -p "${YOLO_CONFIG_DIR}"
+
+# `aws` lives at /opt/nesi/bin and is on PATH in LOGIN shells only. The pipeline
+# syncs results to S3 at the END of the run, so without this a 3-hour retrain
+# finishes and then dies on "No such file or directory: 'aws'" with everything
+# already computed (run 8598080, 2026-08-23).
+export PATH=/opt/nesi/bin:$PATH
 
 echo "Starting Spyfish retraining on $(hostname)"
 # python -c "import torch; print('cuda:', torch.cuda.is_available(), '| devices:', torch.cuda.device_count())"

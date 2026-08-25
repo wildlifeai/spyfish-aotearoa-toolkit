@@ -180,22 +180,29 @@ def write_split_txt(
 
 def _per_drop_species_counts(
     labels_staged_dir: Path, species_names: List[str], drops: Set[str]
-) -> Dict[str, Counter]:
-    """``{drop: Counter(species -> box_count)}`` for the given drops.
+) -> Tuple[Dict[str, Counter], Counter]:
+    """``({drop: Counter(species -> box_count)}, Counter(species -> frame_count))``.
 
     Decodes staged-label class IDs straight through ``species_names`` (index ==
     ID, the same unified ordering ``flatten_and_remap_labels`` wrote), no
     class_map.json / data.yaml needed, so it can't drift out of sync the way the
     standalone suggester could.
+
+    Frames are counted in the same pass because the class floor is a FRAME
+    threshold while the val target is a BOX one, and the balancer needs both:
+    lifting a species' val target is wasted effort if the floor is going to
+    merge it into 'fish' after assembly anyway.
     """
     id_to_name = {i: n for i, n in enumerate(species_names)}
     out: Dict[str, Counter] = {}
+    frames: Counter = Counter()
     for drop in drops:
         d = labels_staged_dir / drop
         if not d.is_dir():
             continue
         c: Counter = Counter()
         for txt in d.glob("*.txt"):
+            in_frame = set()
             for line in txt.read_text().splitlines():
                 parts = line.split()
                 if not parts:
@@ -207,9 +214,12 @@ def _per_drop_species_counts(
                 name = id_to_name.get(cid)
                 if name:
                     c[name] += 1
+                    in_frame.add(name)
+            for name in in_frame:
+                frames[name] += 1
         if c:
             out[drop] = c
-    return out
+    return out, frames
 
 
 def balance_val_drops(
@@ -221,6 +231,8 @@ def balance_val_drops(
     force_train: Optional[Set[str]] = None,
     overshoot_weight: float = 0.0,
     max_share: float = 1.0,
+    min_boxes: int = 0,
+    floor_min_frames: int = 0,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Greedy species-balanced val selection (the in-pipeline suggester).
 
@@ -240,9 +252,24 @@ def balance_val_drops(
     adding it would push any multi-source species past this share of its boxes
     in val. Drop-concentrated species then resolve train-heavy (small or zero
     val, logged as under-covered) instead of 77-97% val. 1.0 disables.
+
+    ``min_boxes`` is an absolute floor under each species' target, because
+    ``val_pct`` alone is scale-invariant and so gets rare species badly wrong:
+    8% of blue cod's 22112 boxes is a fine sample, 8% of Batoidea's 71 is 6.
+    The floor is CLAMPED to what ``max_share`` permits, so a species that cannot
+    reach it keeps the smaller feasible target. Without that clamp the greedy
+    chases an unreachable target and keeps pulling drops into val until no
+    feasible drop is left, emptying train to satisfy one rare class.
+
+    ``floor_min_frames`` (``class_floor_min_images``) stops the floor being
+    spent on species that will not survive to be classes. ``apply_post_assembly_floor``
+    merges anything under that many train frames into 'fish' AFTER assembly, so
+    lifting the val target for, say, Notolabrus fucicola (24 frames) only pulls
+    drops out of train for a class that is about to be deleted. 0 disables the
+    check and lifts every species.
     """
     force_train = set(force_train or set())
-    per_drop = _per_drop_species_counts(
+    per_drop, frames_per_species = _per_drop_species_counts(
         labels_staged_dir, species_names, set(candidate_drops)
     )
 
@@ -253,13 +280,43 @@ def balance_val_drops(
         for s in c:
             drops_per_species[s] += 1
     single_source = {s for s, n in drops_per_species.items() if n <= 1}
+
+    # Floor first, then clamp to the most val boxes max_share will ever allow,
+    # so every target in this dict is actually reachable.
+    def _target(name: str, n: int) -> int:
+        wanted = round(n * val_pct)
+        # Only lift species that will still be a class after the post-assembly
+        # floor; the rest are merged into 'fish' and the val budget is wasted.
+        if min_boxes and frames_per_species[name] >= floor_min_frames:
+            wanted = max(min_boxes, wanted)
+        reachable = int(n * max_share) if max_share < 1.0 else n
+        return max(1, min(wanted, reachable))
+
     target = Counter(
-        {
-            s: max(1, round(n * val_pct))
-            for s, n in total.items()
-            if s not in single_source
-        }
+        {s: _target(s, n) for s, n in total.items() if s not in single_source}
     )
+    if min_boxes:
+        lifted = {
+            s: target[s]
+            for s, n in total.items()
+            if s in target and target[s] > max(1, round(n * val_pct))
+        }
+        skipped = sorted(s for s in target if frames_per_species[s] < floor_min_frames)
+        if skipped:
+            logging.info(
+                f"balance_val_drops: floor NOT lifted for {len(skipped)} species "
+                f"under {floor_min_frames} frames (they merge into 'fish' at the "
+                f"post-assembly floor): {skipped}"
+            )
+        if lifted:
+            moves = {
+                s: f"{round(total[s] * val_pct)}->{t}"
+                for s, t in sorted(lifted.items())
+            }
+            logging.info(
+                f"balance_val_drops: min_boxes={min_boxes} lifted the val target "
+                f"for {len(lifted)} rare species: {moves}"
+            )
 
     current: Counter = Counter()
     val: List[str] = []

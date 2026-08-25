@@ -22,9 +22,6 @@ import pandas as pd
 from spyfish.biigle.biigle_handler import BiigleHandler
 from spyfish.config.wrapper import config
 
-SCALE_BAR_LENGTH_CM = 10
-SCALE_BAR_LABEL_NAME = "Scale bar"
-
 
 class BiigleParser:
     """Parser for downloading and processing Biigle annotation data."""
@@ -216,15 +213,18 @@ class BiigleParser:
         Returns an empty DataFrame if no scale bar is found.
         """
         sizes_df = annotations_df[annotations_df["shape_name"] == "LineString"].copy()
-        if not (sizes_df["label_name"] == SCALE_BAR_LABEL_NAME).any():
+        scale_bar_label = config.scale_bar_label_name
+        if not (sizes_df["label_name"] == scale_bar_label).any():
             return pd.DataFrame()
 
         sizes_df["size_px"] = sizes_df["points"].apply(self.get_size)
-        scale_size = sizes_df[sizes_df["label_name"] == SCALE_BAR_LABEL_NAME][
+        scale_size = sizes_df[sizes_df["label_name"] == scale_bar_label][
             "size_px"
         ].mean()
-        sizes_df["size_cm"] = sizes_df["size_px"] * SCALE_BAR_LENGTH_CM / scale_size
-        sizes_df = sizes_df[sizes_df["label_name"] != SCALE_BAR_LABEL_NAME]
+        sizes_df["size_cm"] = (
+            sizes_df["size_px"] * config.scale_bar_length_cm / scale_size
+        )
+        sizes_df = sizes_df[sizes_df["label_name"] != scale_bar_label]
 
         return (
             sizes_df[

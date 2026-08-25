@@ -12,6 +12,7 @@ import io
 
 import pandas as pd
 
+from spyfish.config.base import NULL_DEPLOYMENT
 from spyfish.orchestrator.legacy_extract import parse_legacy_rows
 
 DROP = "KSF_20240124_BUV_KSF_085_01"
@@ -26,7 +27,11 @@ def _read(csv_text: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(csv_text))
 
 
-def test_all_null_row_is_skipped_and_reported():
+def test_all_null_row_becomes_an_absence_record():
+    """The export's all-NULL marker means "expert reviewed, saw nothing"
+    (2026-08-22), so it becomes a NULL_DEPLOYMENT row rather than being
+    dropped. It must NOT become an ordinary observation: max_interval stays 0
+    and the species is the sentinel, so no chart can read it as a fish."""
     df = _read(
         f"{HEADER}\n"
         f"{PLACEHOLDER_DROP},NULL,NULL,NULL,expert,30,NA\n"
@@ -35,9 +40,18 @@ def test_all_null_row_is_skipped_and_reported():
     annotations, placeholders = parse_legacy_rows(df)
 
     assert placeholders == [PLACEHOLDER_DROP]
-    assert len(annotations) == 1
-    assert annotations[0]["drop_id"] == DROP
-    assert annotations[0]["scientific_name"] == "Pagrus auratus"
+    assert len(annotations) == 2
+
+    absence = next(a for a in annotations if a["drop_id"] == PLACEHOLDER_DROP)
+    assert absence["scientific_name"] == NULL_DEPLOYMENT
+    assert absence["max_interval"] == 0
+    assert absence["time_of_max_seconds"] is None
+    # Scoped to 'legacy' so a re-ingest replaces it instead of duplicating,
+    # and so it can never be mistaken for a BIIGLE-synced expert review.
+    assert absence["external_id"] == "legacy"
+
+    real = next(a for a in annotations if a["drop_id"] == DROP)
+    assert real["scientific_name"] == "Pagrus auratus"
 
 
 def test_normal_row_maps_all_fields():

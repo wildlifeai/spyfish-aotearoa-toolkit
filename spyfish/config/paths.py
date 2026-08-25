@@ -375,6 +375,12 @@ class PathsConfig(BaseConfig):
         )
 
     biigle_expert_raw_suffix = "_biigle_expert_raw.csv"
+    # Every frame of the drop the expert was SHOWN, annotated or not. A Biigle
+    # annotation report lists only frames that HAVE annotations, so on its own it
+    # cannot distinguish "expert looked and saw nothing" from "never uploaded".
+    # Recording the universe at sync time is what lets biigle_to_yolo write an
+    # empty .txt (a YOLO background/negative) for the reviewed-but-empty frames.
+    biigle_expert_universe_suffix = "_biigle_expert_universe.csv"
     biigle_expert_maxn_suffix = "_biigle_expert_maxn.csv"
     # Training-frame volume export (download_training_volume_labels). Kept a
     # SEPARATE artifact from the expert MaxN-review export above: it's a
@@ -387,6 +393,13 @@ class PathsConfig(BaseConfig):
         return (
             self.get_drop_annotations_dir(drop_id)
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_raw_suffix}"
+        )
+
+    def get_biigle_expert_universe_csv_path(self, drop_id: str) -> Path:
+        """Frames of this drop present in its Biigle volume, annotated or not."""
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_universe_suffix}"
         )
 
     def get_biigle_training_raw_csv_path(self, drop_id: str) -> Path:

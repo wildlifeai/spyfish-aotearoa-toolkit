@@ -319,8 +319,9 @@ def render_species_over_time(
         available,
         default=[s for s in DEFAULT_SPECIES if s in available],
         format_func=lambda s: common.get(s, s),
-        help="`fish` is not offered: it is the binary detector's only class, "
-        "not a species. Clear the selection to see every species combined.",
+        help="`fish` is not offered: it is the detector's catch-all for an "
+        "animal it could not name, not a species. Clear the selection to see "
+        "every species combined.",
     )
 
     # With nothing selected, fall back to every species combined rather than an

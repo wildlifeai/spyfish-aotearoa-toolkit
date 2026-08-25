@@ -186,9 +186,9 @@ def test_persistence_zero_reproduces_legacy_output(tmp_path):
     ).all()
 
 
-def test_excluded_class_gets_no_row_and_stays_out_of_union(tmp_path):
+def test_excluded_class_gets_no_row(tmp_path):
     """Bait is a real fish strapped to the canister: it must not appear as its
-    own MaxN row nor inflate the any-fish union."""
+    own MaxN row. Other classes are unaffected."""
     rows = []
     for s in range(9):
         rows += _det(s, "bait", conf=0.9)
@@ -200,35 +200,28 @@ def test_excluded_class_gets_no_row_and_stays_out_of_union(tmp_path):
         persistence_seconds=1.0,
         gap_fill_seconds=0.4,
         exclude_classes=("bait",),
-        union_class="fish",
     )
     names = set(result[config.csv_scientific_name_column])
     assert "bait" not in names
-    assert _row_for(result, "fish")[config.csv_max_interval_column] == 1  # not 2
     assert _row_for(result, "Pagrus auratus")[config.csv_max_interval_column] == 1
 
 
-def test_union_row_counts_all_classes_and_absorbs_catchall(tmp_path):
-    """The union row is the binary model's old MaxN: every non-excluded box in
-    the frame, including the catch-all class's own boxes (which get no
-    separate row)."""
+def test_every_class_keeps_its_own_row(tmp_path):
+    """One row per class per interval, nothing derived: the 'fish' catch-all
+    means "unidentified fish only", and a total-fish figure is a downstream
+    sum, not a pipeline row (decided 2026-08-21, union row deleted)."""
     rows = []
     for s in range(9):
         rows += _det(s, "Pagrus auratus")
         rows += _det(s, "Parapercis colias")
         rows += _det(s, "fish")
 
-    result = _run(
-        tmp_path,
-        rows,
-        persistence_seconds=1.0,
-        gap_fill_seconds=0.4,
-        union_class="fish",
-    )
+    result = _run(tmp_path, rows, persistence_seconds=1.0, gap_fill_seconds=0.4)
     per_interval = result[result[config.csv_maxn_time_seconds_column] < 10]
     names = set(per_interval[config.csv_scientific_name_column])
     assert names == {"Pagrus auratus", "Parapercis colias", "fish"}
-    assert _row_for(per_interval, "fish")[config.csv_max_interval_column] == 3
+    for name in names:
+        assert _row_for(per_interval, name)[config.csv_max_interval_column] == 1
 
 
 def test_spike_only_deployment_ingests_null_row(tmp_path):

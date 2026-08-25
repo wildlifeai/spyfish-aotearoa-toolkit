@@ -93,8 +93,8 @@ known_protection_statuses: &known_protection_statuses
 
 # Reporting / dashboard defaults.
 reporting:
-  # Classes that are NOT species: the binary model's catch-all detection plus
-  # non-animal labels. They must be excluded from any abundance figure by default
+  # Classes that are NOT species: the detector's catch-all for an animal it could
+  # not name, plus non-animal labels. They must be excluded from any abundance figure by default
   # — "fish" alone is ~70% of all recorded MaxN, so leaving it in makes every
   # site and reserve total a measure of detector activity rather than ecology.
   # The unknown/UnID variants come from legacy expert CSVs, which spell
@@ -206,7 +206,7 @@ ml_inference:
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
-  confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection. Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review (recall-leaning).
+  confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection AND every box uploaded to BIIGLE (build_coco_from_raw_csv applies no further confidence filter, it just takes the raw row nearest the frame time). So a box visible in BIIGLE is a detection at or above THIS value, currently 0.25. NOTE 2026-08-24: this comment previously read "Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review" while the value sat at 0.25 — either the change was reverted or never applied. Decide whether 0.15 was intended before trusting the recall-leaning rationale.
   maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
   # Persistence filter (2026-08-21): a count only sets MaxN if sustained across a rolling
   # window of sampled frames; single-frame spikes are recorded (RawMaxInterval/SpikeFlag
@@ -373,6 +373,30 @@ biigle:
   # existing volumes back to surveys by this EXACT rendered name, so changing
   # it orphans pooled volumes created under the old name.
   expert_survey_volume_name_template: "{survey_id} ML"
+  # Sibling templates: per-drop expert volumes and training survey volumes are
+  # named by the bare ID — the project says training vs review, the ID says
+  # survey vs drop, so a suffix only ate characters in a UI that truncates.
+  # Same matching contract as above: db_refresh recognises existing volumes by
+  # these rendered names, so a change orphans volumes created under the old ones.
+  expert_drop_volume_name_template: "{drop_id}"
+  training_survey_volume_name_template: "{survey_id}"
+
+  # Fish-size measurement (biigle_parser.get_fish_sizes): a physical scale bar
+  # of known length is annotated in-frame with this label; every other
+  # annotation's pixel size is converted to cm against it. The label name is an
+  # external contract with the BIIGLE label tree; the length is the field
+  # protocol's actual bar.
+  scale_bar_label_name: "Scale bar"
+  scale_bar_length_cm: 10
+
+  # Per-axis AABB shrink fraction for rotated-Rectangle → YOLO box conversion
+  # (biigle_to_yolo). For a rotated rectangle, the closest non-corner feature to
+  # each AABB edge is one of the 4 edge midpoints (head, tail, back, belly of
+  # the fish silhouette). Shrinking each AABB axis by this fraction of that
+  # midpoint's margin recovers background pixels without clipping anatomy.
+  # 0 disables; 0.5 (half the geometric safety margin) leaves the rest as
+  # buffer against annotator slop and float noise.
+  rect_shrink_safety: 0.5
 
   # Label tree that holds the CMECS substrate / cover labels ("Spyfish CMECS
   # Substrate"). Any annotation whose label belongs to this tree is measured for
@@ -405,6 +429,38 @@ biigle:
     # because it is a labelled fish and therefore useful training data.
     537309: "bait"
 
+  # Whole-IMAGE labels that tell the expert why each frame was picked for review.
+  # Attached per frame after upload; they are image labels, not annotation
+  # labels, so they show on the volume-overview thumbnail, in the annotation
+  # tool's "Image Labels" tab, and in the volume filter, and they never reach
+  # the annotation CSV report that biigle_parser reads.
+  #
+  # They live in the WORKFLOW tree (3375) as children of a "Pick" parent, so
+  # `workflow_tree_keep_labels` above already excludes them from ever becoming a
+  # scientific name — the sync drops workflow-tree labels it was not told to
+  # keep. Do not move them to the species tree (3511): experts pick from it.
+  #
+  # Keys are the canonical buckets in spyfish/biigle/selection_reason.py; only
+  # IDs are stored here, so renaming a label in Biigle's UI needs no code
+  # change. A `null` means "not created in Biigle yet" and those frames are
+  # skipped, which is how the feature rolls out one bucket at a time. Set the
+  # IDs from the output of scripts/create_biigle_pick_labels.py.
+  # When true, a MaxN / Uncertain frame also gets the whole-image label of the
+  # species it is evidence for, alongside its "Pick" reason label. Routed
+  # through the same resolver as the bounding boxes, so the image label and the
+  # box labels always name the species identically. Note this is the species
+  # the frame was PICKED for, not an inventory of the frame: a blue cod peak
+  # frame may also show a spotty, which the boxes label and this does not.
+  selection_reason_include_species: true
+
+  selection_reason_labels:
+    maxn_peak: 691592      # Pick > MaxN peak      — the frame that decided a species' MaxN
+    uncertain_id: 691594   # Pick > Uncertain ID   — high count, low confidence
+    ml_peak: 691593        # Pick > ML peak        — top-K per-species raw detection peak
+    fish_variety: 691595   # Pick > Fish variety   — spans the catch-all's box-size range
+    spot_check: 691596     # Pick > Spot check     — model-blind even sample, catches misses
+    video_start: 691597    # Pick > Video start    — deployment opening health check
+
   # OVERRIDE map only: species scientific/common name (from COCO JSON) → Biigle label ID.
   # This is the FIRST routing source in upload_frames.py and exists to force a model
   # class to a DIFFERENT label than its natural one — e.g. send an uncertain species to
@@ -415,15 +471,16 @@ biigle:
   #   3. 'bait'  → default_bait_label_id
   #   4. 'fish' / unknown → default_fish_label_id
   # Most of the 16-class model (13 species + bait + fish) resolves via sources 2–4
-  # with no entry here. The one exception below is a deliberate override.
-  label_mapping:
-    # Family-level "Gurnards - Triglidae" (was 477460) was deleted from BIIGLE tree 3511,
-    # so the model's `Triglidae` class has no natural label in species_labels.csv. Route it
-    # to the red-gurnard SPECIES label (Chelidonichthys kumu, 477395) — decision 2026-06-03.
-    # NOTE: this merges family-level detections into the species label, so in BIIGLE a
-    # `Triglidae` call is indistinguishable from a `Chelidonichthys kumu` call. Remove this
-    # entry if the "Gurnards - Triglidae" family label is restored in the tree.
-    'Triglidae': 477395
+  # with no entry here. Empty is the healthy state: every model class should
+  # reach its label through species_labels.csv.
+  # 2026-08-22: emptied. The `'Triglidae': 477395` override (routing the family
+  # class to the red-gurnard species label, added 2026-06-03 because the family
+  # label had been deleted from tree 3511) is gone: "Gurnards - Triglidae" is
+  # back in the tree as 691421, so `Triglidae` resolves naturally again and a
+  # family-level call is no longer indistinguishable from a species-level one.
+  # The tree also gained "Rays - Batoidea" (691434) and "Sharks - Elasmobranchii"
+  # (691433), so those two model classes route naturally too and need no entry.
+  label_mapping: {}
   # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
   # on slow or unreachable endpoints.
   request_timeout_secs: 30
@@ -438,7 +495,7 @@ training:
   epochs: 100
   patience: 25
   imgsz: 640
-  batch: 32                     # 16 fits ~16GB GPUs at imgsz=640; drop to 4 if imgsz=1280, raise to 32 on 24GB+ cards
+  batch: 16                     # 16 fits imgsz=640 on a100/40GB+; an L4 (22.5GB) OOMs at 16 and silently falls back to 8 (slower AND worse), so request a100 rather than raising this
   optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
   lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
   dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
@@ -454,7 +511,70 @@ training:
   val_balance_tolerance: 0.2    # stop when the worst-covered species is within this of target (lower = more drops, tighter coverage)
   val_balance_overshoot_weight: 0     # penalty per box a candidate val drop carries beyond any species' deficit (steers the greedy toward the smallest covering drop). 0 = off. Tested 2026-08-20 on the local 34-drop dataset: every weight 0.05-2.0 INCREASED total val leakage (46%->52-55%) — with heavily drop-concentrated species, big drops satisfy many deficits per pick, so whale-grabbing is near-optimal and small-drop preference just adds picks. Re-evaluate on a richer drop pool via scripts/wip/compare_val_overshoot.py before enabling.
   val_balance_max_share: 0.4          # HARD cap: a candidate val drop is refused if adding it would push any multi-source species past this share of its boxes in val. Drop-concentrated species then stay train-heavy (small or zero val, logged) instead of landing 77-97% in val — a species you can't validate can still train; the reverse is useless. Local sweep 2026-08-21: 0.6→0 zero-val species/24% leakage, 0.4→2-3 zero-val/19%, 0.3→14% but eats val for real classes. 1.0 disables; check the balancer's under-covered log line each data prep.
+  # Absolute floor on each species' val allocation, applied on top of
+  # val_balance_pct. A pure percentage is scale-invariant and therefore wrong at
+  # both ends: 8% of blue cod's 22112 boxes is 1769, a fine sample, while 8% of
+  # Batoidea's 71 is 6. Measured 2026-08-23: Batoidea got 5 val boxes, Conger
+  # verreauxi 4, Squalus 15 — the balancer hit its target exactly and the target
+  # was useless, so every per-class metric for a rare species was noise being
+  # read as a result. Clamped by val_balance_max_share, so a species whose boxes
+  # cannot reach this floor without going val-heavy keeps the smaller target
+  # rather than dragging extra drops out of train chasing an impossible one.
+  # Costs train data for the smallest classes on purpose: a class you cannot
+  # measure is a class you cannot trust.
+  val_min_boxes_per_species: 20
   class_floor_min_images: 50    # merge species appearing in fewer than this many distinct frames into "fish"
+
+  # FROZEN CLASS IDS. Index in this list IS the YOLO class id, permanently.
+  # APPEND ONLY: never insert, never reorder, never delete a line.
+  #
+  # Before this existed, ids came from `sorted(all_species)`, so they were
+  # alphabetical over whatever species happened to survive a given run. Adding
+  # three species between the 2026-08-21 and 2026-08-22 runs moved every id
+  # (snapper 10→12, blue cod 11→13, rock lobster 4→7) and put `Batoidea` at 0
+  # purely because B sorts first. Two checkpoints a day apart could not be
+  # compared, `compare_with_production` was evaluating a 17-output model against
+  # a 20-class data.yaml, and mAP was silently rescaled because Ultralytics
+  # averages only over classes that have val instances.
+  #
+  # Ordering is for human legibility, nothing downstream cares what the integer
+  # is: `fish` takes the natural zero, the three reporting.indicator_species take
+  # 1-3 so a leading `1` in a YOLO .txt means snapper, then the rest by data
+  # volume as of 2026-08-22, and `bait` takes the last slot because it is not a
+  # species and never appears in an abundance figure.
+  #
+  # A species present in the data but missing here is appended at the end with a
+  # warning naming it: add it to this list to pin it. Entries with no data in a
+  # given run KEEP their slot as an empty class, which is what makes the ids
+  # stable across runs and costs nothing, since a zero-instance class is left out
+  # of mAP entirely. Same for a species that floors into 'fish': it keeps its
+  # slot and gets it back when the data grows.
+  #
+  # `fish` is required (the class floor needs somewhere to redirect to).
+  class_order:
+    - fish                      # 0  catch-all: an animal the model could not name
+    - Pagrus auratus            # 1  snapper, indicator species
+    - Parapercis colias         # 2  blue cod, indicator species
+    - Jasus edwardsii           # 3  rock lobster, indicator species
+    - Pseudolabrus miles        # 4
+    - Notolabrus celidotus      # 5
+    - Scorpis lineolata         # 6
+    - Nemadactylus macropterus  # 7
+    - Trachurus novaezelandiae  # 8
+    - Triglidae                 # 9
+    - Myxinidae                 # 10
+    - Muraenidae                # 11
+    - Elasmobranchii            # 12
+    - Forsterygion lapillum     # 13
+    - Helicolenus percoides     # 14
+    - Cephaloscyllium isabella  # 15
+    - Girella tricuspidata      # 16
+    - Batoidea                  # 17
+    - Conger verreauxi          # 18
+    - Mustelus lenticulatus     # 19  rig: floored into 'fish' at 39 train images, slot held
+    - Squalus acanthias         # 20  spiny dogfish: promoted out of Elasmobranchii 2026-08-22
+    - bait                      # 21  not a species, last slot on purpose
+
   # One canonical class per animal. Applied to every species name BEFORE
   # counting, balancing, flooring, and class-list building. Without this,
   # hierarchy splits (family vs species labels for the same animal) and
@@ -465,12 +585,31 @@ training:
   # Policy (Kalindi, 2026-08-21): join the busiest taxon of the group. When a
   # merged-away species accumulates enough boxes of its own, delete its line
   # here and the class floor decides whether it stands as its own class.
+  # Amendment 2026-08-22: judge "enough" on distinct FRAMES, not boxes. The
+  # floor is a frame count, and for species that arrive in groups the two
+  # numbers diverge badly (rig: 315 boxes but 55 frames; jack mackerel: 454
+  # boxes but 63 frames). Reading a box count as if it were a frame count is
+  # what left rig out of this map and silently in 'fish'.
   # The sibling-species entries below knowingly trade species precision for
   # keeping rare-family boxes out of 'fish'; accepted level of mistake.
   species_canonicalization:
-    Chelidonichthys kumu: Triglidae         # 142 vs 726 boxes; family label deleted from tree 3511; upload label_mapping already merges the other way
+    # Red gurnard is the ONLY gurnard in this data, so the family label and the
+    # species label name the same animal and must stay one class. Keep this
+    # entry even though canonicalization_readiness.py reports it READY (111
+    # frames): that script counts, it cannot know two labels denote one animal.
+    # Promoting it would recreate the exact hierarchy split the map exists to
+    # close. (Tree note: "Gurnards - Triglidae" is back as 691421 after being
+    # deleted, so the Triglidae label_mapping override is no longer needed.)
+    Chelidonichthys kumu: Triglidae         # 142 boxes / 111 frames vs family label's 316 / 60
     Eptatretus cirrhatus: Myxinidae         # 61 vs 139
     Pseudocaranx dentex: Pseudocaranx georgianus  # same fish, current name after reclassification
+    # A workflow label, not a taxon: "an animal worth a second look", so the
+    # honest training class is the unidentified-animal bucket. Its BIIGLE
+    # siblings ('Fish: final', 'Fish: review required', 'To review') resolve to
+    # 'fish' through the class_map aliases, but this one was deleted from tree
+    # 3511, so it has no alias to resolve through and needs naming here.
+    # Found 2026-08-22 in KOK_20240219_BUV_KOK_013_01, 1 row.
+    Interesting Sighting: fish
     # Morays: family label is the busy pile (174 boxes).
     Gymnothorax prionodon: Muraenidae       # 5 vs 174
     Gymnothorax nubilus: Muraenidae         # tree child, unseen in data yet
@@ -487,17 +626,49 @@ training:
     Mullidae: Upeneichthys lineatus         # 1 vs 48; species pile dominates
     Upeneus francisi: Upeneichthys lineatus        # tree child, unseen in data yet
     Parupeneus spilurus: Upeneichthys lineatus     # tree child, unseen in data yet
-    # Sharks without enough data pool as "shark, not otherwise classified"
-    # (~72 boxes together) — the fish-bucket pattern one level down. Rig
-    # (Mustelus) and carpet shark (Cephaloscyllium) are strong enough to keep
-    # their own classes and are deliberately NOT mapped; Elasmobranchii means
-    # "a shark that isn't one of those". Delete a line when its species clears
-    # the floor alone (see canonicalization_readiness.py).
-    Squalus acanthias: Elasmobranchii
+    # Congers. Southern (verreauxi) is the busy pile at 17 drops / 64 frames;
+    # Cape (wilsoni) has 1 drop. On 2026-08-24 BOTH still fell under the class
+    # floor after capping and the val split, so the tree was carrying two named
+    # classes that each held nothing — the worst of both worlds. Pooled they are
+    # ~70 frames, still short of the 50 TRAIN-image floor once val is taken, so
+    # this is for correctness (one animal, one class) rather than an expectation
+    # that congers become trainable. Unlike the Gymnothorax and Forsterygion
+    # entries above, these are two species an expert can genuinely tell apart,
+    # so this knowingly trades species precision for not splitting the pile —
+    # same accepted tradeoff as the sibling-species entries. Revisit when
+    # verreauxi alone clears the floor.
+    Conger wilsoni: Conger verreauxi        # 1 drop vs 17
+    # Sharks without enough data pool as "shark, not otherwise classified" —
+    # the fish-bucket pattern one level down. Carpet shark (Cephaloscyllium,
+    # 226 frames) is strong enough to stand alone and is deliberately NOT
+    # mapped; Elasmobranchii means "a shark that isn't one of those". Delete a
+    # line when its species clears the floor alone (see
+    # canonicalization_readiness.py).
+    #
+    # 2026-08-22 restructure. Two changes, both driven by counting distinct
+    # FRAMES rather than boxes:
+    #  * Squalus acanthias promoted OUT (216 boxes / 141 frames / 17 drops,
+    #    well clear of the floor). It was 91% of the bucket, so the class named
+    #    "shark NOS" was really "spiny dogfish" wearing a generic label.
+    #  * Mustelus lenticulatus mapped IN. It was left out as "strong enough to
+    #    keep its own class" on a box count (315), but those 315 boxes sit in
+    #    only 55 frames across 5 drops — rig arrives in groups, 5.7 boxes per
+    #    frame. There is no floor at annotation-load time, so rig becomes a
+    #    candidate class regardless; cap_frames_per_drop and the val split then
+    #    leave 39 train / 0 val, and apply_post_assembly_floor merges anything
+    #    under this threshold into 'fish'. A shark ground-truthed as
+    #    unidentified fish is the hagfish/gurnard bug of 2026-08-21 again.
+    # Remaining bucket: rig + school shark + sevengill + bronze whaler,
+    # ~70 frames together.
+    Mustelus lenticulatus: Elasmobranchii
     Galeorhinus galeus: Elasmobranchii
     Notorynchus cepedianus: Elasmobranchii
     Carcharhinus brachyurus: Elasmobranchii
-    # Rays pool the same way (~62 boxes together); none is viable alone.
+    # Rays pool the same way (60 frames together); none is viable alone.
+    # Deliberately NOT folded into Elasmobranchii: a disc and a torpedo are the
+    # two shapes a detector separates most reliably, so one class holding both
+    # would be harder to learn than two. Batoidea's problem is val coverage
+    # (5 val images, from only 4 drops), not train volume.
     Bathytoshia brevicaudata: Batoidea
     Myliobatis tenuicaudatus: Batoidea
     Dipturus innominatus: Batoidea
@@ -520,6 +691,22 @@ training:
   retrain_min_improvement_pct: 2.0
   # Per-drop frame filter (applied in assemble_yolo_dataset)
   cap_frames_per_drop: 50                # max frames per drop in the assembled YOLO dataset (extras bypass this cap). BUV is a fixed camera, so frames within a drop share one background + repeat individuals; beyond ~50 they're largely redundant (lowered 100→50, 2026-08-21). dominant_species frames are dropped first, so blue-cod-only frames go before multi-species ones.
+  # Frames holding a species with fewer than this many frames CORPUS-WIDE are
+  # exempt from cap_frames_per_drop. `dominant_species` already drops blue-cod-
+  # only frames first, but once a drop has more than `cap` frames that contain
+  # SOME non-dominant species, the sampler thins them at random — so a
+  # deployment's only lobster frames compete on equal terms with its snapper
+  # frames and can be thrown away. Exempting them keeps real, varied frames of
+  # the scarce animal (different positions, different individuals) rather than
+  # duplicating one frame, which only adds memorisation pressure.
+  # Frame counts on the 2026-08-24 corpus: Parapercis 5432, Pseudolabrus 2287,
+  # Pagrus 1876, Notolabrus celidotus 963, fish 722, Jasus 514, Nemadactylus
+  # 282, Scorpis 273, Cephaloscyllium 247, Triglidae 214, Myxinidae 201,
+  # Muraenidae 200, Squalus 176, Forsterygion 146, Batoidea 71, Conger 64.
+  # 600 is set to just include rock lobster (514), a reporting-priority species
+  # sitting at mAP 0.199. Raise it and blue cod eventually qualifies, which
+  # would defeat the cap entirely. 0 disables the exemption.
+  cap_exempt_rare_below_frames: 600
   dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
     - "Parapercis colias"                # blue cod — overrepresented (~59% of all boxes); drop blue-cod-only frames first so the cap keeps frames with rarer species
     # - "Pagrus auratus"                   # snapper — enable if it starts dominating too
