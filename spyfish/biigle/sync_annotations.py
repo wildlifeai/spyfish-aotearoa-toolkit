@@ -459,6 +459,37 @@ def _volume_has_drop_files(handler, volume_id: int, drop_id: str, cache: dict) -
     return any(pattern.search(name) for name in cache[volume_id])
 
 
+def _write_universe_csv(handler, volume_id: int, drop_id: str, cache: dict) -> int:
+    """Record every frame of `drop_id` present in `volume_id`, annotated or not.
+
+    A Biigle annotation report contains only frames that HAVE annotations, so on
+    its own it cannot tell "the expert looked and saw nothing" from "never
+    uploaded". Both look like a missing row, and the second must never become a
+    training negative. Writing the volume's file list at sync time - when the
+    volume is DONE, so every frame in it has been reviewed - is what lets
+    `biigle_to_yolo` emit an empty .txt (a YOLO background image) for the
+    reviewed-but-empty frames.
+
+    Before this, the corpus held 1 background frame in 5054 while the frame
+    selector was deliberately choosing "Blind (False Negative Check)" frames for
+    review: the experts were producing negatives and the parser discarded every
+    one (found 2026-08-24). Returns the number of frames recorded.
+    """
+    if volume_id not in cache:
+        cache[volume_id] = [
+            str(img.get("filename", "")) for img in handler.get_volume_images(volume_id)
+        ]
+    pattern = _drop_boundary_pattern(drop_id)
+    names = sorted(n for n in cache[volume_id] if n and pattern.search(n))
+    if not names:
+        return 0
+    path = config.get_biigle_expert_universe_csv_path(drop_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"filename": names}).to_csv(path, index=False)
+    logging.info(f"  Reviewed-frame universe ({len(names)}) → {path}")
+    return len(names)
+
+
 def sync_biigle_annotations():
     """
     Sync annotations from Biigle volumes that the annotator has marked as done.
@@ -556,6 +587,10 @@ def sync_biigle_annotations():
             raw_path = config.get_biigle_expert_raw_csv_path(drop_id)
             report.to_csv(raw_path, index=False)
             logging.info(f"  Raw expert annotations → {raw_path}")
+
+            # Negatives: the frames in this volume that the report does NOT
+            # mention are frames the expert reviewed and left empty.
+            _write_universe_csv(handler, volume_id, drop_id, volume_files_cache)
 
             _write_substrate_csv(parser, report, drop_id, trees)
 

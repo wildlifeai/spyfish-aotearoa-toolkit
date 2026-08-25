@@ -171,6 +171,30 @@ class MLConfig(BaseConfig):
         )
 
     @property
+    def training_class_order(self) -> tuple[str, ...]:
+        """Frozen YOLO class ordering: index in this tuple IS the class id.
+
+        Append-only by contract, see the comment on `training.class_order` in
+        config.yaml. Returned as a tuple so it can key the registry's cache and
+        cannot be mutated by a caller. `fish` is required because the class
+        floor needs somewhere to redirect merged species to.
+        """
+        order = get_required(self.training_config, "class_order", "training")
+        names = tuple(str(n).strip() for n in order)
+        if len(set(names)) != len(names):
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            raise ValueError(
+                f"training.class_order contains duplicate entries {dupes}; each "
+                "name must appear exactly once, its position is its class id."
+            )
+        if "fish" not in names:
+            raise ValueError(
+                "training.class_order must contain 'fish': the class floor "
+                "merges under-represented species into it."
+            )
+        return names
+
+    @property
     def training_split_seed(self) -> Optional[int]:
         """Random seed for reproducible train/val/test splits and per-drop frame filtering.
 
@@ -315,6 +339,20 @@ class MLConfig(BaseConfig):
         train-heavy instead of val-heavy. 1.0 disables."""
         return float(
             get_required(self.training_config, "val_balance_max_share", "training")
+        )
+
+    @property
+    def training_val_min_boxes_per_species(self) -> int:
+        """Absolute floor on a species' val boxes, on top of val_balance_pct.
+
+        A percentage target alone is useless for rare classes (8% of 71 boxes is
+        6). Clamped by val_balance_max_share at the call site so an unreachable
+        floor cannot drag extra drops into val.
+        """
+        return int(
+            get_required(
+                self.training_config, "val_min_boxes_per_species", "training"
+            )
         )
 
     @property

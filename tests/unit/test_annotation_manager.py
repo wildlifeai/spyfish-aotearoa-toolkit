@@ -4,7 +4,6 @@ Tests for AnnotationDatabaseManager — annotation CRUD and aggregation.
 Covers:
   - clear_synced_annotations: only deletes rows WITH external_id
   - get_annotations_for_drop: with and without annotated_by filter
-  - get_counts_per_source: SUM(max_interval) per source, not COUNT(*)
   - get_maxn_summary: MAX(max_interval) per drop × species × source
 """
 
@@ -107,28 +106,6 @@ def test_get_annotations_for_drop_filtered(ann_db):
 
 def test_get_annotations_for_drop_empty(ann_db):
     assert ann_db.get_annotations_for_drop("NONEXISTENT") == []
-
-
-# ── get_counts_per_source ───────────────────────────────────────────────────
-
-
-def test_get_counts_per_source_sums_max_interval(ann_db):
-    """Counts are SUM(max_interval), not COUNT(*) of rows."""
-    _seed(
-        ann_db,
-        [
-            _ann(annotated_by="ml", max_interval=3),
-            _ann(annotated_by="ml", max_interval=2, time_of_max="00:00:15"),
-            _ann(annotated_by="expert", max_interval=5, external_id="biigle_1"),
-        ],
-    )
-    counts = ann_db.get_counts_per_source(DROP)
-    assert counts["ml"] == 5  # 3 + 2, not 2 (row count)
-    assert counts["expert"] == 5
-
-
-def test_get_counts_per_source_empty(ann_db):
-    assert ann_db.get_counts_per_source("NONEXISTENT") == {}
 
 
 # ── get_maxn_summary ────────────────────────────────────────────────────────

@@ -120,6 +120,40 @@ def evaluate_model(
     return result
 
 
+
+def _class_list_mismatch(model_path: str, data_yaml: str) -> Optional[str]:
+    """Describe how a checkpoint's class list differs from a dataset's, or None.
+
+    Compares by id->name, not by count: two 20-class lists in different orders
+    are just as unusable as lists of different length, and the alphabetical->
+    frozen-roster reorder of 2026-08-22 was exactly that case.
+    """
+    try:
+        from ultralytics import YOLO
+
+        model_names = YOLO(str(model_path)).names
+        with open(data_yaml) as f:
+            data_names = yaml.safe_load(f).get("names", [])
+    except Exception as e:  # unreadable checkpoint or yaml, say so and skip
+        return f"could not read class lists ({type(e).__name__}: {e})."
+
+    data_map = dict(enumerate(data_names))
+    if model_names == data_map:
+        return None
+    missing = [(i, n) for i, n in data_map.items() if i not in model_names]
+    renamed = [
+        (i, model_names[i], n)
+        for i, n in data_map.items()
+        if i in model_names and model_names[i] != n
+    ]
+    parts = [f"model has {len(model_names)} classes, dataset has {len(data_map)}."]
+    if missing:
+        parts.append(f"{len(missing)} dataset id(s) unknown to the model, e.g. {missing[:3]}.")
+    if renamed:
+        parts.append(f"{len(renamed)} id(s) name a different species, e.g. {renamed[:3]}.")
+    return " ".join(parts)
+
+
 def compare_with_production(
     new_metrics: dict,
     production_model_path: str,
@@ -147,6 +181,23 @@ def compare_with_production(
             f"Assuming this is the first trained model, promoting automatically."
         )
         return {}, True
+
+    # A checkpoint can only be scored against a dataset that means the same
+    # thing by each class id. Ultralytics does not check: in ap_per_class it
+    # re-keys names with `{i: names[k] for i, k in enumerate(unique_classes)
+    # if k in names}`, silently dropping ids the model has no name for, and the
+    # per-class plot then indexes off the end - `KeyError: 16`, three frames
+    # from anything mentioning classes (run 8598080, 2026-08-23: a 20-class
+    # production model against a 50-class dataset). Even without the crash the
+    # comparison is meaningless, since id 2 is a different species to each side.
+    mismatch = _class_list_mismatch(production_model_path, data_yaml)
+    if mismatch:
+        logging.warning(
+            f"Skipping production comparison: {mismatch} Promotion cannot be "
+            f"decided automatically - evaluate both models on a common class "
+            f"list before promoting (see scripts comparing checkpoints)."
+        )
+        return {}, False
 
     logging.info(f"Evaluating production model for comparison: {production_model_path}")
     prod_metrics = evaluate_model(

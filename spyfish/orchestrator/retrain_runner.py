@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
@@ -26,7 +27,7 @@ from spyfish.ml.training.prepare_training_data import (
     prepare_from_annotations,
     print_assembled_summary,
     print_per_drop_species_inventory,
-    _write_sidecar_class_map,
+    prune_unpinned_empty_classes,
 )
 from spyfish.ml.training.split_data import (
     balance_val_drops,
@@ -191,11 +192,17 @@ def run_retraining(
         images_dir, excluded_drops=excluded_drops
     )
 
-    # 2c. Build the unified species list. The post-assembly floor (step 7b)
-    # decides which species to merge into 'fish' based on actual train image
-    # counts after cap + split, so flatten just keeps every species here.
+    # 2c. Build the unified species list in the FROZEN order from
+    # training.class_order, so a species' class id is the same integer in every
+    # run. This used to be sorted(all_species), i.e. alphabetical over whatever
+    # species happened to have data, which renumbered every class whenever one
+    # entered or left (2026-08-21 → 2026-08-22: snapper 10→12, blue cod 11→13).
+    # The roster is returned whole, including entries with no data this run, so
+    # the ids hold; the post-assembly floor (step 7b) then decides which species
+    # to merge into 'fish' on actual train image counts after cap + split, and
+    # leaves the merged names in place rather than renumbering around them.
     all_species = set(species_names) | set(extra_species) | {"fish"}
-    species_names = sorted(all_species)
+    species_names = species_registry().order_training_classes(all_species)
 
     # 3. Flatten + remap class IDs into the unified ordering. Species that
     #    don't survive the post-assembly floor will be merged into 'fish'
@@ -269,6 +276,7 @@ def run_retraining(
         candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
         train_drops, val_drops, test_drops = balance_val_drops(
             labels_staged_dir=labels_staged_dir,
+            species_names=species_names,
             candidate_drops=candidate_drops,
             val_pct=config.training_val_balance_pct,
             tolerance=config.training_val_balance_tolerance,
@@ -277,6 +285,8 @@ def run_retraining(
             ),
             overshoot_weight=config.training_val_balance_overshoot_weight,
             max_share=config.training_val_balance_max_share,
+            min_boxes=config.training_val_min_boxes_per_species,
+            floor_min_frames=config.training_floor_min_images,
         )
     else:
         train_drops, val_drops, test_drops = split_data(
@@ -331,8 +341,23 @@ def run_retraining(
             species_dir=species_dir,
             min_images=config.training_floor_min_images,
         )
-        if merged:
-            logging.info("Re-printing summary after post-assembly floor merge:")
+        # 7c. Drop the tail of unpinned classes the floor just emptied. The
+        # roster's own empty entries stay (their ids are frozen on purpose);
+        # these are the appended extras, whose ids were never stable anyway, so
+        # a zero-instance one is only noise in data.yaml and the detect head.
+        pruned, post_floor_class_names = prune_unpinned_empty_classes(
+            species_dir=species_dir,
+            roster_size=len(species_registry().class_order),
+        )
+        if pruned:
+            # The sidecar was written during assembly against the pre-prune
+            # list; leave it stale and anything decoding this dataset's labels
+            # later resolves every id past the prune point to the wrong species.
+            _write_sidecar_class_map(
+                post_floor_class_names, species_dir, class_map_path
+            )
+        if merged or pruned:
+            logging.info("Re-printing summary after post-assembly floor/prune:")
             print_assembled_summary(
                 species_dir=species_dir,
                 class_names=post_floor_class_names,

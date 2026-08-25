@@ -6,7 +6,10 @@ import pandas as pd
 
 from spyfish.config.base import ExpertStatus
 from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.database.annotation_manager import (
+    AnnotationDatabaseManager,
+    null_deployment_row,
+)
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
 
@@ -14,14 +17,31 @@ from spyfish.storage.s3_handler import S3Handler
 def parse_legacy_rows(df: pd.DataFrame) -> tuple[list, list]:
     """Normalise legacy CSV rows into annotation records.
 
-    Returns ``(annotations, placeholder_drop_ids)``. Rows where
-    ScientificName, TimeOfMax AND MaxInterval are all missing are export
-    placeholders, not observations: the legacy CSV came from a database
-    export that wrote the literal string "NULL" into every data field for
-    deployments that had no expert annotations (pandas reads "NULL" as
-    missing). Ingesting them as null-species rows would assert "expert
-    reviewed this and saw nothing", which the source does not say — so they
-    are skipped and reported separately for status repair.
+    Returns ``(annotations, placeholder_drop_ids)``, where the placeholders
+    are ALSO present in ``annotations`` as absence records.
+
+    Rows where ScientificName, TimeOfMax AND MaxInterval are all missing are
+    the legacy export's "no expert data" marker: that database wrote the
+    literal string "NULL" into every data field (pandas reads "NULL" as
+    missing).
+
+    These become `null_deployment_row` records — "expert reviewed this and
+    saw nothing" (2026-08-22 decision, Kalindi). The evidence supports reading
+    them as absence rather than as unknown: there are 34 of them, **exactly
+    one row per deployment**, with **zero overlap** with the 294 deployments
+    that carry real observations. A deployment that was never looked at would
+    not have earned a row in an annotations export at all; a deliberate
+    one-row-per-drop placeholder is what "processed, nothing to report" looks
+    like.
+
+    History, so this does not flip a third time: the original code ingested
+    these as ordinary annotations, which fabricated an observation of an
+    unnamed species and pushed a bogus count of 1 into the deployment. That
+    was correctly reverted to a skip — but the skip lost the fact of review,
+    leaving 34 deployments indistinguishable from never-reviewed. The absence
+    row is the third option and the right one: it asserts the review, counts
+    a real zero, and dashboards already map NULL_DEPLOYMENT to NaN so it
+    never reads as a species.
     """
     conf_col = config.csv_confidence_agreement_column
     intv_col = config.csv_interval_annotation_column
@@ -33,7 +53,13 @@ def parse_legacy_rows(df: pd.DataFrame) -> tuple[list, list]:
         m_intv = row.get(config.csv_max_interval_column)
 
         if pd.isna(sci) and pd.isna(t_max) and pd.isna(m_intv):
-            placeholders.append(row[config.drop_id_column])
+            drop_id = row[config.drop_id_column]
+            placeholders.append(drop_id)
+            # external_id='legacy' matches the DELETE scope in the caller, so
+            # a re-ingest replaces these rather than accumulating duplicates.
+            annotations.append(
+                null_deployment_row(drop_id, "expert", external_id="legacy")
+            )
             continue
 
         conf = row.get(conf_col)
@@ -60,8 +86,8 @@ def ingest_legacy_expert_annotations():
 
     Five-step flow:
       1. Download legacy CSV from S3.
-      2. Parse and normalise rows, skipping all-NULL export placeholders
-         (see `parse_legacy_rows`).
+      2. Parse and normalise rows; all-NULL export placeholders become
+         absence records (see `parse_legacy_rows`).
       3. Replace existing legacy rows in spyfish_annotations.db (DELETE+INSERT,
          keyed on annotated_by='expert' AND external_id='legacy' so this never
          touches BIIGLE-synced expert rows).
@@ -69,8 +95,10 @@ def ingest_legacy_expert_annotations():
          back to the deployments table AND advances expert_status to
          expert_complete for any drop that gained annotations (data presence
          is the source of truth).
-      5. Demote placeholder drops stranded at expert_complete by an earlier
-         ingest back to expert_pending, when no other expert data exists.
+      5. Legacy repair for the pre-absence-row era: demote a placeholder drop
+         to expert_pending only when it has NO expert rows at all. Since step 2
+         now writes an absence row for every placeholder, this is inert on a
+         normal run — it survives to repair DBs written by the older code.
 
     **Recovery semantics.** Every step is idempotent: re-running the whole
     function recovers from any partial failure. Step 3 is replace-on-conflict,
@@ -101,10 +129,11 @@ def ingest_legacy_expert_annotations():
         # Expected columns: DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy, IntervalAnnotation, ConfidenceAgreement
         annotations, placeholders = parse_legacy_rows(df)
         if placeholders:
-            logging.warning(
-                f"Skipped {len(placeholders)} placeholder row(s) with every "
-                f"data field NULL — the export's 'no expert data' marker, not "
-                f"an observation: {sorted(placeholders)}"
+            logging.info(
+                f"{len(placeholders)} placeholder row(s) had every data field "
+                f"NULL — the export's 'no expert data' marker. Ingested as "
+                f"absence records (expert reviewed, nothing seen): "
+                f"{sorted(placeholders)}"
             )
 
         # 3. Insert into Annotation DB

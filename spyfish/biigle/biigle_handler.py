@@ -11,7 +11,7 @@ import io
 import logging
 import time
 import zipfile
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
 from requests.exceptions import HTTPError  # type: ignore
@@ -628,6 +628,107 @@ class BiigleHandler:
         except Exception as e:
             logging.error(f"Failed to get labels for image {image_id}: {e}")
             raise
+
+    def create_label(
+        self,
+        tree_id: int,
+        name: str,
+        color: str,
+        parent_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create one label in a label tree. POST label-trees/{id}/labels
+
+        Returns the created label dict. Biigle answers this endpoint with a
+        LIST containing the new label (not the bare object), so the list is
+        unwrapped here and callers get the shape they expect.
+
+        `label_source_id` is deliberately not sent: it is only meaningful
+        alongside a `source_id` from an external authority such as WoRMS, and
+        these are internal workflow labels with no such reference.
+
+        Note two Biigle constraints before designing around this: a label's
+        `parent_id` cannot later be set back to null, and a label with children
+        cannot be deleted. A hierarchy is easy to create and awkward to undo.
+        """
+        try:
+            payload: Dict[str, Any] = {"name": name, "color": color}
+            if parent_id is not None:
+                payload["parent_id"] = int(parent_id)
+
+            response = self.api.post(f"label-trees/{tree_id}/labels", json=payload)
+            created = response.json()
+            if isinstance(created, list):
+                if not created:
+                    raise ValueError(
+                        f"Biigle returned an empty list creating label {name!r} "
+                        f"in tree {tree_id}."
+                    )
+                created = created[0]
+
+            logging.info(
+                f"Created label {name!r} (id={created.get('id')}) in tree {tree_id}"
+                + (f" under parent {parent_id}" if parent_id else "")
+            )
+            return created
+        except Exception as e:
+            logging.error(f"Failed to create label {name!r} in tree {tree_id}: {e}")
+            raise
+
+    def attach_image_label(self, image_id: int, label_id: int) -> Optional[dict]:
+        """Attach a whole-image label. POST images/{id}/labels
+
+        Returns the created image-label dict, or None when the attach failed.
+        Failure is returned rather than raised because these labels are
+        review metadata: losing one costs the expert a hint, while raising
+        would abort an upload whose frames and annotations already landed.
+
+        Re-attaching a label the image already carries is the expected re-run
+        case and is reported by Biigle as an error; the caller counts those
+        separately rather than pre-fetching every image's labels, which would
+        double the request count to prevent a harmless no-op.
+        """
+        try:
+            response = self.api.post(
+                f"images/{image_id}/labels", json={"label_id": int(label_id)}
+            )
+            return response.json()
+        except Exception as e:
+            logging.warning(
+                f"Could not attach label {label_id} to image {image_id}: {e}"
+            )
+            return None
+
+    def attach_image_labels(self, pairs: List[Tuple[int, int]]) -> int:
+        """Attach many whole-image labels concurrently. Returns the success count.
+
+        Biigle has no bulk image-label endpoint (unlike annotations, which take
+        an array), so this is genuinely one request per pair. Threaded at the
+        same width as `get_volume_images`, which already pays a per-image cost
+        in this same upload path, so the wall-clock addition is seconds.
+        """
+        if not pairs:
+            return 0
+
+        import concurrent.futures
+
+        logging.info(f"Attaching {len(pairs)} whole-image label(s) concurrently...")
+        attached = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            results = executor.map(
+                lambda pair: self.attach_image_label(pair[0], pair[1]), pairs
+            )
+            for result in results:
+                if result is not None:
+                    attached += 1
+
+        if attached < len(pairs):
+            logging.warning(
+                f"Attached {attached}/{len(pairs)} image label(s); the rest were "
+                "already present or rejected (see warnings above)."
+            )
+        else:
+            logging.info(f"Attached {attached} image label(s).")
+        return attached
 
     def volume_is_done(self, volume_id: int):
         """

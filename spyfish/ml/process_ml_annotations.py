@@ -112,7 +112,6 @@ def process_maxn(
     persistence_seconds: float = 0.0,
     gap_fill_seconds: float = 0.0,
     exclude_classes: tuple = (),
-    union_class: Optional[str] = None,
 ):
     """
     Processes raw ML detections into MaxN intervals, with persistence filtering.
@@ -131,8 +130,8 @@ def process_maxn(
     them. Rows with MaxInterval 0 are kept in the CSV but not ingested to the
     annotations DB.
 
-    With the defaults (persistence 0, no gap fill, no exclusions, no union)
-    the output matches the pre-filter behaviour exactly: single-frame max per
+    With the defaults (persistence 0, no gap fill, no exclusions) the output
+    matches the pre-filter behaviour exactly: single-frame max per
     (interval × class), ties broken by mean confidence.
 
     Args:
@@ -145,11 +144,6 @@ def process_maxn(
         persistence_seconds: Rolling-min window; 0 disables (single-frame MaxN).
         gap_fill_seconds: Max zero-gap between detections to close; 0 disables.
         exclude_classes: Classes that never count toward MaxN and get no row.
-        union_class: When set, one derived row per interval counts ALL
-            non-excluded boxes per frame under this name (the "any fish" count
-            that used to be the binary model's MaxN). Absorbs the class of the
-            same name — requires cross-class NMS at inference so one animal
-            carries one box.
 
     Returns:
         DataFrame with MaxN results.
@@ -190,7 +184,7 @@ def process_maxn(
     grid_intervals = (grid_times // interval_seconds) * interval_seconds
 
     def _series_rows(sub_df: pd.DataFrame, class_name: str) -> list:
-        """MaxN rows for one count series (one class, or the union)."""
+        """MaxN rows for one class's count series."""
         per_frame = sub_df.groupby("frame").agg(
             count=("confidence", "size"),
             mean_conf=("confidence", "mean"),
@@ -262,11 +256,7 @@ def process_maxn(
 
     maxn_results = []
     for cls in df_filtered["class"].unique():
-        if union_class is not None and cls == union_class:
-            continue  # absorbed into the union series below
         maxn_results.extend(_series_rows(df_filtered[df_filtered["class"] == cls], cls))
-    if union_class is not None:
-        maxn_results.extend(_series_rows(df_filtered, union_class))
 
     maxn_df = pd.DataFrame(maxn_results)
 
@@ -468,7 +458,6 @@ def process_one_drop(
         persistence_seconds=config.maxn_persistence_seconds,
         gap_fill_seconds=config.maxn_gap_fill_seconds,
         exclude_classes=tuple(config.maxn_exclude_classes),
-        union_class=config.catchall_class,
     )
 
     if maxn_df.empty:

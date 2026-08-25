@@ -1,21 +1,30 @@
 #!/bin/bash -e
 #SBATCH --job-name=spyfish_train
 #SBATCH --account=wildlife03546
-#SBATCH --time=24:00:00
+#SBATCH --time=7:00:00
 
 # GPU choice (billing weight per GPU-hour in brackets — sinfo TRESBillingWeights):
 #   genoa: l4 [20], pro_6000 [130], h100 [200]; milan: a100 [90]. No a100 in genoa.
-# l4 (24GB) is ample for imgsz=640 batch=16 and the cheapest option.
-#SBATCH --partition=genoa
-#SBATCH --gpus-per-node=l4:1
+# l4 (22.5GB) OOMs at imgsz=640 batch=16 AND batch=32 and silently falls back to
+# batch 8 (~3.4x slower per epoch, worse convergence) - do not train on it.
+# pro_6000 is Blackwell/sm_120 and cannot run this venv's torch 2.5.1+cu124.
+# h100 chosen 2026-08-24: sbatch --test-only put its start 6.5 h earlier than
+# a100 (02:07 vs 08:45) - milan had 218 a100 jobs queued on 16 GPUs, genoa 19
+# h100 jobs on 6 - and it is faster once running, so 200 vs 90 billing is close
+# to cost-neutral. Swap the blocks below to move between GPUs.
+##SBATCH --partition=genoa
+##SBATCH --gpus-per-node=h100:1
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/spyfish_train_%j.err
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 
 
-#a SBATCH --partition=genoa
-#a SBATCH --gpus-per-node=h100:1
+##SBATCH --partition=genoa
+##SBATCH --gpus-per-node=l4:1
+
+#SBATCH --partition=milan
+#SBATCH --gpus-per-node=a100:1
 
 # Spyfish Aotearoa training job wrapper.
 #

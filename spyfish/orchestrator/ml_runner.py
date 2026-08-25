@@ -5,7 +5,12 @@ from typing import List
 
 import pandas as pd
 
-from spyfish.config.base import MlStatus, VideoPresence, get_required
+from spyfish.config.base import (
+    InvalidTransitionError,
+    MlStatus,
+    VideoPresence,
+    get_required,
+)
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -33,6 +38,10 @@ class MLRunner:
         # a stray confidence_threshold=0 floods inference with max_det garbage.
         self.confidence = config.confidence_threshold
         self.model = str(validate_model_path(config.pipeline_model_path))
+        # Drops this runner successfully claimed (advanced to ml_running).
+        # Populated by run_inference_loop; finalize_batch_results must only
+        # ever touch these, never a target another job claimed first.
+        self.claimed_drop_ids: List[str] = []
 
     def get_inference_targets(
         self, survey_id: str | None = None, force: bool = False
@@ -45,10 +54,14 @@ class MLRunner:
         run --check-arrivals first for drops still awaiting video confirmation.
 
         ``force`` (survey mode only) additionally resets the survey's
-        ml_complete / ml_error drops back to ml_ready so inference re-runs on
-        them. Outputs are keyed by model name, so a re-run with a new model
-        writes alongside the old model's CSVs; only a same-model re-run
-        overwrites (the intended refresh).
+        ml_complete / ml_error / ml_running drops back to ml_ready so inference
+        re-runs on them. Outputs are keyed by model name, so a re-run with a new
+        model writes alongside the old model's CSVs; only a same-model re-run
+        overwrites (the intended refresh). ml_running is included because
+        nothing else clears it: a killed job (SLURM timeout, Ctrl-C) strands
+        drops there forever. The caveat is that --force cannot tell a stranded
+        drop from a live one, so do not run it while another ML job is working
+        on the same survey.
         """
         logging.debug(
             f"Querying local state database for ml_status={MlStatus.READY!r} (LIMIT: {self.limit})..."
@@ -66,12 +79,22 @@ class MLRunner:
             # operator-requested re-run.
             summary = self.db.get_survey_ml_status_summary(survey_id)
             redo = summary.get(MlStatus.COMPLETE, []) + summary.get(MlStatus.ERROR, [])
-            for drop_id in redo:
+            # ml_running has no other way out: it is set before inference and
+            # only advances on completion, so a killed job leaves drops stuck.
+            stranded = summary.get(MlStatus.RUNNING, [])
+            for drop_id in redo + stranded:
                 self.db.update_section_status(drop_id, MlStatus.COLUMN, MlStatus.READY)
             if redo:
                 logging.info(
                     f"--force: reset {len(redo)} {survey_id} drop(s) from "
                     f"ml_complete/ml_error back to ml_ready: {sorted(redo)}"
+                )
+            if stranded:
+                logging.warning(
+                    f"--force: reset {len(stranded)} {survey_id} drop(s) from "
+                    f"ml_running back to ml_ready: {sorted(stranded)}. If another "
+                    f"ML job is currently processing this survey, it will now be "
+                    f"processed twice - check for a live job before continuing."
                 )
 
         records = self.db.get_deployments_eligible("ml_status", [MlStatus.READY])
@@ -175,10 +198,42 @@ class MLRunner:
         logging.info(
             f"Setting {len(drop_ids)} targets to ml_status={MlStatus.RUNNING!r}..."
         )
+        # Claim each drop independently. The ml_ready read in
+        # get_inference_targets happens minutes-to-hours before this claim (the
+        # video download sits in between), so a concurrently running ML job can
+        # have taken some of these drops already, leaving them in ml_running.
+        # That drop is not ours to process: log it, drop it from the batch, and
+        # carry on with the rest rather than failing the whole ml stage.
+        claimed = []
+        stolen = []
         for drop_id in drop_ids:
-            self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.RUNNING)
+            try:
+                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.RUNNING)
+            except InvalidTransitionError as e:
+                stolen.append(drop_id)
+                logging.warning(f"Skipping {drop_id}, could not claim it: {e}")
+                continue
+            claimed.append(drop_id)
 
-        logging.info(f"Starting inference loop for {len(drop_ids)} drops...")
+        if stolen:
+            logging.warning(
+                f"{len(stolen)} of {len(drop_ids)} target(s) were claimed by another "
+                f"process between target selection and now, skipping them: "
+                f"{sorted(stolen)}. Check for a concurrent ML job on this survey."
+            )
+
+        self.claimed_drop_ids = claimed
+        if not claimed:
+            logging.error(
+                "No targets could be claimed, every drop in this batch is already "
+                "owned by another process. Nothing to do."
+            )
+            return []
+
+        claimed_set = set(claimed)
+        targets = [t for t in targets if t["drop_id"] in claimed_set]
+
+        logging.info(f"Starting inference loop for {len(targets)} drops...")
 
         # Shared resources for per-drop post-ML processing. Initialised once
         # outside the loop so each iteration reuses the same DB connections.
@@ -265,7 +320,14 @@ class MLRunner:
         immediately after each drop's MaxN + QA frames are written, so this only
         needs to catch drops where the loop's try/except didn't fire (e.g. process
         killed mid-iteration).
+
+        `all_drop_ids` defaults to the drops this runner actually claimed. Do not
+        pass the full target list: a target lost to a concurrent job is sitting in
+        ml_running under *that* job's ownership, and flipping it to ml_error here
+        would sabotage a live run.
         """
+        if all_drop_ids is None:
+            all_drop_ids = self.claimed_drop_ids
         if not all_drop_ids:
             return
         for drop_id in set(all_drop_ids) - set(successful_drops):
@@ -280,9 +342,8 @@ class MLRunner:
 def main():
     runner = MLRunner()
     targets = runner.get_inference_targets()
-    all_drop_ids = [t["drop_id"] for t in targets]
     successes = runner.run_inference_loop(targets)
-    runner.finalize_batch_results(successes, all_drop_ids=all_drop_ids)
+    runner.finalize_batch_results(successes)
 
 
 if __name__ == "__main__":
