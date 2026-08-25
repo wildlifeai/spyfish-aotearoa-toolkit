@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Dict, Optional, Set
 
 import pandas as pd
@@ -21,19 +22,23 @@ def check_pending_arrivals(
     """
     Advances ml_status for drops waiting on video arrival or DEEP_ARCHIVE restore.
 
-    Picks up any drop with ml_status='pending' and video_presence in (absent, archived).
-    For each, re-checks S3:
+    Picks up EVERY drop with ml_status='pending', whatever its recorded
+    video_presence, and re-checks S3:
       - not present → leave as-is
       - present + DEEP_ARCHIVE → video_presence=archived (no ml advance)
       - present + downloadable → video_presence=present, advance ml_status to ready.
+
+    The presence filter used to be (absent, archived), on the assumption that a
+    drop already marked `present` must have been advanced already. It leaves a
+    dead state: a drop whose video was ALREADY on S3 when it was ingested gets
+    video_presence=present and ml_status=ml_pending, matches neither branch, and
+    is never advanced by anything. 33 drops across five surveys were stuck that
+    way (found 2026-08-23) - permanently invisible to --ml, and reported every
+    run as "not targeted (ml_pending)". S3 is the authority on whether a video
+    exists, so ask it about every pending drop and let the answer decide.
     """
     db = DatabaseManager()
-    pending_all = db.get_deployments_eligible("ml_status", [MlStatus.PENDING])
-    pending = [
-        d
-        for d in pending_all
-        if d.get("video_presence") in (VideoPresence.ABSENT, VideoPresence.ARCHIVED)
-    ]
+    pending = db.get_deployments_eligible("ml_status", [MlStatus.PENDING])
 
     if not pending:
         logging.info("No pending-arrival drops found.")
@@ -297,7 +302,21 @@ def _sync_deployments_to_db(
         try:
             sampling_start = float(row[config.csv_sampling_start_column])
             sampling_end = float(row[config.csv_sampling_end_column])
-            sampling_parse_failed = False
+            # float("nan") does NOT raise - it returns nan - and a blank cell in
+            # a float64 CSV column arrives as NaN, not "" or None. So the parse
+            # "succeeded", every NaN comparison in validate_sampling_window
+            # returned False (nan == 0, nan < 1800 and nan > start+1800 are all
+            # False, so the window looked valid), SQLite stored NaN as NULL, and
+            # the deployment was marked ingest_status=ok. The NaN then survived
+            # to `if sampling_end` in run_inference - truthy! - and died there on
+            # int(nan), one stage before the model. 1046 deployments were ok with
+            # no sampling window this way; 23 of them crashed ML on 2026-08-23.
+            sampling_parse_failed = math.isnan(sampling_start) or math.isnan(
+                sampling_end
+            )
+            if sampling_parse_failed:
+                sampling_start = None
+                sampling_end = None
         except (ValueError, TypeError, KeyError):
             sampling_start = None
             sampling_end = None

@@ -22,14 +22,6 @@ from spyfish.config.wrapper import config
 # Core conversion helpers
 # ---------------------------------------------------------------------------
 
-# Per-axis AABB shrink fraction. For a rotated rectangle, the closest non-
-# corner feature to each AABB edge is one of the 4 edge midpoints (head,
-# tail, back, belly of the fish silhouette). Shrinking each AABB axis by
-# this fraction of that midpoint's margin recovers background pixels without
-# clipping anatomy. 0 disables; 0.5 (half the geometric safety margin)
-# leaves the rest as buffer against annotator slop and float noise.
-SHRINK_SAFETY = 0.5
-
 
 def biigle_rect_to_yolo(
     points: List[float], img_w: int, img_h: int
@@ -85,8 +77,9 @@ def biigle_rect_to_yolo(
         )
         cx_px = (x_min + x_max) / 2.0
         cy_px = (y_min + y_max) / 2.0
-        half_w *= 1 - SHRINK_SAFETY * min_x_margin / half_w
-        half_h *= 1 - SHRINK_SAFETY * min_y_margin / half_h
+        shrink = config.rect_shrink_safety
+        half_w *= 1 - shrink * min_x_margin / half_w
+        half_h *= 1 - shrink * min_y_margin / half_h
         x_min, x_max = cx_px - half_w, cx_px + half_w
         y_min, y_max = cy_px - half_h, cy_px + half_h
 
@@ -565,9 +558,59 @@ def biigle_to_yolo(
             images_dir,
             context=f"{drop_dir.name} [{which}]",
         )
+        n_bg = _write_background_labels(drop_dir, labels_dir)
         logging.debug(f"  Wrote labels for {drop_dir.name} ({which}) → {labels_dir}")
+        if n_bg:
+            logging.info(
+                f"  {drop_dir.name}: {n_bg} reviewed-but-empty frame(s) written as "
+                f"background labels"
+            )
 
     return class_map
+
+
+def _write_background_labels(drop_dir: Path, labels_dir: Path) -> int:
+    """Write an empty .txt for every reviewed frame the report never mentioned.
+
+    The universe CSV (written by `sync_biigle_annotations` from the volume's own
+    file list) is the set of frames the expert was SHOWN. `convert_annotations_to_yolo`
+    writes a .txt only for frames carrying at least one annotation, because it
+    groups the annotation report by filename. The difference between the two is
+    exactly the reviewed-but-empty frames, and an empty .txt is how YOLO spells
+    "background image".
+
+    Deliberately driven by the universe CSV and NOT by the JPEGs in `frames/`:
+    `--biigle-upload` re-extracts frames, so the directory can hold frames newer
+    than the volume that was reviewed. Calling those "empty" would teach the
+    model that unreviewed water contains no fish, which is worse than the missing
+    negatives it fixes. No universe file (drops synced before this existed) means
+    no negatives written, never guessed ones.
+
+    Returns the number of background labels written.
+    """
+    universe_path = (
+        drop_dir
+        / "annotations"
+        / (f"{drop_dir.name}{config.biigle_expert_universe_suffix}")
+    )
+    if not universe_path.exists():
+        return 0
+    try:
+        names = pd.read_csv(universe_path)["filename"].astype(str).tolist()
+    except Exception as e:
+        logging.warning(f"  {drop_dir.name}: unreadable universe CSV ({e}), skipping")
+        return 0
+
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for name in names:
+        stem = Path(name).stem
+        txt = labels_dir / f"{stem}.txt"
+        if txt.exists():
+            continue
+        txt.write_text("")
+        written += 1
+    return written
 
 
 def download_extra_volume_labels(

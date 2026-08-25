@@ -98,12 +98,13 @@ def _run_ml(survey_id: str | None = None, force: bool = False) -> None:
         logging.info("No drops available for ML processing.")
         return
 
-    all_drop_ids = [t["drop_id"] for t in targets]
     # MaxN + QA frames are written per-drop inside run_inference_loop, before
     # each drop is marked ml_complete. finalize_batch_results is only the safety
-    # net for any drops still stuck in ml_running after the loop exits.
+    # net for any drops still stuck in ml_running after the loop exits, and it
+    # scopes itself to runner.claimed_drop_ids, targets lost to a concurrent job
+    # are not ours to mark ml_error.
     results = runner.run_inference_loop(targets)
-    runner.finalize_batch_results(results, all_drop_ids=all_drop_ids)
+    runner.finalize_batch_results(results)
 
 
 def _run_zooniverse_sync(force: bool = False) -> None:
@@ -262,9 +263,8 @@ def _run_biigle_upload_drop(drop_id: str, survey_volume: bool = False) -> str | 
 
     # Pooled mode: every drop of a survey shares one volume named for the
     # survey, so the expert reviews survey by survey instead of volume by
-    # volume. Set from --survey-volume in main(); a module global because
-    # DropStage.fn only receives the drop_id.
-    if SURVEY_VOLUME_MODE:
+    # volume. Bound from --survey-volume in _patch_stage.
+    if survey_volume:
         volume_info = upload_frames_to_expert_survey_volume(drop_id, frames_df)
     else:
         volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
@@ -423,8 +423,10 @@ def main() -> None:
         action="store_true",
         help="On --zooniverse-sync: re-fetch from API even if raw CSV already "
         "exists on disk. On --ml --survey: also reset the survey's "
-        "ml_complete/ml_error drops to ml_ready and re-run inference on them "
-        "(same-model outputs are overwritten; a new model writes alongside).",
+        "ml_complete/ml_error/ml_running drops to ml_ready and re-run inference "
+        "on them (same-model outputs are overwritten; a new model writes "
+        "alongside). ml_running drops are usually stranded by a killed job - do "
+        "not use --force while another ML job is running on the same survey.",
     )
     parser.add_argument(
         "--survey",
@@ -451,9 +453,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global SURVEY_VOLUME_MODE
-    SURVEY_VOLUME_MODE = args.survey_volume
-
     logging.info("═" * 60)
     logging.info(" SPYFISH AOTEAROA PIPELINE ".center(60, "═"))
     logging.info(f" NO-UPLOAD: {args.no_upload} ".center(60, "═"))
@@ -470,6 +469,11 @@ def main() -> None:
             return replace(
                 s,
                 fn=functools.partial(_run_ml, survey_id=args.survey, force=args.force),
+            )
+        if s.flag == "biigle-upload" and args.survey_volume:
+            return replace(
+                s,
+                fn=functools.partial(_run_biigle_upload_drop, survey_volume=True),
             )
         if s.flag == "zooniverse-sync":
             return replace(

@@ -177,6 +177,11 @@ def train_model(
         "workers": workers,
         "project": str(project_dir),
         "name": run_name,
+        # The dataset snapshot is written into project_dir/run_name before this
+        # call, so the dir already exists; without exist_ok Ultralytics would
+        # train into "<run_name>2" and leave the snapshot orphaned. Run names
+        # are timestamped to the second, so nothing else can collide here.
+        "exist_ok": True,
         "optimizer": config.training_optimizer,
         "lr0": config.training_lr0,
         "dropout": config.training_dropout,
@@ -200,8 +205,21 @@ def train_model(
     return best_weights
 
 
-def freeze_dataset_snapshot(data_yaml: Path, best_weights: Path) -> Optional[Path]:
-    """Freeze the exact dataset a model trained on, beside its weights.
+def freeze_dataset_snapshot(data_yaml: Path, run_dir: Path) -> Optional[Path]:
+    """Freeze the exact dataset a model trains on, beside its weights.
+
+    Called BEFORE training starts, not after. Two reasons, and the second is a
+    correctness one:
+
+      * A run that dies (SLURM timeout, OOM, node failure) leaves weights or
+        partial results with no record of what produced them. Run
+        20260821_020313 has no snapshot at all and its val split is now
+        unrecoverable, so it cannot be compared against any later checkpoint.
+      * ``training/species/`` is a SHARED workspace that ``--retrain
+        --data-prep`` deletes and rebuilds. A snapshot taken after a 3-hour
+        training run captures whatever is on disk at that moment, which may be
+        a completely different dataset. Taken first, it captures what training
+        actually opened.
 
     Writes a self-contained ``dataset/`` snapshot into the run dir (sibling of
     ``weights/``) so ``(model, data)`` is reproducible, you can always answer
@@ -218,8 +236,7 @@ def freeze_dataset_snapshot(data_yaml: Path, best_weights: Path) -> Optional[Pat
     try:
         data_yaml = Path(data_yaml)
         src_dir = data_yaml.parent  # e.g. .../training/species
-        run_dir = best_weights.parent.parent  # .../runs/<ts>_<kind>
-        snap = run_dir / "dataset"
+        snap = Path(run_dir) / "dataset"
         snap.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(data_yaml, snap / "data.yaml")
@@ -265,6 +282,8 @@ def run_training_pipeline(species_data_yaml: str) -> dict:
     logging.info(f"Validating species dataset: {species_data_yaml}")
     validate_dataset(species_data_yaml)
     _clear_yolo_cache(local_training_dir)
+    run_dir = local_training_dir / "runs" / f"{timestamp}_species"
+    freeze_dataset_snapshot(Path(species_data_yaml), run_dir)
     best_pt = train_model(
         data_yaml=species_data_yaml,
         base_model_path=str(base_model_path),
@@ -275,7 +294,6 @@ def run_training_pipeline(species_data_yaml: str) -> dict:
         imgsz=config.training_imgsz,
         batch=config.training_batch,
     )
-    freeze_dataset_snapshot(Path(species_data_yaml), best_pt)
     results = {"species": {"local": str(best_pt)}}
 
     logging.info(f"\nTraining pipeline complete: {results}")

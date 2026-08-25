@@ -1,5 +1,6 @@
 import csv
 import logging
+import math
 from functools import lru_cache
 from pathlib import Path
 
@@ -77,6 +78,17 @@ def run_yolo_inference(
                 f"{drop_id}: sampling_end={sampling_end:.0f}s exceeds actual video "
                 f"duration ({actual_duration_seconds:.0f}s). Video may be truncated "
                 f"or sampling window is wrong."
+            )
+        # `if sampling_end` is NOT enough: NaN is truthy, so a missing window
+        # (blank in SharePoint -> NaN through pandas) passed this guard and
+        # killed the drop on int(nan). Ingest now rejects such deployments, so
+        # reaching here means something upstream regressed - fail with a
+        # message that says which field, not a bare ValueError.
+        if sampling_end is not None and math.isnan(sampling_end):
+            raise ValueError(
+                f"{drop_id}: sampling_end is NaN (no sampling window in the "
+                f"deployment metadata). This drop should have been caught at "
+                f"ingest as a validation_error."
             )
         end_frame = int(sampling_end * true_fps) if sampling_end else total_video_frames
         end_frame = min(end_frame, total_video_frames)

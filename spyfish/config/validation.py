@@ -1,3 +1,4 @@
+import math
 import re
 
 from spyfish.config.base import BaseConfig, get_required
@@ -91,6 +92,22 @@ class ValidationConfig(BaseConfig):
         errors = []
         expected = self.buv_video_duration_seconds
         buffer = self.sampling_end_buffer_seconds
+
+        # NaN first: every comparison below is False against NaN, so a NaN
+        # window would sail through all three rules and be reported valid.
+        # Blank SamplingStart/SamplingEnd cells reach here as NaN (float64
+        # column), which is exactly the case these rules exist to catch.
+        if (
+            sampling_start is None
+            or sampling_end is None
+            or math.isnan(sampling_start)
+            or math.isnan(sampling_end)
+        ):
+            errors.append(
+                f"{drop_id}: sampling window missing "
+                f"(start={sampling_start!r}, end={sampling_end!r})."
+            )
+            return errors
 
         if sampling_start == 0:
             errors.append(

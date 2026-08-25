@@ -16,6 +16,7 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 
 from spyfish.biigle.biigle_handler import BiigleHandler
+from spyfish.biigle.selection_reason import reason_label_id, species_in_reason
 from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
@@ -101,13 +102,6 @@ def upload_frames_to_s3(
         f"(total {len(uploaded)}/{len(frame_paths)}) → '{s3_prefix}'"
     )
     return uploaded
-
-
-# Volume names are the ID alone. The project says whether it is training or
-# review, and the ID says whether it is a survey or a drop, so a suffix only
-# ate characters in a UI that truncates.
-SURVEY_VOLUME_NAME_TEMPLATE = "{survey_id}"
-DROP_VOLUME_NAME_TEMPLATE = "{drop_id}"
 
 
 # ── Find-or-create-and-append: idempotent survey-level volume management ─────
@@ -286,7 +280,7 @@ def create_biigle_volume(
 
     handler = BiigleHandler()
     s3_url = handler.build_s3_url(s3_frames_prefix)
-    volume_name = DROP_VOLUME_NAME_TEMPLATE.format(drop_id=drop_id)
+    volume_name = config.expert_drop_volume_name_template.format(drop_id=drop_id)
 
     logging.info(
         f"Creating Biigle image volume '{volume_name}' "
@@ -304,6 +298,107 @@ def create_biigle_volume(
         f"Volume created: id={volume_id}  url=https://biigle.de/volumes/{volume_id}"
     )
     return volume_info
+
+
+# ── Filename → Biigle image ID joins ─────────────────────────────────────────
+#
+# The COCO builder and the frames DataFrame both carry bare basenames, while
+# survey-pooled volumes register survey-relative names ({drop}/frames/{base}),
+# so the two sides can disagree on directory prefix. Basenames embed drop_id +
+# timestamp, making them unique within a volume, so join on basename and treat
+# a duplicate basename as the error it would be.
+
+
+def _basename(name: str) -> str:
+    return str(name).rsplit("/", 1)[-1]
+
+
+def _by_basename(name_to_id: dict, volume_id: int) -> dict:
+    out: dict = {}
+    for name, img_id in name_to_id.items():
+        base = _basename(name)
+        if base in out and out[base] != int(img_id):
+            raise ValueError(
+                f"Volume {volume_id}: basename {base!r} is registered twice "
+                f"(image IDs {out[base]} and {img_id}), cannot join "
+                "annotations by filename."
+            )
+        out[base] = int(img_id)
+    return out
+
+
+def resolve_species_label_id(
+    species_name: str, unmatched: Optional[Counter] = None
+) -> int:
+    """Species / class name → the Biigle label ID it should be filed under.
+
+    Routing sources, in precedence order:
+      1. config.label_mapping, explicit per-species override
+      2. the species registry, which owns every name → BIIGLE label id
+      3. 'bait' class → default_bait_label_id
+      4. Fallback → default_fish_label_id
+
+    The registry keys both the bare scientific name and the label tree's
+    "Common - Scientific" form, so either spelling of a class resolves.
+
+    Shared by the box upload and the selection-reason image labels so the two
+    can never disagree about which label a species belongs to. `unmatched`
+    collects fallback cases for the caller to report in one summary line
+    instead of one warning per annotation.
+    """
+    label_mapping = config.label_mapping or {}
+    if species_name in label_mapping:
+        return int(label_mapping[species_name])
+
+    species_tree = species_registry().name_to_biigle_label_id()
+    if species_name in species_tree:
+        return int(species_tree[species_name])
+
+    if species_name == "bait":
+        return config.default_bait_label_id
+
+    if species_name == config.catchall_class:
+        # The model's legitimate "fish present, species unknown" class.
+        # Fish: review required is its by-design destination, not a fallback.
+        return config.default_fish_label_id
+
+    if unmatched is not None:
+        unmatched[species_name] += 1
+    return config.default_fish_label_id
+
+
+def _resolve_image_ids(
+    volume_id: int,
+    needed_names: set,
+    filename_to_biigle_id: Optional[dict],
+    handler: BiigleHandler,
+) -> dict:
+    """Basename → Biigle image ID, preferring a caller-supplied map.
+
+    The caller (typically `find_or_create_volume_and_add_frames`) can pre-supply
+    this from `add_files_to_volume`'s response, which costs zero extra Biigle
+    calls. Falls back to a full image-list fetch only when the map is missing
+    or doesn't cover every filename needed.
+    """
+    if filename_to_biigle_id is not None:
+        filename_to_biigle_id = _by_basename(filename_to_biigle_id, volume_id)
+        if needed_names.issubset(filename_to_biigle_id):
+            logging.info(
+                f"Volume {volume_id}: using pre-supplied filename→ID map "
+                f"({len(filename_to_biigle_id)} entries); skipping get_volume_images."
+            )
+            return filename_to_biigle_id
+
+        missing = needed_names - set(filename_to_biigle_id)
+        logging.info(
+            f"Volume {volume_id}: pre-supplied map missing {len(missing)} "
+            "filename(s); falling back to full get_volume_images."
+        )
+
+    volume_images = handler.get_volume_images(volume_id)
+    return _by_basename(
+        {img["filename"]: int(img["id"]) for img in volume_images}, volume_id
+    )
 
 
 # ── Step 3: Annotation Upload ────────────────────────────────────────────────
@@ -346,54 +441,10 @@ def upload_coco_annotations_to_biigle(
         img["id"]: img["file_name"] for img in coco_data.get("images", [])
     }
 
-    # The COCO builder writes bare basenames while survey-pooled volumes
-    # register survey-relative names ({drop}/frames/{basename}), so the two
-    # sides can disagree on directory prefix. Basenames embed drop_id +
-    # timestamp, making them unique within a volume, join on basename, and
-    # treat a duplicate basename as the error it would be.
-    def _basename(name: str) -> str:
-        return name.rsplit("/", 1)[-1]
-
-    def _by_basename(name_to_id: dict) -> dict:
-        out: dict = {}
-        for name, img_id in name_to_id.items():
-            base = _basename(name)
-            if base in out and out[base] != int(img_id):
-                raise ValueError(
-                    f"Volume {volume_id}: basename {base!r} is registered twice "
-                    f"(image IDs {out[base]} and {img_id}), cannot join COCO "
-                    "annotations by filename."
-                )
-            out[base] = int(img_id)
-        return out
-
-    # Resolve filename → Biigle image_id. The caller (typically
-    # find_or_create_volume_and_add_frames) can pre-supply this map from
-    # add_files_to_volume's response, which costs zero extra Biigle calls.
-    # Fall back to a full image-list fetch only when the map is missing or
-    # doesn't cover every filename we need to annotate.
     needed_names = {_basename(n) for n in coco_img_id_to_filename.values()}
-    if filename_to_biigle_id is not None:
-        filename_to_biigle_id = _by_basename(filename_to_biigle_id)
-    if filename_to_biigle_id is not None and needed_names.issubset(
-        filename_to_biigle_id
-    ):
-        logging.info(
-            f"Volume {volume_id}: using pre-supplied filename→ID map "
-            f"({len(filename_to_biigle_id)} entries); skipping get_volume_images."
-        )
-    else:
-        if filename_to_biigle_id is not None:
-            missing = needed_names - set(filename_to_biigle_id)
-            logging.info(
-                f"Volume {volume_id}: pre-supplied map missing "
-                f"{len(missing)} filename(s); falling back to full "
-                "get_volume_images."
-            )
-        volume_images = handler.get_volume_images(volume_id)
-        filename_to_biigle_id = _by_basename(
-            {img["filename"]: int(img["id"]) for img in volume_images}
-        )
+    filename_to_biigle_id = _resolve_image_ids(
+        volume_id, needed_names, filename_to_biigle_id, handler
+    )
 
     # Map COCO category IDs to species names
     coco_cat_id_to_name = {
@@ -419,16 +470,8 @@ def upload_coco_annotations_to_biigle(
             "valid confidence_threshold (0 disables filtering) before uploading."
         )
 
-    # Routing sources, in precedence order:
-    #   1. config.label_mapping, explicit per-species override
-    #   2. the species registry, which owns every name → BIIGLE label id
-    #   3. 'bait' class → default_bait_label_id
-    #   4. Fallback → label_id (default_fish_label_id), with a warning
-    #
-    # The registry keys both the bare scientific name and the label tree's
-    # "Common - Scientific" form, so either spelling of a class resolves.
-    label_mapping = config.label_mapping or {}
-    species_tree = species_registry().name_to_biigle_label_id()
+    # Species → label routing lives in `resolve_species_label_id`, shared with
+    # the selection-reason image labels so the two cannot disagree.
     unmatched: Counter = Counter()
 
     # Build the Biigle bulk payload
@@ -473,19 +516,7 @@ def upload_coco_annotations_to_biigle(
         cat_id = ann.get("category_id")
         species_name = coco_cat_id_to_name.get(cat_id, "unknown")
 
-        if species_name in label_mapping:
-            assigned_label_id = label_mapping[species_name]
-        elif species_name in species_tree:
-            assigned_label_id = species_tree[species_name]
-        elif species_name == "bait":
-            assigned_label_id = config.default_bait_label_id
-        elif species_name == "fish":
-            # `fish` is the model's legitimate "fish present, species unknown"
-            # class. Fish: review required is its by-design destination.
-            assigned_label_id = label_id
-        else:
-            unmatched[species_name] += 1
-            assigned_label_id = label_id
+        assigned_label_id = resolve_species_label_id(species_name, unmatched)
 
         biigle_annotations.append(
             {
@@ -531,6 +562,119 @@ def upload_coco_annotations_to_biigle(
 
     result = handler.upload_image_annotations(volume_id, biigle_annotations)
     return result
+
+
+# ── Step 4: Selection-reason image labels ────────────────────────────────────
+
+
+def attach_selection_reason_labels(
+    volume_id: int,
+    frames_df: pd.DataFrame,
+    filename_to_biigle_id: Optional[dict] = None,
+) -> int:
+    """Label each uploaded frame in Biigle with WHY it was selected for review.
+
+    Every frame carries a `SelectionReason` from the selection strategy; this
+    turns that into a whole-image label under the "Pick" parent in the workflow
+    tree, so the expert can see at a glance whether they are looking at a MaxN
+    peak, an uncertain detection, or a model-blind spot check. Unlike the
+    per-box annotation confidence, whole-image labels are actually rendered by
+    Biigle: on the volume-overview thumbnail, in the annotation tool's "Image
+    Labels" tab, and as a volume filter rule.
+
+    A no-op when no reason labels are configured, which is the state before the
+    labels have been created in Biigle. Never raises: these are review hints,
+    and the frames and their annotations have already landed by this point, so
+    a labelling failure must not fail the upload.
+
+    Returns the number of labels successfully attached.
+    """
+    if not config.selection_reason_label_ids:
+        logging.info(
+            "No biigle.selection_reason_labels configured, skipping "
+            "selection-reason image labels."
+        )
+        return 0
+
+    reason_col = config.selection_reason_column
+    if reason_col not in frames_df.columns:
+        logging.warning(
+            f"Volume {volume_id}: frames have no {reason_col!r} column, "
+            "cannot attach selection-reason image labels."
+        )
+        return 0
+
+    # One (basename, label_id) per extracted frame. Rows without a FramePath
+    # are extraction failures that were never uploaded.
+    # A frame can earn several labels: its "Pick" reason, plus the species it
+    # is evidence for when the bucket names one. A set per frame collapses the
+    # duplicates that arise when two selection rows share a timestamp (two
+    # species peaking in the same frame produce one image).
+    include_species = config.selection_reason_include_species
+    wanted: Dict[str, set] = {}
+    species_unmatched: Counter = Counter()
+    unmatched = 0
+
+    for _, row in frames_df.iterrows():
+        frame_path = row.get("FramePath")
+        if not frame_path or pd.isna(frame_path):
+            continue
+        reason = row.get(reason_col)
+        label_id = reason_label_id(reason)
+        if label_id is None:
+            unmatched += 1
+            continue
+
+        base = _basename(frame_path)
+        wanted.setdefault(base, set()).add(label_id)
+
+        if include_species:
+            for name in species_in_reason(reason):
+                wanted[base].add(resolve_species_label_id(name, species_unmatched))
+
+    if unmatched:
+        logging.info(
+            f"Volume {volume_id}: {unmatched} frame(s) had no configured "
+            "selection-reason label and were left unlabelled."
+        )
+    if species_unmatched:
+        details = ", ".join(f"{sp}x{n}" for sp, n in species_unmatched.most_common())
+        logging.warning(
+            f"Volume {volume_id}: {sum(species_unmatched.values())} selection "
+            f"species fell back to default_fish_label_id. Unmatched: {details}."
+        )
+    if not wanted:
+        return 0
+
+    try:
+        handler = BiigleHandler()
+        name_to_id = _resolve_image_ids(
+            volume_id, set(wanted), filename_to_biigle_id, handler
+        )
+
+        pairs: list = []
+        for base, label_ids in wanted.items():
+            image_id = name_to_id.get(base)
+            if image_id is None:
+                logging.warning(
+                    f"Volume {volume_id}: no Biigle image registered for frame "
+                    f"{base!r}, cannot attach its selection-reason label."
+                )
+                continue
+            pairs.extend((image_id, lid) for lid in sorted(label_ids))
+
+        logging.info(
+            f"Volume {volume_id}: {len(pairs)} image label(s) across "
+            f"{len(wanted)} frame(s)"
+            + (" (reason + species)" if include_species else " (reason only)")
+        )
+        return handler.attach_image_labels(pairs)
+    except Exception as e:
+        logging.warning(
+            f"Volume {volume_id}: selection-reason image labels failed ({e}). "
+            "Frames and annotations are unaffected."
+        )
+        return 0
 
 
 # ── Combined convenience function ─────────────────────────────────────────────
@@ -600,6 +744,9 @@ def upload_frames_to_biigle(
     # Step 4: Upload COCO bounding box annotations to the new volume
     if volume_id:
         upload_coco_annotations_to_biigle(volume_id, coco)
+        # Step 5: Tell the expert why each frame is in front of them. Runs after
+        # the annotations so a labelling problem cannot cost us the boxes.
+        attach_selection_reason_labels(volume_id, frames_df)
 
     return volume_info
 
@@ -659,6 +806,7 @@ def upload_frames_to_expert_survey_volume(
     # the two.
     base_map = {Path(name).name: vid for name, vid in filename_to_id.items()}
     upload_coco_annotations_to_biigle(volume_id, coco, filename_to_biigle_id=base_map)
+    attach_selection_reason_labels(volume_id, frames_df, filename_to_biigle_id=base_map)
 
     db = DatabaseManager()
     db.update_biigle_volume_id(drop_id, volume_id)
@@ -686,7 +834,9 @@ def upload_to_survey_volume(drop_id: str, frame_paths: list, coco: dict) -> int:
     if not file_names:
         raise RuntimeError(f"{drop_id}: no frames uploaded to S3, aborting Biigle.")
 
-    volume_name = SURVEY_VOLUME_NAME_TEMPLATE.format(survey_id=survey_id)
+    volume_name = config.training_survey_volume_name_template.format(
+        survey_id=survey_id
+    )
     volume_id, filename_to_id = find_or_create_volume_and_add_frames(
         volume_name=volume_name,
         s3_frames_prefix=s3_prefix,
