@@ -141,6 +141,17 @@ def prepare_from_annotations(
             )
             df = df[~drop_rows]
 
+    excluded_species = config.training_excluded_species
+    if excluded_species:
+        drop_rows = df["ScientificName"].isin(excluded_species)
+        if drop_rows.any():
+            logging.info(
+                f"Excluded {int(drop_rows.sum())} MaxN row(s) of "
+                f"{sorted(df.loc[drop_rows, 'ScientificName'].unique())} "
+                "per training.excluded_species."
+            )
+            df = df[~drop_rows]
+
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
 
