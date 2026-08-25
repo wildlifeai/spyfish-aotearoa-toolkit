@@ -1469,6 +1469,7 @@ Yields 22–37 frames per deployment (mean 29) across six real species-model dro
 | `dropout`                     | 0.1                                                    | Head-dropout rate; helps small-dataset overfitting (0.0 = disabled)     |
 | `class_floor_min_images`      | 50                                                     | Species appearing in fewer than this many distinct frames are merged into "fish" |
 | `val_min_boxes_per_species`   | 20                                                     | Absolute floor under each species' val target, on top of `val_balance_pct`. Clamped by `val_balance_max_share`, and skipped for species below `class_floor_min_images` frames (they merge into `fish` anyway) |
+| `cap_exempt_rare_below_frames`| 600                                                    | Frames holding a species with fewer than this many frames corpus-wide skip `cap_frames_per_drop`. Bucket classes (`fish`, `bait`) are never eligible. 0 disables |
 | `excluded_drops_file`         | `process_files/training_lists/excluded_drops.txt`      | DropIDs to skip (one per line; `#` comments OK)                         |
 | `force_val_drops_file`        | `process_files/training_lists/force_val_drops.txt`     | DropIDs to force into val (overrides survey-aware donation)             |
 | `retrain_min_improvement_pct` | 2.0                                                    | New model must beat production by ≥ this much mAP@0.5 to be promoted    |
@@ -1779,6 +1780,68 @@ counts post-cap, post-split train images, so a species can still be lifted and
 then merged. On 2026-08-24 that happened to `Conger verreauxi`, `Elasmobranchii`
 and `Meuschenia scaber` — 3 of 10 lifts wasted. Making the balancer count
 post-cap frames is the fix (`claude_docs/todo.md`).
+
+### The per-drop cap and the rare-species exemption (2026-08-25)
+
+`cap_frames_per_drop` (50) exists because BUV is a fixed camera: frames within
+one deployment share a background and repeat individuals, so beyond ~50 they are
+largely redundant. `dominant_species` makes blue-cod-only frames the first to go
+when trimming.
+
+That is right for redundant frames and wrong for scarce ones. Once a deployment
+holds more than `cap` frames containing SOME non-dominant species, the sampler
+thins them at random, so a deployment's only rock-lobster frames compete on equal
+terms with its snapper frames and can be discarded. `cap_exempt_rare_below_frames`
+keeps frames holding a scarce species unconditionally, and they do NOT consume
+the cap budget — the cap stops redundancy, and a scarce species' frames are the
+opposite of redundant.
+
+Chosen over frame DUPLICATION deliberately (Kalindi, 2026-08-25): duplicating a
+frame gives the model N identical gradient signals, which is close to raising the
+learning rate for one image and invites memorisation. More REAL frames from the
+same deployment share a background but differ in fish position, pose, and which
+individuals are present — the variation a detector actually needs. Ultralytics
+also has no per-class loss weighting (`cls` is a single global gain), so
+frame-level selection is the only lever available.
+
+**Bucket classes are never "rare".** `fish` is the catch-all that absorbs every
+floored species and `bait` is in essentially every frame, so counting them as
+scarce exempts almost every frame and the cap stops applying at all. Measured
+2026-08-25 before the guard: deployments trimmed by the cap fell 20 -> 6 and 2541
+extra frames entered the dataset — not the targeted change intended. The guard
+uses `Species.is_bucket`, the same flag the floor and MaxN already rely on.
+
+Note the threshold is a corpus-wide FRAME count computed in a pre-pass, so a
+species is rare because it is scarce overall, not because one deployment happened
+to see little of it.
+
+### Eels: Anguilliformes pooling (2026-08-25)
+
+Morays (`Muraenidae`, ~200 frames) and congers (`Conger verreauxi`, 64) both sit
+in Anguilliformes (AphiaID 10295), so pooling them is a real taxon rather than a
+shape-based grouping — a conger reported as a moray would be a genuine
+misidentification, "an eel" is not. Conger alone floors into `fish`; Muraenidae
+alone is weak (recall 0.28-0.34, mAP 0.256 across three runs). Pooled they are
+~264 frames, and "elongate body in a crevice" is a more learnable concept than
+the moray/conger distinction.
+
+Hagfish (`Myxinidae`) are deliberately excluded: class Myxini, not eels at all,
+and at ~200 frames / 0.72 recall already one of the better classes.
+
+Two mechanics worth remembering:
+
+* **The pooling is training-time only.** Experts keep annotating morays and
+  congers separately in Biigle, so species detail survives in the MaxN CSVs and
+  in reporting. Only the model trains on the pooled class.
+* **`canonicalize_species` is a single dict lookup, not transitive**
+  (`.get(resolved, resolved)`). Every child must point at `Anguilliformes`
+  DIRECTLY — the five `Gymnothorax`/`Enchelycore` entries were repointed from
+  `Muraenidae`, because via-Muraenidae would resolve one step and stop.
+
+`Anguilliformes` is appended to `training.class_order` as id 22. That makes
+`bait` (21) no longer the last entry: the roster is APPEND-ONLY, so its frozen id
+is the contract, not its position. Inserting before `bait` to keep it last would
+renumber every id after it.
 
 ### Dataset snapshots and the production comparison
 

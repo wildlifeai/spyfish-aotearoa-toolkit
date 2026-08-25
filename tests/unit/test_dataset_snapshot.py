@@ -1,4 +1,5 @@
 """Tests for freeze_dataset_snapshot, which now runs BEFORE training."""
+
 import yaml
 
 from spyfish.ml.training.train import freeze_dataset_snapshot
@@ -32,7 +33,9 @@ def test_snapshot_written_into_a_run_dir_that_has_no_weights_yet(tmp_path):
 
     assert snap == run_dir / "dataset"
     assert yaml.safe_load((snap / "data.yaml").read_text())["names"] == [
-        "fish", "Pagrus auratus"
+        "fish",
+        "Pagrus auratus",
+    ]
     assert (snap / "class_map.json").exists()
     assert (snap / "labels" / "train").glob("*.txt")
     assert not (run_dir / "weights").exists()

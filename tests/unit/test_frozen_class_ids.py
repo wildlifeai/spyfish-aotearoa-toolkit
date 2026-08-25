@@ -36,7 +36,12 @@ def test_configured_roster_pins_the_indicator_species_low():
     assert order[1] == "Pagrus auratus"  # snapper
     assert order[2] == "Parapercis colias"  # blue cod
     assert order[3] == "Jasus edwardsii"  # rock lobster
-    assert order[-1] == "bait"  # not a species, last on purpose
+    # bait was placed last "on purpose" when the roster ended there, but the
+    # roster is APPEND-ONLY, so anything added later necessarily sits after it
+    # (Anguilliformes, 2026-08-25). Its frozen ID is the real contract, not its
+    # position at the end - asserting "last" would break on every future append
+    # and tempt someone into inserting before it, which renumbers every id after.
+    assert order[21] == "bait"  # not a species; pinned id, no longer last
 
 
 def test_every_indicator_species_is_on_the_roster():

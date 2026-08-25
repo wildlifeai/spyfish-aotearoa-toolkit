@@ -106,3 +106,23 @@ def test_extras_bypass_the_cap_entirely(tmp_path):
         rng=random.Random(42),
     )
     assert len(ff[DROP]) == 85 and stats["extras_uncapped"] == 1
+
+
+def test_bucket_classes_are_never_rare(tmp_path):
+    """'fish' and 'bait' must not be cap-exempt however few frames they have.
+
+    'fish' is the catch-all that absorbs every floored species and 'bait' is in
+    essentially every frame, so treating them as rare exempts almost every frame
+    and the cap stops applying. Measured 2026-08-25: drops sampled down by the
+    cap fell 20 -> 6 and 2541 extra frames came in.
+    """
+    from spyfish.config.species import species_registry
+
+    reg = species_registry()
+    for bucket in ("fish", "bait"):
+        sp = reg.get(bucket)
+        assert sp is not None and sp.is_bucket, f"{bucket} must be a bucket class"
+    # a real species must NOT be flagged as a bucket, or the guard would
+    # silently exclude everything
+    sp = reg.get("Jasus edwardsii")
+    assert sp is not None and not sp.is_bucket
