@@ -12,16 +12,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from theme import NEUTRAL
+from theme import (
+    DETAIL_COLOURS,
+    FOOTAGE_STATE_COLORS,
+    MEDIA_FUNNEL_COLORS,
+    TEXT_ON_FILL,
+)
+
+from spyfish.config.base import VideoPresence
 
 from .charting import style, year_axis
 from .charts.deployments import render_deployment_browser, render_exports
 from .layout import chips, section
-
-# Best to worst, and fixed so both charts stack the same way. "absent" sits
-# above "present" because it is the actionable state, and below
-# "no_video_bad_dep" because that one is not a footage problem at all.
-STATE_ORDER = ["present", "archived", "absent", "no_video_bad_dep", "unknown"]
 
 # Archived splits by whether the deployment is already annotated, because the
 # two mean different things operationally: one is a restore backlog, the other
@@ -34,36 +36,30 @@ DETAIL_ORDER = [
     "No footage expected",
     "Unknown",
 ]
-DETAIL_COLOURS = {
-    "Present": "#26A69A",
-    "Archived, annotated": "#7FB77E",
-    "Archived, not annotated": "#FF9800",
-    "Absent": "#EF5350",
-    "No footage expected": NEUTRAL,
-    "Unknown": "#BDBDBD",
-}
 
 
 def _detail_state(presence: pd.Series, annotated: pd.Series) -> pd.Series:
     """Footage state, with archived split by whether annotations already exist."""
     labels = presence.map(
         {
-            "present": "Present",
-            "absent": "Absent",
-            "no_video_bad_dep": "No footage expected",
+            VideoPresence.PRESENT: "Present",
+            VideoPresence.ABSENT: "Absent",
+            VideoPresence.NO_VIDEO_BAD_DEP: "No footage expected",
         }
     )
-    archived = presence == "archived"
+    archived = presence == VideoPresence.ARCHIVED
     labels = labels.mask(archived & annotated, "Archived, annotated")
     labels = labels.mask(archived & ~annotated, "Archived, not annotated")
     return labels.fillna("Unknown")
 
 
 PRESENCE_MEANING = {
-    "present": "In S3 standard storage. No restore needed.",
-    "archived": "In cold storage. Retrievable, but not immediately.",
-    "absent": "Expected but not found. This is the actionable state.",
-    "no_video_bad_dep": "No footage expected. The deployment itself was bad.",
+    VideoPresence.PRESENT: "In S3 standard storage. No restore needed.",
+    VideoPresence.ARCHIVED: "In cold storage. Retrievable, but not immediately.",
+    VideoPresence.ABSENT: "Expected but not found. This is the actionable state.",
+    VideoPresence.NO_VIDEO_BAD_DEP: (
+        "No footage expected. The deployment itself was bad."
+    ),
 }
 
 
@@ -79,10 +75,10 @@ def render(ctx: dict) -> None:
     presence = dep["video_presence"].fillna("unknown")
     counts = presence.value_counts()
 
-    present = int(counts.get("present", 0))
-    archived = int(counts.get("archived", 0))
-    absent = int(counts.get("absent", 0))
-    no_video = int(counts.get("no_video_bad_dep", 0))
+    present = int(counts.get(VideoPresence.PRESENT, 0))
+    archived = int(counts.get(VideoPresence.ARCHIVED, 0))
+    absent = int(counts.get(VideoPresence.ABSENT, 0))
+    no_video = int(counts.get(VideoPresence.NO_VIDEO_BAD_DEP, 0))
     # Deployments that never had footage are not a coverage gap, they are a
     # deployment that went wrong. Counting them in the denominator understates
     # coverage.
@@ -92,7 +88,7 @@ def render(ctx: dict) -> None:
     kpis[0].metric("Deployments", f"{len(dep):,}")
     kpis[1].metric(
         "In standard storage",
-        f"{present / expected:.0%}" if expected else "—",
+        f"{present / expected:.0%}" if expected else "-",
         help=f"Footage in S3 standard storage, so it can be processed without "
         f"a restore: {present:,} of {expected:,} "
         f"deployments that should have footage. The {no_video:,} recorded "
@@ -101,7 +97,7 @@ def render(ctx: dict) -> None:
     )
     kpis[2].metric(
         "Accessible",
-        f"{(present + archived) / expected:.0%}" if expected else "—",
+        f"{(present + archived) / expected:.0%}" if expected else "-",
         help=f"Footage that exists at all, readable now or not: {present:,} "
         f"present plus {archived:,} archived, over {expected:,} expected. "
         f"Archived footage is in cold storage. It is recoverable with a "
@@ -144,9 +140,9 @@ def render(ctx: dict) -> None:
         # ML or citsci output is still waiting for review. It also means an
         # archived deployment with only ML output still needs restoring.
         anno = dep["expert_annotations"].fillna(0) > 0
-        expected_mask = presence != "no_video_bad_dep"
-        exists_mask = presence.isin(["present", "archived"])
-        ready_mask = presence == "present"
+        expected_mask = presence != VideoPresence.NO_VIDEO_BAD_DEP
+        exists_mask = presence.isin([VideoPresence.PRESENT, VideoPresence.ARCHIVED])
+        ready_mask = presence == VideoPresence.PRESENT
 
         # Losses first: what has no footage to talk about. Three tiers, each a
         # strict subset, so the drops are the two ways footage goes missing.
@@ -161,7 +157,7 @@ def render(ctx: dict) -> None:
                 y=stages["Stage"],
                 x=stages["Count"],
                 textinfo="value+percent initial",
-                marker_color=["#90A4AE", "#42A5F5", "#26A69A"],
+                marker_color=[MEDIA_FUNNEL_COLORS[s] for s in stages["Stage"]],
             )
         )
         style(fig, height=230)
@@ -175,7 +171,7 @@ def render(ctx: dict) -> None:
         # not, accessible now or archived. That is a single classification, not
         # a chain, so it is a bar rather than more funnel tiers, a funnel can
         # only narrow, and these four do not nest.
-        arch = presence == "archived"
+        arch = presence == VideoPresence.ARCHIVED
         with_footage = int(exists_mask.sum())
         # Furthest from done to done: archived and unannotated needs a restore
         # AND review, standard-but-unannotated needs only review, annotated in
@@ -186,22 +182,23 @@ def render(ctx: dict) -> None:
         # IS, which is the same kind of fact as "archived". "Ready" described
         # what could be done with it, mixing two ideas in one axis.
         states = [
-            ("Not annotated, archived", arch & ~anno, "#D9603B"),
-            ("Not annotated, standard storage", ready_mask & ~anno, "#FF9800"),
-            ("Annotated, standard storage", ready_mask & anno, "#0072B2"),
-            ("Annotated, archived", arch & anno, "#7FB77E"),
+            ("Not annotated, archived", arch & ~anno),
+            ("Not annotated, standard storage", ready_mask & ~anno),
+            ("Annotated, standard storage", ready_mask & anno),
+            ("Annotated, archived", arch & anno),
         ]
         composition = pd.DataFrame(
             {
-                "State": [name for name, _, _ in states],
-                "Deployments": [int(mask.sum()) for _, mask, _ in states],
+                "State": [name for name, _ in states],
+                "Deployments": [int(mask.sum()) for _, mask in states],
             }
         )
         composition["Share"] = composition["Deployments"] / max(with_footage, 1)
 
         st.markdown(f"**The {with_footage:,} deployments that have footage**")
         fig = go.Figure()
-        for (name, _, colour), row in zip(states, composition.itertuples()):
+        for (name, _), row in zip(states, composition.itertuples()):
+            colour = FOOTAGE_STATE_COLORS[name]
             fig.add_bar(
                 x=[row.Deployments],
                 y=["Footage"],
@@ -211,7 +208,7 @@ def render(ctx: dict) -> None:
                 text=[f"{row.Deployments:,}<br>{row.Share:.0%}"],
                 textposition="inside",
                 insidetextanchor="middle",
-                textfont=dict(color="white"),
+                textfont=dict(color=TEXT_ON_FILL),
                 hovertemplate=f"{name}<br>%{{x:,}} deployments<extra></extra>",
             )
         style(

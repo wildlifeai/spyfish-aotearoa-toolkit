@@ -9,11 +9,12 @@ that:
 * the reporting views each get their own nav entry and URL,
 * the support page stays routable without appearing in the nav list.
 
-Imports here are kept to streamlit and `support`, which itself imports only
-streamlit. `st.navigation` runs this file on every page load, so anything it
-imports becomes a single point of failure for the whole app, including the
-support page that exists to survive breakage. The reporting views are imported
-lazily inside `_reporting_view` for the same reason.
+Imports here are kept to streamlit, `support` and `cache_controls`, which
+themselves import only streamlit. `st.navigation` runs this file on every
+page load, so anything it imports becomes a single point of failure for the
+whole app, including the support page that exists to survive breakage. The
+report shell is imported behind a guard, and each reporting view is imported
+lazily inside `_view` for the same reason.
 
 `render_contact_note()` runs after `nav.run()` so it lands at the bottom of the
 sidebar, and is the only route to the support page. Do not add a link above
@@ -33,6 +34,63 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# The DOC logo, once here so it reaches every page (`st.navigation` runs this
+# file on every page load). Guarded like the styling below: a missing or
+# renamed asset must never take the app down, it just renders without a logo.
+# doc_logo.svg is the full lock-up (emblem, wordmark, "MPA reporting
+# dashboard"), shown both in the sidebar and, when the sidebar is collapsed,
+# in the top-left corner: the emblem alone read as an unbranded badge there.
+# doc_emblem.svg is kept for anywhere a square mark is wanted.
+# Replace either file with the official brand asset to change it everywhere.
+_STATIC = Path(__file__).parent / "static"
+_DOC_LOGO = _STATIC / "doc_logo.svg"
+if _DOC_LOGO.exists():
+    try:
+        st.logo(str(_DOC_LOGO), size="large", icon_image=str(_DOC_LOGO))
+        # Streamlit renders st.logo inside a FIXED 3.75rem sidebar-header
+        # strip (StyledSidebarHeaderContainer sets height: headerHeight) and
+        # caps the img at 2rem tall, so the lock-up came out as a thumbnail
+        # whatever the file said. Both constraints are lifted: the header
+        # grows with its content, and the image takes the full sidebar width
+        # minus the collapse (<<) button, height following the SVG's aspect
+        # ratio.
+        # The img's runtime data-testid is `stSidebarLogo` (`stLogo` is only
+        # its class), which is why an earlier `[data-testid="stLogo"]` rule
+        # matched nothing. Verified against the live DOM.
+        st.markdown(
+            """
+            <style>
+              div[data-testid="stSidebarHeader"] {
+                height: auto !important;
+                align-items: flex-start !important;
+              }
+              div[data-testid="stSidebarHeader"] > div:first-child {
+                flex: 1 1 auto;
+                min-width: 0;
+              }
+              img[data-testid="stSidebarLogo"] {
+                height: auto !important;
+                max-height: none !important;
+                width: 100% !important;
+                max-width: none !important;
+              }
+              /* Sidebar collapsed: Streamlit moves the logo into the top bar
+                 (`stHeaderLogo`) with the same 2rem cap. Fill the bar's
+                 height instead, width following the SVG's aspect ratio, so
+                 the whole lock-up sits in the corner rather than a thumbnail. */
+              img[data-testid="stHeaderLogo"] {
+                height: 3.25rem !important;
+                max-height: none !important;
+                width: auto !important;
+                max-width: none !important;
+              }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:  # noqa: BLE001, chrome must never break navigation
+        pass
 
 # Text sizing for the whole app, applied here because `st.navigation` runs this
 # file on every page load, so it reaches pages that never import `theme`.
@@ -183,7 +241,7 @@ def _file_page(path: str, **kwargs):
     """`st.Page` for a file, or None if the file is gone.
 
     `st.Page` raises on a missing file, and it is constructed before
-    `nav.run()` and `render_contact_note()` — so an unguarded one kills the app
+    `nav.run()` and `render_contact_note()`, so an unguarded one kills the app
     with a traceback and without the banner saying who to contact. Returning
     None keeps every other page working and names the missing file instead.
     """
@@ -217,15 +275,6 @@ metadata_page = view_pages.get(("Operations", "Metadata error review"))
 videos_page = _file_page(
     "pages/📺_View_Deployment_Videos.py", title="Deployment Videos", icon="📺"
 )
-# Unreleased dashboard concepts, gated on TEST_DASHBOARD_PASSWORD by the page
-# itself. Named for what it is rather than for the dataset behind it, so it can
-# hold the next draft too.
-dashboard_test_page = _file_page(
-    "pages/_advanced/🐚_Mussel_Insights.py",
-    title="Dashboard test",
-    icon="🧪",
-    url_path="dashboard-test",
-)
 # Model Metrics sits in Operations, not Tools: how the model is performing is a
 # question about the state of the pipeline, like every other view in that
 # section. At the bottom of the group, since it is the most specialist view.
@@ -244,6 +293,14 @@ substrate_page = _file_page(
     icon="🪨",
     url_path="substrate-cover",
 )
+# Checking tool, not a report: play a legacy-annotated deployment at the
+# second its MaxN was recorded, to judge the import against the footage.
+legacy_check_page = _file_page(
+    "pages/_advanced/🎬_Legacy_MaxN_Check.py",
+    title="Legacy MaxN check",
+    icon="🎬",
+    url_path="legacy-maxn-check",
+)
 # Registered so the URL resolves, but left out of `st.navigation` groups so it
 # does not appear in the sidebar. The contact note at the bottom of the sidebar
 # is the way in.
@@ -260,22 +317,8 @@ support_page = _file_page(
 #
 # Home sits in an unnamed section so it renders without a header, above the
 # groups. It is the app landing page, not part of the report.
-# Pre-rebuild versions, restored from git and listed so the old visualisations
-# can be compared against the new ones. Not maintained: they read the same data
-# their own way, so where one disagrees with a Reporting view, the Reporting
-# view is the one that has been checked.
-#
-# Only what still shows something the rebuild does not. The archived Sites,
-# Experiments, Model Metrics, segmented Reporting and Programme Health pages
-# were checked against their live versions and matched, so they were dropped.
-# Git history holds them if they are ever wanted again. Programme Health at
-# `app/pages/📈_Health_Dashboard.py`.
-# The last one left, `_archive/ML_vs_Expert.py`, is no longer a nav entry: it is
-# a view inside Dashboard test, next to the current version of the same
-# comparison, which is where anyone would want to read the two against each
-# other. That page runs the file directly, so nothing here has to register it.
-ARCHIVE_PAGES: list = []
-archive_pages: list = []
+# The pre-rebuild comparison pages that used to sit here were checked against
+# their live versions and dropped. Git history holds them.
 
 # Sections with no pages (the fallback mode) are left out entirely, an empty
 # nav group renders as a bare header pointing at nothing.
@@ -295,19 +338,18 @@ nav = st.navigation(
     {
         **_nav_sections,
         # Everything that is not one of the two report sections: the
-        # exploratory pages, the operational tools, the pre-rebuild pages kept
-        # for comparison, and the support page. One group rather than four,
-        # because four headers for eleven links is mostly headers.
+        # operational tools, the advanced checking pages, and the support
+        # page. One group rather than several, because several headers for
+        # a handful of links is mostly headers.
         #
         # `support_page` is registered so /support resolves. Streamlit routes
         # only pages that are in the nav, but `render_contact_note` hides this
         # link with CSS. The red box at the bottom of the sidebar is the way in.
         "Tools": _present(
             [
-                dashboard_test_page,
                 substrate_page,
                 videos_page,
-                *archive_pages,
+                legacy_check_page,
                 support_page,
             ]
         ),

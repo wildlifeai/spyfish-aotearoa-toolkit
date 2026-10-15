@@ -22,34 +22,30 @@ contrast is available at every level.
 Site coordinates come from the published paper and are safe to plot, see the
 note on ``SITE_COORDS``.
 
-Run directly:
-    streamlit run "app/pages/_advanced/🐚_Mussel_Insights.py"
+Run as its own app, from ``app/`` so the secrets resolve:
+    cd app && streamlit run ../in_progress/uoa/app.py
+
+Served only through ``uoa/app.py``, which puts ``app/`` on sys.path for the
+shared modules imported below; this page is not launched on its own.
 """
 
-import sys
+import base64
+import math
+import re
 from pathlib import Path
 
-# Allow launching this page directly as well as through the main entrypoint.
-# Streamlit only puts the entrypoint's folder on sys.path, so the shared
-# `theme` module in app/ would not resolve. parents[2] is app/.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-import base64  # noqa: E402
-import math  # noqa: E402
-import re  # noqa: E402
-
-import pandas as pd  # noqa: E402
-import plotly.express as px  # noqa: E402
-import plotly.graph_objects as go  # noqa: E402
-import streamlit as st  # noqa: E402
-from ecology_data import pielou, shannon, simpson  # noqa: E402
-from theme import BIODIVERSITY_BANDS, PLOT_LAYOUT, biodiversity_band  # noqa: E402
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from ecology_data import pielou, shannon, simpson
+from theme import BIODIVERSITY_BANDS, PLOT_LAYOUT, biodiversity_band
 
 st.set_page_config(page_title="Mussel Insights", page_icon="🐚", layout="wide")
 
-# Unreleased work, shown under Explore as "Dashboard test". Its own secret, not
-# APP_PASSWORD: showing a draft to one person must not hand over the rest of the
-# app. `st.stop()` rather than an `if` block so the 1,900 lines below stay at
+# Unreleased work, served by its own app (`in_progress/uoa/app.py`), not the DOC one.
+# Its own secret, not APP_PASSWORD: showing a draft to one person must not hand
+# over anything else. `st.stop()` rather than an `if` block so the 1,900 lines below stay at
 # module level exactly as they were.
 from utils import check_password  # noqa: E402
 
@@ -58,14 +54,12 @@ from utils import check_password  # noqa: E402
 # page.
 _gate = st.empty()
 with _gate.container():
-    st.title("🧪 Dashboard test")
+    st.title("🐚 Mussel Insights")
     st.caption(
         "A work-in-progress dashboard concept, built on the University of "
         "Auckland mussel-farm BUV dataset. Ask Kalindi for the password."
     )
-    _unlocked = check_password(
-        "TEST_DASHBOARD_PASSWORD", label="Dashboard test password"
-    )
+    _unlocked = check_password("TEST_DASHBOARD_PASSWORD", label="Password")
 if not _unlocked:
     st.stop()
 # Cleared so the dashboard below starts with its own title rather than under
@@ -74,12 +68,12 @@ _gate.empty()
 
 # ── Data locations & dataset constants ───────────────────────────────────────
 #
-# All shared with the ML-vs-Expert comparison via `uoa_data`, the two had grown
+# All shared with the ML-vs-Expert comparison via `uoa.data`, the two had grown
 # their own copies of the paths, the filename regex and the label maps, and
-# copies of facts about an external dataset drift. See uoa_data for the notes
+# copies of facts about an external dataset drift. See uoa.data for the notes
 # on each (including why SITE_COORDS is safe to plot while Spyfish reserve
 # coordinates are not).
-from uoa_data import (  # noqa: E402
+from uoa.data import (  # noqa: E402
     CHAPTER_SEC,
     DEPTH_LABEL,
     EXPERT_CSV,
@@ -94,7 +88,7 @@ from uoa_data import (  # noqa: E402
 
 # Detections below this are dropped everywhere on this page. The raw CSVs keep
 # everything >= 0.15 (the inference floor), so this re-filters rather than
-# re-infers. (uoa_data.DEFAULT_CONF is the same value; kept as a named local
+# re-infers. (uoa.data.DEFAULT_CONF is the same value; kept as a named local
 # because every caption on this page quotes it.)
 CONF = 0.40
 
@@ -546,7 +540,7 @@ def render_kpi_row(exp_scope, ml_scope, scope: str):
 
     farm = exp_scope[exp_scope["treatment"] == "Mussel farm"]
     ctrl = exp_v[exp_v["treatment"] == "Control"]
-    ratio_txt, ratio_sub = "—", "no controls in selection"
+    ratio_txt, ratio_sub = "-", "no controls in selection"
     if not farm.empty and not ctrl.empty:
         f_ab = dep_abundance(farm).mean()
         c_ab = dep_abundance(ctrl).mean()
@@ -557,7 +551,7 @@ def render_kpi_row(exp_scope, ml_scope, scope: str):
     # A share is abundance-weighted, so one drop with 200 of something decides it
     # even if that species was absent everywhere else. "Top species in 12 of 32
     # drops" is deployment-weighted and says what an operator actually sees.
-    dom_txt, dom_sub = "—", "no species recorded"
+    dom_txt, dom_sub = "-", "no species recorded"
     dep_max = dep_species_maxn(exp_scope)
     fished = dep_max[dep_max.sum(axis=1) > 0]
     if not fished.empty:
@@ -716,7 +710,7 @@ if expert.empty:
 if ml.empty:
     # Non-fatal: the expert-only panels still work without detections.
     st.warning(
-        "No ML raw CSVs found under `hold/` — the machine-detection panels "
+        "No ML raw CSVs found under `hold/`, the machine-detection panels "
         "will be empty. The `*_raw.csv` files are copied over from NeSI by "
         "hand, not produced by this app."
     )
@@ -739,7 +733,6 @@ with st.sidebar:
             "Industry overview",
             "ML performance",
             "ML vs Expert detail",
-            "ML vs Expert (old)",
         ],
         label_visibility="collapsed",
     )
@@ -1150,7 +1143,7 @@ def panel_peak_frame(frames_scope):
             st.info(
                 "No rendered frames for this selection yet. They are produced on "
                 "NeSI by `render_deployment_maxn_frames.py` and copied into "
-                "`hold/uoa_frames/`."
+                "`hold/uoa/uoa_frames/`."
             )
             return
         best = frames_scope.sort_values("maxn_count", ascending=False).iloc[0]
@@ -1819,7 +1812,7 @@ elif view == "ML performance":
         with st.container(border=True, height=H_KPI):
             kpi(
                 "Expert Agreement",
-                "—" if pd.isna(corr) else f"{corr:.2f}",
+                "-" if pd.isna(corr) else f"{corr:.2f}",
                 " r",
                 f"across {len(paired)} paired deployments",
                 "Pearson correlation between the machine's peak count and the "
@@ -1844,7 +1837,7 @@ elif view == "ML performance":
         with st.container(border=True, height=H_KPI):
             kpi(
                 "Mean Confidence",
-                "—" if pd.isna(mean_conf) else f"{mean_conf * 100:.0f}%",
+                "-" if pd.isna(mean_conf) else f"{mean_conf * 100:.0f}%",
                 "",
                 "of kept detections",
                 "Average confidence assigned to detections above the threshold. "
@@ -2033,7 +2026,7 @@ elif view == "ML performance":
                 )
                 st.caption(
                     f"Per-species agreement needs a species detector. The models "
-                    f"in this selection emit only: {', '.join(ml_classes) or '—'}."
+                    f"in this selection emit only: {', '.join(ml_classes) or '-'}."
                 )
                 # Until then the useful question is *when* the model fails, and
                 # it fails as a function of how much is in frame, so bucket
@@ -2193,32 +2186,11 @@ elif view == "ML vs Expert detail":
         "reading the dashboard's filtered frames."
     )
     st.write("")
-    # Implementation lives in app/uoa_ml_vs_expert.py, on the shared
-    # uoa_data layer.
-    from uoa_ml_vs_expert import render_body as render_ml_vs_expert
+    # Implementation lives in in_progress/uoa/ml_vs_expert.py, on the shared
+    # uoa.data layer.
+    from uoa.ml_vs_expert import render_body as render_ml_vs_expert
 
     render_ml_vs_expert(embedded=True, key_prefix="mid")
-
-elif view == "ML vs Expert (old)":
-    # The pre-rebuild page, kept so the old block-aligned comparison can be read
-    # against the interval view above it. A view here rather than its own nav
-    # entry: it is the same question asked an older way, and both belong behind
-    # the test-dashboard password.
-    #
-    # `runpy` rather than an import: the archived file is a script with its
-    # Streamlit calls at module level and no render function, and it is not
-    # maintained, so wrapping it would mean editing a file whose whole point is
-    # that it is the version as it stood.
-    import runpy
-
-    archived = Path(__file__).resolve().parents[2] / "_archive" / "ML_vs_Expert.py"
-    if archived.exists():
-        runpy.run_path(str(archived), run_name="archived_ml_vs_expert")
-    else:
-        st.info(
-            "The archived ML vs Expert page is no longer in the repository. "
-            "Git history has it at `app/_archive/ML_vs_Expert.py`."
-        )
 
 
 if view in ("Farm overview", "Industry overview"):
@@ -2239,7 +2211,7 @@ computed live from the Underwood &amp; Jeffs mussel farm survey
 (4 Hauraki Gulf sites, {expert['date'].min()} – {expert['date'].max()}).
 Nothing is mocked or illustrative.
 
-* **Expert species counts**, `hold/Annotations_CLEANED_v2.csv`,
+* **Expert species counts**, `hold/uoa/Annotations_CLEANED_v2.csv`,
   {len(expert):,} annotated 6-minute intervals across
   {expert['deployment_id'].nunique()} deployments, {SPECIES_POOL} species.
   Placeholder rows for un-annotated sessions are excluded, so a blank species

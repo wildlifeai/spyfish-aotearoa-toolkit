@@ -164,7 +164,12 @@ dict, so no two views can disagree about how many deployments exist.
 |---|---|---|
 | 📊 **Reporting** | Report home, MPA, Sites, Annotations, Species, Species search (Surveys and Deployments not built yet) | DOC Scientists, Rangers, external researchers |
 | 🔄 **Operations** | Operations home, MPA, Surveys, Deployments, Annotations, Model Metrics, Metadata error review (Sites and Species not built yet) | Core Team |
-| 🧪 **Tools** | Dashboard test (unreleased concepts), Deployment Videos, Substrate Cover | Core Team |
+| 🧪 **Tools** | Deployment Videos, Substrate Cover, Legacy MaxN check (`pages/_advanced/`) | Core Team |
+
+The University of Auckland mussel-farm dashboard (Mussel Insights, ML vs Expert)
+is a separate Streamlit app in `in_progress/uoa/` (`cd in_progress/uoa && streamlit
+run app.py`), not part of the DOC app; it imports the shared `theme`, `utils`,
+`support` and `ecology_data` modules from `app/`.
 
 A view that is not built says so, rather than rendering an empty chart that
 looks like a view reporting nothing.
@@ -347,8 +352,11 @@ cfd_binary_water_20260301
 
 The model name is embedded in every output it produces — raw detection CSVs are
 named `{DropID}_{model_name}_raw.csv` and annotation records in `annotations.db`
-store the model name in the `annotated_by` / `external_id` fields. This makes
-every annotation traceable to the exact model version that produced it.
+store the model name in the `external_id` field (`annotated_by` is just `ml`). This
+makes every annotation traceable to the exact model version that produced it.
+Expert rows use the same field the same way: `legacy` for the historical CSV
+backfill, `biigle_volume_{id}` for a BIIGLE review, so two expert accounts of one
+deployment stay distinguishable and each ingestion path deletes only its own rows.
 
 ### Dataset Versioning
 

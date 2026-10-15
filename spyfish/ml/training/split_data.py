@@ -280,6 +280,7 @@ def balance_val_drops(
         for s in c:
             drops_per_species[s] += 1
     single_source = {s for s, n in drops_per_species.items() if n <= 1}
+
     # Floor first, then clamp to the most val boxes max_share will ever allow,
     # so every target in this dict is actually reachable.
     def _target(name: str, n: int) -> int:
@@ -398,6 +399,41 @@ def force_train_drops_from_volumes(volume_ids: Set[int]) -> Set[str]:
         f"{len(forced)} drop(s)"
     )
     return forced
+
+
+def apply_frozen_test(
+    train: List[str],
+    val: List[str],
+    test: List[str],
+    frozen: Set[str],
+) -> Tuple[List[str], List[str], List[str]]:
+    """Move every frozen test drop into test, whatever the splitter decided.
+
+    The frozen list (``training.test_drops_file``) is the long-term yardstick:
+    the same drops must be test in every retrain, or two models' test scores
+    stop being comparable. Callers should also leave these drops out of the
+    splitter's candidates, so the val balancer never counts on them; this is
+    the guarantee that holds either way. Listed drops absent from the training
+    data are logged, since that usually means a typo or a drop that vanished.
+    """
+    present = set(train) | set(val) | set(test)
+    held = frozen & present
+    missing = sorted(frozen - present)
+    if frozen:
+        logging.info(
+            f"Frozen test set: {len(held)} of {len(frozen)} listed drop(s) present "
+            f"in the training data."
+        )
+    if missing:
+        logging.warning(
+            f"Frozen test set: {len(missing)} listed drop(s) have no training data "
+            f"and are skipped: {missing[:10]}" + (" ..." if len(missing) > 10 else "")
+        )
+    return (
+        [d for d in train if d not in held],
+        [d for d in val if d not in held],
+        sorted(set(test) | held),
+    )
 
 
 # ---------------------------------------------------------------------------

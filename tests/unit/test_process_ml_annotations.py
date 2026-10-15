@@ -17,7 +17,7 @@ from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations
 
 DROP = "KSF_20240124_BUV_KSF_085_01"
-MODEL = "yolov8n_test"
+MODEL = "yolov8n_test_20260101_000000"
 
 
 @pytest.fixture
@@ -85,9 +85,8 @@ def test_rerun_with_zero_detections_replaces_real_rows(ann_db):
 
 def test_null_row_scoped_to_model(ann_db):
     """A zero-detection run of one model must not clear another model's rows."""
-    other_model = "species_v2"
+    other_model = "species_v2_20260101_000000"
     df_other = _maxn_df([_detection_row()])
-    df_other[config.csv_annotated_by_column] = other_model
     _ingest_ml_annotations(ann_db, DROP, df_other, other_model)
 
     _ingest_ml_annotations(ann_db, DROP, _maxn_df([]), MODEL)

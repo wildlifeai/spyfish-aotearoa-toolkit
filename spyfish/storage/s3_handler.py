@@ -663,6 +663,21 @@ class S3Handler:
             "restore": response.get("Restore"),
         }
 
+    def is_restored(self, key: str) -> bool:
+        """True while an archived object has a readable temporary copy.
+
+        A restore does not change the storage class: a restored DEEP_ARCHIVE
+        object still lists as DEEP_ARCHIVE, so a bucket listing cannot tell
+        "archived" from "archived but readable until <expiry>". Only the
+        Restore header on head_object carries that, and only once the request
+        has finished (``ongoing-request="false"``). After the expiry date the
+        header disappears and this goes back to False, with no other signal.
+        """
+        info = self.get_object_storage(key)
+        if not info or not info.get("restore"):
+            return False
+        return 'ongoing-request="false"' in info["restore"]
+
     def read_df_from_s3_csv(self, csv_s3_path: str) -> pd.DataFrame:
         """
         Downloads a CSV file from S3 and loads it into a pandas DataFrame.

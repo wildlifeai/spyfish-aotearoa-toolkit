@@ -11,6 +11,7 @@ an area, comes from `site_data.split_reserve_rows`.
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from theme import THRESHOLD_LINE
 
 from .charting import style
 from .layout import section
@@ -96,11 +97,11 @@ def render_bad_per_mpa(dep: pd.DataFrame) -> None:
     fig.add_hline(
         y=10,
         line_dash="dash",
-        line_color="#EF5350",
+        line_color=THRESHOLD_LINE,
         line_width=1,
         annotation_text="10% threshold",
         annotation_position="right",
-        annotation_font_color="#EF5350",
+        annotation_font_color=THRESHOLD_LINE,
     )
     style(
         fig,
@@ -118,7 +119,9 @@ def render_bad_per_mpa(dep: pd.DataFrame) -> None:
             hide_index=True,
             width="stretch",
             column_config={
-                "reserve": st.column_config.TextColumn("MPA", width="large"),
+                "reserve": st.column_config.TextColumn(
+                    "MPA", width="large", pinned=True
+                ),
                 "total": st.column_config.NumberColumn("Deployments"),
                 "surveys": st.column_config.NumberColumn("Surveys"),
                 "bad": st.column_config.NumberColumn("Bad"),

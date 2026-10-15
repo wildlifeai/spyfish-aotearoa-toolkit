@@ -2,14 +2,14 @@
 
 Three charts draw sites on a map: the Sites view map, the MPA populations map
 and the click-to-filter experiment. They answer different questions, so their
-bubbles MEAN different things (effort, abundance, a selection target) — that
+bubbles MEAN different things (effort, abundance, a selection target), that
 stays with each chart. What lives here is what must not drift apart:
 
-* the coordinates gate — one privacy explanation, not three copies,
-* the site skeleton — "which sites exist on a map" is the same question
+* the coordinates gate, one privacy explanation, not three copies,
+* the site skeleton, "which sites exist on a map" is the same question
   everywhere: every site in the current selection that has coordinates,
   whether or not anything was recorded there,
-* the scatter base — protection colouring on the shared carto style, so the
+* the scatter base, protection colouring on the shared carto style, so the
   maps read as the same map wearing different data.
 
 The MPA populations map keeps its own drawing (log-scale bubbles, zero-dot
@@ -61,7 +61,7 @@ def site_skeleton(
     """One row per site with coordinates, whatever was recorded there.
 
     Built from the context frame (all page filters applied) so every map
-    shows the same set of sites for a given selection — a site nobody has
+    shows the same set of sites for a given selection, a site nobody has
     annotated is still a site that was surveyed, and leaving it off makes
     coverage look tidier than it is.
 
@@ -97,7 +97,7 @@ def site_scatter(
     """The shared scatter base: protection colours on the carto style.
 
     What bubble size MEANS belongs to the caller; this owns only what must
-    look identical across maps — colouring, base map, margins and legend
+    look identical across maps, colouring, base map, margins and legend
     placement. `legend_above` puts the legend over the map, for charts where
     it would otherwise collide with the CARTO attribution overlay.
     """

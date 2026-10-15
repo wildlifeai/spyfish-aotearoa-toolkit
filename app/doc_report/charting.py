@@ -3,8 +3,8 @@
 Nearly every chart in the report repeated the same three or four calls: apply
 `PLOT_LAYOUT`, set a height, move the legend somewhere that does not overlap
 the plot, push bar labels outside without clipping them. Repeated, they drifted
-— legends ended up in three different places and two charts reversed their own
-key — and each new chart copied whichever neighbour it was pasted next to.
+, legends ended up in three different places and two charts reversed their own
+key, and each new chart copied whichever neighbour it was pasted next to.
 
 These helpers are deliberately thin. They take a figure and return it, so they
 compose with anything Plotly does, and none of them decide what a chart *is*:
@@ -38,7 +38,7 @@ def protection_dashes(statuses) -> dict:
     One convention, one place. Any chart drawing a line per protection status
     reads it from here, so "solid = protected" holds across the report instead
     of Plotly assigning dash styles in whatever order the values happened to
-    arrive — which is what made two charts disagree about which line was the
+    arrive, which is what made two charts disagree about which line was the
     reserve.
 
     Partial protection gets a dash: it is neither, and drawing it as one of the
@@ -58,8 +58,8 @@ def group_colors() -> dict:
     """One colour pair for the Protected/Unprotected comparison.
 
     Three charts used to carry three different hex pairs for the same
-    comparison. These are the theme's own anchors — the strongest-protection
-    blue and the no-protection orange from `PROTECTION_COLORS` — so a chart
+    comparison. These are the theme's own anchors, the strongest-protection
+    blue and the no-protection orange from `PROTECTION_COLORS`, so a chart
     coloured by group and one coloured by exact status agree about which end
     of the spectrum each side sits on. The partial group gets the neutral
     grey: it is neither side.
@@ -83,6 +83,33 @@ def group_dashes() -> dict:
     from ecology_data import OTHER_PROTECTION, PROTECTED, UNPROTECTED
 
     return {PROTECTED: "solid", OTHER_PROTECTION: "dash", UNPROTECTED: "dot"}
+
+
+def focus_inside_outside(fig: go.Figure) -> go.Figure:
+    """Open a busy trend on just the inside/outside comparison.
+
+    Every other trace, partial regimes, "Not recorded", the "Other" group,
+    keeps its legend entry but starts greyed out (Plotly's ``legendonly``), one
+    click from visible. The lines are still there for whoever wants them; the
+    chart opens on the comparison the report is about instead of buried under
+    regimes that cannot answer it.
+
+    Handles both naming schemes these charts use: a trace named by its group
+    ("Protected") or its exact status ("Type I MPA (Marine Reserve)"), and the
+    combined "<species>, <group>" names Plotly Express builds when colour and
+    dash map different columns, the group is the segment after the last comma
+    either way.
+    """
+    from ecology_data import PROTECTED, UNPROTECTED
+
+    from spyfish.config.wrapper import config
+
+    keep = {PROTECTED, UNPROTECTED}
+    keep |= set(config.protected_statuses) | set(config.unprotected_statuses)
+    for trace in fig.data:
+        if (trace.name or "").split(", ")[-1] not in keep:
+            trace.visible = "legendonly"
+    return fig
 
 
 def source_coverage_note(df, label: str = "these numbers") -> None:
@@ -187,7 +214,7 @@ def top_n_slider(
     """The "Show top N" slider, with the bounds every chart was hand-rolling.
 
     Floor of 5 so the chart is never a single bar, ceiling at the item count,
-    default clamped into range — four charts wrote this triple with small
+    default clamped into range, four charts wrote this triple with small
     inconsistencies; one definition keeps the sliders behaving alike.
     """
     import streamlit as st

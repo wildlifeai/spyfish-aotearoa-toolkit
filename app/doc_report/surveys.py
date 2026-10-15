@@ -11,11 +11,14 @@ on S3, wiring them in is a possible future enhancement.
 
 import plotly.express as px
 import streamlit as st
+from ecology_data import NO_SHAREPOINT_RECORD  # noqa: E402
+from theme import SINGLE_SERIES
+
+from spyfish.config.base import IngestStatus, VideoPresence
 
 from .charting import style, year_axis
-from .charts.deployments import add_completion_flags
 from .charts.surveys import render_annotation_depth, render_bad_per_survey
-from .data import split_reserves
+from .data import add_completion_flags, split_reserves
 from .layout import chips, section
 
 
@@ -91,12 +94,22 @@ def render(ctx: dict) -> None:
         f"{int(dep['is_bad_deployment'].fillna(0).astype(bool).sum()):,}",
     )
 
-    st.caption(
+    # Drops synthesized from annotations with no SharePoint record (sidebar
+    # tick) are not ingest failures, so they get their own clause.
+    no_record = (dep["ingest_status"] == NO_SHAREPOINT_RECORD).sum()
+    failed = (dep[IngestStatus.COLUMN] != IngestStatus.OK).sum() - no_record
+    caption = (
         "Counts are of deployments held in the pipeline database. "
         f"{(dep['ingest_status'] == 'ok').sum():,} passed ingest; "
-        f"{(dep['ingest_status'] != 'ok').sum():,} were excluded or hold "
-        "validation errors and never reach a processing stage."
+        f"{failed:,} were excluded or hold validation errors and never reach "
+        "a processing stage."
     )
+    if no_record:
+        caption += (
+            f" {no_record:,} further drops exist only as annotations, with no "
+            "deployment or survey record in SharePoint."
+        )
+    st.caption(caption)
 
     st.divider()
 
@@ -123,7 +136,9 @@ def render(ctx: dict) -> None:
     # already draw it; this is the one view that counts surveys.
     st.markdown("**Surveys per year**")
     fig = px.bar(per_year, x="Year", y="Surveys", text="Surveys")
-    fig.update_traces(marker_color="#1E6FB4", textposition="outside", cliponaxis=False)
+    fig.update_traces(
+        marker_color=SINGLE_SERIES, textposition="outside", cliponaxis=False
+    )
     style(fig, height=210)
     fig.update_xaxes(title=None)
     year_axis(fig)
@@ -170,12 +185,17 @@ def render(ctx: dict) -> None:
             Year=("survey_year", "first"),
             Deployments=("drop_id", "nunique"),
             Sites=("site_id", "nunique"),
-            Ingested=("ingest_status", lambda s: (s == "ok").sum()),
+            Ingested=(IngestStatus.COLUMN, lambda s: (s == IngestStatus.OK).sum()),
             Analysed=("_analysed", "sum"),
             ML=("_ml", "sum"),
             CitSci=("_citsci", "sum"),
             Expert=("_expert", "sum"),
-            **{"Video present": ("video_presence", lambda s: (s == "present").sum())},
+            **{
+                "Video present": (
+                    "video_presence",
+                    lambda s: (s == VideoPresence.PRESENT).sum(),
+                )
+            },
             Bad=("is_bad_deployment", lambda s: int(s.fillna(0).astype(bool).sum())),
         )
         .reset_index()
@@ -227,7 +247,8 @@ def render(ctx: dict) -> None:
         column_config={
             "Survey": st.column_config.TextColumn(
                 "Survey",
-                help="Derived from the DropID as {Reserve}_{YYYYMMDD}_BUV. "
+                pinned=True,
+                help="Derived from the DropID as {MPA code}_{YYYYMMDD}_BUV. "
                 "Survey names live in BUV Survey Metadata.csv on S3, not "
                 "in the pipeline database.",
             ),
@@ -264,7 +285,7 @@ def render(ctx: dict) -> None:
                 max_value=100,
                 format="%.0f%%",
                 help="Share carrying expert annotations, legacy or from "
-                "BIIGLE. This is the number the reporting rests on.",
+                "BIIGLE. This is the number the reporting uses.",
             ),
             "Video present": st.column_config.NumberColumn(
                 "Video present",
@@ -313,6 +334,3 @@ def render(ctx: dict) -> None:
         render_annotation_depth(dep)
     with right:
         render_bad_per_survey(dep)
-
-
-DONE_BANDS = {"Expert", "CitSci", "ML only"}

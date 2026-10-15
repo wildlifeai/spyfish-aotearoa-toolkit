@@ -106,6 +106,31 @@ class MLConfig(BaseConfig):
         )
 
     @property
+    def legacy_review(self) -> dict:
+        return get_required(self.ml_inference, "legacy_review", "ml_inference")
+
+    @property
+    def legacy_review_random_intervals(self) -> int:
+        """Non-peak scored intervals per species to pull alongside the peak."""
+        return int(
+            get_required(
+                self.legacy_review, "random_intervals", "ml_inference.legacy_review"
+            )
+        )
+
+    @property
+    def legacy_review_max_time_delta_seconds(self) -> float:
+        """How far a raw-CSV frame may sit from the legacy second and still be
+        used (with its boxes) as that moment's frame."""
+        return float(
+            get_required(
+                self.legacy_review,
+                "max_time_delta_seconds",
+                "ml_inference.legacy_review",
+            )
+        )
+
+    @property
     def interval_seconds(self):
         return get_required(
             get_required(self.ml_inference, "extraction", "ml_inference"),
@@ -322,6 +347,17 @@ class MLConfig(BaseConfig):
     def training_excluded_drops(self) -> set:
         """DropIDs to exclude from training entirely."""
         return self._parse_drop_ids_from_file(self.training_excluded_drops_file)
+
+    @property
+    def training_test_drops_file(self) -> Path:
+        return self.project_root / get_required(
+            self.training_config, "test_drops_file", "training"
+        )
+
+    @property
+    def training_test_drops(self) -> set:
+        """Frozen test set: DropIDs that are always test, never train or val."""
+        return self._parse_drop_ids_from_file(self.training_test_drops_file)
 
     @property
     def training_excluded_species(self) -> set:

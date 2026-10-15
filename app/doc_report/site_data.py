@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 from ecology_data import (  # noqa: E402
-    SOURCE_PRIORITY,
     add_display_names,
     add_drop_id_columns,
     join_site_metadata,
@@ -32,6 +31,7 @@ from ecology_data import (  # noqa: E402
     load_effort,
     load_maxn,
     load_sites,
+    source_rank,
 )
 from utils import CACHE_TTL_SECONDS, check_password  # noqa: E402
 
@@ -101,7 +101,7 @@ def load_site_view(include_coords: bool) -> pd.DataFrame:
 
 
 def best_per_drop_species(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep each deployment's best source: expert beats citsci beats ml.
+    """Keep each deployment's best source: BIIGLE expert beats legacy expert beats citsci beats ml.
 
     Without this, a deployment reviewed by both an expert and volunteers is
     counted twice in every site total.
@@ -114,7 +114,7 @@ def best_per_drop_species(df: pd.DataFrame) -> pd.DataFrame:
     (one row per drop × species × source), so the output stays one row per
     (drop, species).
     """
-    ranked = df.assign(_rank=df["annotated_by"].map(SOURCE_PRIORITY).fillna(99))
+    ranked = df.assign(_rank=source_rank(df))
     best = ranked.groupby("drop_id")["_rank"].transform("min")
     return ranked[ranked["_rank"] == best].drop(columns="_rank")
 
@@ -196,9 +196,12 @@ def filtered_site_frames(ctx: dict | None = None) -> dict:
     # sidebar control on the MPA view). Never hardcode True here, coordinates
     # joined to abundance are a ranked fishing map.
     show_coords = coords_allowed()
+    # The sidebar "Exclude bad deployments" toggle, so these site frames
+    # agree with `doc_report.data.build_context` about what counts as effort.
+    exclude_bad = bool((ctx or {}).get("exclude_bad_deployments"))
     df_all = best_per_drop_species(load_site_view(show_coords))
     effort_all = join_site_metadata(
-        add_drop_id_columns(load_effort()), load_sites(show_coords)
+        add_drop_id_columns(load_effort(exclude_bad)), load_sites(show_coords)
     )
     filters = dict(
         years=(ctx or {}).get("years"),

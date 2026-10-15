@@ -9,11 +9,22 @@
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/run_pipeline_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/run_pipeline_%j.err
 
-#£SBATCH --partition=genoa
-#£SBATCH --gpus-per-node=a100:1   # lowercase a100 to match sinfo's GRES type exactl
-
+# GPU choice (billing weight per GPU-hour in brackets - sinfo TRESBillingWeights):
+#   genoa: l4 [20], pro_6000 [130], h100 [200];  milan: a100 [90].
+# There is NO a100 in genoa - asking for one there fails at submit with
+# "Requested node configuration is not available" (2026-08-25). a100 means milan,
+# which the `module use` line below already handles.
+# pro_6000 is Blackwell/sm_120 and cannot run this venv's torch 2.5.1+cu124.
+# Inference is far lighter than training, so l4 is the right default here; swap to
+# h100 (same partition, no module change) only when the l4 queue is long.
 #SBATCH --partition=genoa
 #SBATCH --gpus-per-node=l4:1
+
+##SBATCH --partition=genoa
+##SBATCH --gpus-per-node=h100:1
+
+##SBATCH --partition=milan
+##SBATCH --gpus-per-node=a100:1
 
 # ── Per-survey ML runs ──────────────────────────────────────────────────────
 # Pass a survey id as the first argument and this file runs ML for just that
@@ -42,8 +53,10 @@ shift || true
 module purge
 # On milan/zen3 nodes `module purge` leaves NeSI/zen3 loaded, whose tree has only
 # Python 3.14/foss-2026, so the 3.10.5 module kso_venv_0627 was built against drops
-# off MODULEPATH and the load below fails outright (2026-08-22). No-op on genoa.
-# module use /opt/nesi/lmod/mahuika
+# off MODULEPATH and the load below fails outright (2026-08-22). Re-adding the
+# mahuika tree fixes milan and is a NO-OP on genoa, so it stays in regardless of
+# which GPU block is active - same as train_job.sl, which has always had it on.
+module use /opt/nesi/lmod/mahuika
 module load Python/3.10.5-gimkl-2022a
 module load FFmpeg/5.1.1-GCC-11.3.0
 # module load Python/3.11.6-foss-2023a
@@ -69,6 +82,7 @@ if [ -n "${SURVEY}" ]; then
     echo "=== ML run for survey ${SURVEY} ==="
     echo "    extra args: $*"
     python run_pipeline.py --ml --survey "${SURVEY}" "$@"
+    # python run_pipeline.py --biigle-upload --survey OKA_20250121_BUV --survey-volume
 else
 
 # Run video preprocessing with YOLO detection and frame selection
@@ -83,6 +97,14 @@ else
 
 # python scripts/fetch_zooniverse_exports.py --to-s3
 # python run_pipeline.py --legacy-zooniverse --db-refresh --no-upload
+
+# Targeted batch, then clips for whole surveys (from NeSI, 2026-10-14): --ml
+# takes the top limit_processing drops by priority, and --survey bypasses that
+# limit so each clips step covers its whole survey. Chained with && so a failed
+# ML run does not go on to upload clips.
+# python run_pipeline.py --set-targets --ml \
+#   && python run_pipeline.py --zooniverse-clips --survey SLI_20220228_BUV \
+#   && python run_pipeline.py --zooniverse-clips --survey SLI_20240124_BUV
 
 python run_pipeline.py --check-arrivals
 

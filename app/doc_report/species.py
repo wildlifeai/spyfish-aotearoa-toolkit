@@ -9,8 +9,9 @@ attributable rather than merely observed.
 
 This module is the view: what the reader is asked, in what order, and which
 frame each question is answered from. The drawing is in `charts/species.py`
-and the aggregation in `data.py`, so a change to how a chart looks and a change
-to what the page says are never the same edit.
+(protection, time) and `charts/species_community.py`, and the aggregation in
+`data.py`, so a change to how a chart looks and a change to what the page
+says are never the same edit.
 
 MaxN handling: `max_interval` in the annotations table is the count in ONE time
 interval, and there is a row per interval. A species' MaxN for a deployment is
@@ -24,21 +25,22 @@ from ecology_data import (
     PROTECTED,
     UNPROTECTED,
     load_common_names,
-    pielou,
     protection_group,
-    shannon,
 )
 
 from .charts.species import (
+    render_protection_boxes,
+    render_protection_effect_ci,
+    render_reserve_effect,
+    render_species_over_time,
+)
+from .charts.species_community import (
     render_cooccurrence,
     render_detection_rate,
     render_freq_abundance,
-    render_protection_boxes,
-    render_reserve_effect,
     render_species_abundance,
     render_species_accumulation,
     render_species_depth,
-    render_species_over_time,
 )
 from .data import experiments_frame, species_maxn
 from .layout import chips, section
@@ -69,17 +71,35 @@ def render(ctx: dict) -> None:
 
     per_species = species_maxn(ann)
     meta = ann[
-        ["drop_id", "protection_status", "survey_year", "site_id"]
+        ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
     ].drop_duplicates("drop_id")
     per_species = per_species.merge(meta, on="drop_id", how="left")
     per_species["Group"] = protection_group(per_species["protection_status"])
+
+    # The species-UNfiltered twin, for everything that describes the whole
+    # community: KPIs, richness, the protected-vs-unprotected panel. Ticking
+    # snapper in the sidebar must not turn "species per deployment" into 1.
+    # The per-species sections (over time, by site, the effect slope) keep
+    # the filtered frame, which is the filter doing its job.
+    ann_all = ctx["annotations_all_species"]
+    per_species_all = species_maxn(ann_all)
+    # `reserve_code` (the DropID prefix) rides along so the protected-vs-
+    # unprotected comparison can be made WITHIN each MPA rather than pooled
+    # across places that are not sampled alike.
+    meta_all = ann_all[
+        ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
+    ].drop_duplicates("drop_id")
+    per_species_all = per_species_all.merge(meta_all, on="drop_id", how="left")
+    per_species_all["Group"] = protection_group(per_species_all["protection_status"])
 
     # dropna=False, or deployments with unclassified protection or no parseable
     # date silently vanish from every KPI above the comparison, and the
     # "left out" caption below can never fire because the unclassified rows it
     # counts were already gone.
     per_dep = (
-        per_species.groupby(["drop_id", "Group", "survey_year"], dropna=False)
+        per_species_all.groupby(
+            ["drop_id", "Group", "survey_year", "reserve_code"], dropna=False
+        )
         .agg(abundance=("maxn", "sum"), richness=("scientific_name", "nunique"))
         .reset_index()
     )
@@ -88,30 +108,33 @@ def render(ctx: dict) -> None:
     kpis = st.columns(4)
     kpis[0].metric(
         "Species",
-        f"{ann['scientific_name'].nunique():,}",
+        f"{ann_all['scientific_name'].nunique():,}",
         help="Distinct species names across every annotated deployment in the "
-        "current filters.",
+        "current filters. Not narrowed by the sidebar Species filter.",
     )
     kpis[1].metric(
         "Deployments",
         f"{n_deps:,}",
-        help="Deployments carrying at least one annotation. Deployments with "
-        "none are not counted, because a deployment nobody has looked at "
-        "is not the same as one where nothing was seen.",
+        help="Deployments carrying at least one annotation. A reviewed "
+        "deployment where nothing was seen carries an absence record, so "
+        "it counts; a deployment nobody has looked at has no rows and "
+        "does not.",
     )
     kpis[2].metric(
         "Mean abundance",
         f"{per_dep['abundance'].mean():.1f}",
         help="Mean total MaxN per deployment: each species' peak count, summed "
-        "across species, averaged over deployments. MaxN is the most "
+        "across species, averaged over deployments. A reviewed deployment "
+        "where nothing was seen counts as zero. MaxN is the most "
         "individuals visible in a single frame, so it never double-counts "
         "a fish that leaves and returns.",
     )
     kpis[3].metric(
         "Mean richness",
         f"{per_dep['richness'].mean():.1f}",
-        help="Mean species recorded per deployment. Rises with how long and how "
-        "carefully a deployment was watched, so compare like with like.",
+        help="Mean species recorded per deployment, counting a reviewed-empty "
+        "deployment as zero. Rises with how long and how carefully a "
+        "deployment was watched, so compare like with like.",
     )
 
     # Moved off the Sites view: mean MaxN and frequency are statements about
@@ -153,8 +176,8 @@ def render(ctx: dict) -> None:
             if partial:
                 left_out.append(
                     f"**{partial:,}** sit in a partial or unclear regime "
-                    "(high protection area, Type II MPA, taiapure, mataitai, "
-                    "fisheries closure, seafloor protection)"
+                    "(Type II MPA, taiapure, mataitai, fisheries closure, "
+                    "seafloor protection)"
                 )
             if unknown:
                 left_out.append(f"**{unknown:,}** have no protection status recorded")
@@ -183,12 +206,12 @@ def render(ctx: dict) -> None:
             .reset_index()
         )
         st.dataframe(summary, hide_index=True, width="stretch")
-        st.caption(
-            "A difference here is worth following up, not quoting. Deployments "
-            "are not evenly spread across sites, years or effort, so a gap can "
-            "come from where and when the surveying happened as much as from "
-            "protection."
-        )
+
+        # The means above always differ. This says whether each difference
+        # survives resampling, per indicator species rather than as one
+        # cross-species total, and measured inside each MPA rather than
+        # pooled across places that are not sampled alike.
+        render_protection_effect_ci(comparable, per_species_all, load_common_names())
 
     st.divider()
 
@@ -199,16 +222,25 @@ def render(ctx: dict) -> None:
     with left:
         st.caption(
             "**Seen in** is frequency of occurrence: the share of deployments "
-            "recording the species at all. More robust than a total, which can "
+            "recording the species at all. Harder to skew than a total, which can "
             "come from a single lucky deployment."
         )
+        # Grouped on display_name ("Common name (Scientific name)"), not the
+        # raw scientific name: the report shows common names everywhere, and
+        # display_name falls back to the scientific name where no common name
+        # is known, so nothing is lost.
+        species_col = (
+            "display_name"
+            if "display_name" in per_species.columns
+            else "scientific_name"
+        )
         table = (
-            per_species.groupby("scientific_name")
+            per_species.groupby(species_col)
             .agg(
                 best=("maxn", "max"), seen=("drop_id", "nunique"), total=("maxn", "sum")
             )
             .reset_index()
-            .rename(columns={"scientific_name": "Species"})
+            .rename(columns={species_col: "Species"})
         )
         table["Best drop"] = table["best"].astype(int)
         table["Seen in"] = table["seen"].astype(str) + f" / {n_deps}"
@@ -221,6 +253,7 @@ def render(ctx: dict) -> None:
             width="stretch",
             height=360,
             column_config={
+                "Species": st.column_config.TextColumn("Species", pinned=True),
                 "Best drop": st.column_config.NumberColumn(
                     "Best drop",
                     help="Highest MaxN this species reached in any single "
@@ -237,29 +270,40 @@ def render(ctx: dict) -> None:
         )
 
     with right:
+        # Diversity indices (Shannon/Pielou) were removed on review
+        # (2026-10-02): species counts say the same thing in plain language.
         st.caption(
-            "Diversity across all deployments in the selection. **Shannon** "
-            "rises with both the number of species and how evenly they are "
-            "spread; its ceiling depends on the species pool, so it is not "
-            "comparable to another survey. **Pielou** divides Shannon by its "
-            "own maximum, so it is bounded 0-1 and is comparable."
+            "Species recorded on each side of the comparison, across all "
+            "deployments in the selection."
         )
         for group in (PROTECTED, UNPROTECTED):
-            rows = per_species[per_species["Group"] == group]
+            rows = per_species_all[per_species_all["Group"] == group]
             if rows.empty:
                 continue
             totals = rows.groupby("scientific_name")["maxn"].sum()
             st.markdown(f"**{group}**")
-            cols = st.columns(3)
+            cols = st.columns(2)
             cols[0].metric("Species", f"{len(totals):,}")
-            cols[1].metric("Shannon", f"{shannon(totals):.2f}")
-            cols[2].metric("Pielou", f"{pielou(totals):.2f}")
+            cols[1].metric("Deployments", f"{rows['drop_id'].nunique():,}")
 
     st.divider()
-    render_reserve_effect(per_species, load_common_names())
+    # `per_dep` carries the deployment universe: the effect per species is a
+    # mean over EVERY classified deployment, counting the ones that did not
+    # record the species as zeros, so it needs more than the rows where the
+    # species appears. `per_species_all` so the chart is not narrowed to one
+    # species by the sidebar filter, which would leave a single dot.
+    render_reserve_effect(per_species_all, load_common_names(), per_dep)
 
     st.divider()
-    render_species_over_time(per_species, load_common_names())
+    render_species_over_time(
+        per_species,
+        load_common_names(),
+        species_filter=ctx.get("species"),
+        per_species_all=per_species_all,
+        # With an MPA picked, the site heatmaps show all of its sites
+        # rather than a sample.
+        mpa_selected=bool(ctx.get("reserves")),
+    )
 
     # ── Ported from the Experiments page ─────────────────────────────────────
     #
@@ -268,15 +312,21 @@ def render(ctx: dict) -> None:
     # exactly that from the report's already-filtered annotations, so the
     # charts came across unchanged and answer to the report's own filters.
     #
+    # Detection rate follows the Species filter (rates of the species you
+    # picked); the community charts (strategies, co-occurrence, discovery
+    # curve) read the unfiltered frame, since they describe the whole
+    # community whatever is ticked in the sidebar.
     exp = experiments_frame(ann)
+    exp_all = experiments_frame(ctx["annotations_all_species"])
+    st.divider()
+    render_detection_rate(exp, df_all=exp_all)
     for chart in (
-        render_detection_rate,
         render_freq_abundance,
         render_cooccurrence,
         render_species_accumulation,
     ):
         st.divider()
-        chart(exp)
+        chart(exp_all)
 
     # Needs the deployments frame as well (depth lives there, not on the
     # annotations), so it sits outside the single-frame loop above.

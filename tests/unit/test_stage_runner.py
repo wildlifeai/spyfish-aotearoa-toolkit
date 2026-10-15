@@ -11,6 +11,7 @@ import argparse
 from unittest.mock import MagicMock
 
 from spyfish.config.base import MlStatus
+from spyfish.config.wrapper import config
 from spyfish.orchestrator.stage import DropStage, GlobalStage, StageRunner
 
 
@@ -123,3 +124,54 @@ def test_drop_stage_fn_returns_none_leaves_status_unchanged():
 
     db.advance_status.assert_not_called()
     db.update_section_status.assert_not_called()
+
+
+def test_drop_stage_uses_limit_processing(monkeypatch):
+    """Drop stages take the same batch as --ml: the top `limit_processing`
+    eligible drops (the query already orders priority DESC); the rest are
+    untouched. This is how a set-targets batch carries through to clips
+    without sweeping every other eligible drop in the database."""
+    monkeypatch.setattr(type(config), "limit_processing", property(lambda self: 2))
+    db = MagicMock()
+    db.get_deployments_eligible.return_value = [
+        {"drop_id": f"KSF_20240124_BUV_KSF_085_{i:02d}"} for i in range(1, 6)
+    ]
+    seen = []
+
+    def record(drop_id: str):
+        seen.append(drop_id)
+        return MlStatus.COMPLETE
+
+    stages = [
+        DropStage(
+            flag="only-stage",
+            description="stage that records what it was given",
+            fn=record,
+            section=MlStatus.COLUMN,
+            input_statuses=[MlStatus.READY],
+        )
+    ]
+    StageRunner(stages, db).run(_args(only_stage=True))
+
+    assert seen == ["KSF_20240124_BUV_KSF_085_01", "KSF_20240124_BUV_KSF_085_02"]
+    assert db.advance_status.call_count == 2
+
+
+def test_drop_stage_survey_bypasses_limit(monkeypatch):
+    """--survey means the survey is the batch, exactly as for --ml."""
+    monkeypatch.setattr(type(config), "limit_processing", property(lambda self: 2))
+    db = MagicMock()
+    db.get_deployments_eligible.return_value = [
+        {"drop_id": f"KSF_20240124_BUV_KSF_085_{i:02d}"} for i in range(1, 4)
+    ]
+    stages = [
+        DropStage(
+            flag="only-stage",
+            description="stage",
+            fn=lambda d: MlStatus.COMPLETE,
+            section=MlStatus.COLUMN,
+            input_statuses=[MlStatus.READY],
+        )
+    ]
+    StageRunner(stages, db).run(_args(only_stage=True, survey="KSF_20240124_BUV"))
+    assert db.advance_status.call_count == 3

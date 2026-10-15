@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import streamlit as st  # noqa: E402
 from ecology_data import (  # noqa: E402
-    SOURCE_PRIORITY,
     add_display_names,
     add_drop_id_columns,
     join_site_metadata,
@@ -24,7 +23,10 @@ from ecology_data import (  # noqa: E402
     load_sites,
     search_species_annotations,
     source_bucket,
+    source_rank,
 )
+
+from spyfish.config.wrapper import config  # noqa: E402
 
 from . import data as report_data  # noqa: E402
 
@@ -59,9 +61,22 @@ def render(ctx: dict) -> None:
         return
 
     display_to_sci = dict(zip(lookup["display_name"], lookup["scientific_name"]))
+    options = lookup["display_name"].tolist()
+    # Open on something memorable (a moray, a ray) rather than the commonest
+    # species, but never a rare or fished one: the landing state of this
+    # page lists where a species was seen (CLAUDE.md, "Sensitive data").
+    # The preference list lives in config; indicator species are the
+    # fallback, then the first name in the list.
+    sci_options = lookup["scientific_name"].tolist()
+    default_idx = 0
+    for preferred in config.species_search_default + config.indicator_species:
+        if preferred in sci_options:
+            default_idx = sci_options.index(preferred)
+            break
     species_label = st.selectbox(
         "Species (type to filter)",
-        options=lookup["display_name"].tolist(),
+        options=options,
+        index=default_idx,
         key="search_species",
     )
     if not species_label:
@@ -119,16 +134,15 @@ def render(ctx: dict) -> None:
             na_position="last",
         ).drop_duplicates(subset=["drop_id", "annotated_by"], keep="first")
 
-    obs = obs.assign(
-        _rank=obs["annotated_by"].map(SOURCE_PRIORITY).fillna(99)
-    ).sort_values(
+    obs = obs.assign(_rank=source_rank(obs)).sort_values(
         ["_rank", "survey_date", "drop_id", "time_of_max_seconds"],
         ascending=[True, False, True, True],
         na_position="last",
     )
 
-    # Bucketed, not raw `annotated_by`: ML rows carry the model name, so a
-    # lookup on the literal key "ml" always showed 0 observations.
+    # Bucketed, not raw `annotated_by`: historical ML rows carry a model name
+    # there rather than `'ml'`, so a lookup on the literal key showed 0
+    # observations. `source_bucket` matches ML by elimination instead.
     bucket = source_bucket(obs["annotated_by"])
     counts = bucket.value_counts()
     drops_per_source = obs.groupby(bucket)["drop_id"].nunique()
@@ -158,7 +172,7 @@ def render(ctx: dict) -> None:
     display = display[cols_to_show].rename(
         columns={
             "annotated_by": "Source",
-            "reserve_code": "Reserve",
+            "reserve_code": "MPA",
             "site_id": "Site",
             "drop_id": "Drop ID",
             "time_of_max": "Video time",
@@ -173,9 +187,9 @@ def render(ctx: dict) -> None:
         hide_index=True,
         width="stretch",
         column_config={
-            "Source": st.column_config.TextColumn("Source", width="small"),
+            "Source": st.column_config.TextColumn("Source", width="small", pinned=True),
             "Date": st.column_config.TextColumn("Survey date", width="small"),
-            "Reserve": st.column_config.TextColumn("Reserve", width="small"),
+            "MPA": st.column_config.TextColumn("MPA", width="small"),
             "Site": st.column_config.TextColumn("Site", width="small"),
             "Drop ID": st.column_config.TextColumn("Drop ID"),
             "Video time": st.column_config.TextColumn(
@@ -197,9 +211,14 @@ def render(ctx: dict) -> None:
         },
     )
 
+    # The file carries the species as "Common (Scientific)" in its own
+    # column: a CSV named after the scientific name alone is opaque to a
+    # ranger reading it later.
+    export = display.copy()
+    export.insert(0, "Species", species_label)
     st.download_button(
         f"⬇ Download {species_label} observations (CSV)",
-        data=display.to_csv(index=False).encode("utf-8"),
+        data=export.to_csv(index=False).encode("utf-8"),
         file_name=f"{scientific_name.replace(' ', '_')}_observations.csv",
         mime="text/csv",
     )

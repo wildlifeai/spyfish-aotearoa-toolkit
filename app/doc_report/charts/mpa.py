@@ -31,13 +31,13 @@ from ecology_data import (  # noqa: E402
     OTHER_PROTECTION,
     PROTECTED,
     UNPROTECTED,
-    pielou,
-    protection_group,
-    shannon,
-    simpson,
 )
 from theme import (  # noqa: E402
+    GRID_COLOR,
+    GRID_ON_WHITE,
     NEUTRAL,
+    PLOT_BG_WHITE,
+    SINGLE_SERIES,
     protection_color_map,
     protection_sort_key,
 )
@@ -45,6 +45,7 @@ from theme import (  # noqa: E402
 from spyfish.config.wrapper import config  # noqa: E402
 
 from ..charting import (  # noqa: E402
+    focus_inside_outside,
     group_colors,
     group_dashes,
     protection_dashes,
@@ -52,8 +53,34 @@ from ..charting import (  # noqa: E402
     style,
     year_axis,
 )
-from ..data import effort_per, real_species  # noqa: E402
+from ..data import (  # noqa: E402
+    effort_per,
+    real_species,
+    richness_rollup,
+)
 from ..layout import section  # noqa: E402
+from ..mpa_data import (  # noqa: E402
+    DECLINING,
+    INSUFFICIENT,
+    NOT_RECORDED,
+    RECOVERING,
+    RICHNESS_METRIC,
+    SELECTED_METRIC,
+    STABLE,
+    bubble_reference,
+    composition_shares,
+    explode_habitat,
+    inside_share,
+    linear_trends,
+    protection_trend,
+    reserve_trend_rows,
+    reserve_trend_series,
+    site_values,
+    species_choices,
+    species_peaks,
+    split_sides,
+    substrate_tables,
+)
 from ._map import gate_notice, site_skeleton  # noqa: E402
 
 # The two sides of a reserve boundary, named once so the aggregation, the
@@ -63,7 +90,7 @@ from ._map import gate_notice, site_skeleton  # noqa: E402
 INSIDE = PROTECTED
 OUTSIDE = UNPROTECTED
 PARTIAL = OTHER_PROTECTION
-SIDE_DASHES = {**group_dashes(), "Inside ÷ outside": "solid"}
+SIDE_DASHES = group_dashes()
 from ..site_data import _fit_zoom, split_reserve_rows  # noqa: E402
 
 
@@ -106,9 +133,7 @@ def render_protection_status(df) -> None:
         marker_cornerradius=4, textposition="outside", cliponaxis=False
     )
     style(fig_prot, legend=False)
-    fig_prot.update_xaxes(
-        title="Deployments", showgrid=True, gridcolor="rgba(128,128,128,0.2)"
-    )
+    fig_prot.update_xaxes(title="Deployments", showgrid=True, gridcolor=GRID_COLOR)
     fig_prot.update_yaxes(title=None, showgrid=False)
     st.plotly_chart(fig_prot)
 
@@ -122,41 +147,24 @@ def render_by_mpa(
     st.caption(
         "A site that sits between two MPAs is counted under **both**, so these "
         "rows do not sum to the totals above, the question here is what each "
-        "reserve holds, not how the programme divides up."
+        "MPA holds, not how the programme divides up."
     )
 
-    # Species per deployment, not mean MaxN: the old column summed MaxN across
-    # species before dividing, exactly the snapper-plus-rock-lobster number the
-    # caption below the populations panel refuses. Richness counts only real
-    # species (the generic and unidentified classes are N unknowns wearing one
-    # label), summed per deployment then divided by the analysed count, so a
-    # deployment where nothing was identified still weighs the mean down.
-    split_df = real_species(split_reserve_rows(df))
-    reserve_rows = (
-        split_df.groupby("reserve")
-        .agg(sites=("site_id", "nunique"), species=("scientific_name", "nunique"))
-        .reset_index()
+    # The shared rollup (`data.richness_rollup`), the same function the Sites
+    # view's per-site table uses. Species per deployment, not mean MaxN: the
+    # old column summed MaxN across species before dividing, exactly the
+    # snapper-plus-rock-lobster number the caption below the populations
+    # panel refuses.
+    #
+    # Both frames are exploded first, so a site between two MPAs counts
+    # under each. Effort comes from the deployments, not the sightings, so
+    # an MPA where nothing was seen still shows its analysed count.
+    reserve_rows = richness_rollup(
+        split_reserve_rows(df),
+        split_reserve_rows(effort_view),
+        by="reserve",
+        extra_aggs={"sites": ("site_id", "nunique")},
     )
-    rich_sum = (
-        split_df.groupby(["reserve", "drop_id"])["scientific_name"]
-        .nunique()
-        .groupby("reserve")
-        .sum()
-        .reset_index(name="rich_sum")
-    )
-    # Effort per reserve comes from the deployments table, not from the sightings, so
-    # a reserve where nothing was seen still shows its analysed count rather than
-    # vanishing from the table.
-    reserve_effort = effort_per(split_reserve_rows(effort_view), "reserve")
-    reserve_rows = (
-        reserve_rows.merge(rich_sum, on="reserve", how="left")
-        .merge(reserve_effort, on="reserve", how="outer")
-        .fillna({"sites": 0, "species": 0, "rich_sum": 0, "analysed": 0})
-    )
-    reserve_rows["species_per_dep"] = reserve_rows["rich_sum"] / reserve_rows[
-        "analysed"
-    ].clip(lower=1)
-    reserve_rows = reserve_rows.sort_values("species_per_dep", ascending=False)
 
     # Protection class beside the table, not another ranking chart: the table
     # already carries `species_per_dep`, so ranking it again would say the same
@@ -164,14 +172,16 @@ def render_by_mpa(
     # show.
     res_left, res_right = st.columns([1, 1])
     with res_left:
-        st.markdown("**Per reserve**")
+        st.markdown("**Per MPA**")
         st.dataframe(
             reserve_rows,
             width="stretch",
             hide_index=True,
             height=340,
             column_config={
-                "reserve": st.column_config.TextColumn("Marine reserve", width="large"),
+                "reserve": st.column_config.TextColumn(
+                    "MPA", width="large", pinned=True
+                ),
                 "sites": st.column_config.NumberColumn("Sites"),
                 "analysed": st.column_config.NumberColumn("Analysed"),
                 "species": st.column_config.NumberColumn("Species"),
@@ -182,11 +192,35 @@ def render_by_mpa(
             column_order=["reserve", "sites", "analysed", "species", "species_per_dep"],
         )
         st.caption(
-            "**Analysed** is the deployment count each mean rests on. A reserve "
+            "**Analysed** is how many deployments each average uses. An MPA "
             "with two analysed drops is far less certain than one with forty."
         )
     with res_right:
         render_protection_status(protection_source)
+
+
+# Diameters are computed in pixels rather than left to Plotly, for
+# two reasons.
+#
+# 1. Absolute scale. The transform below depends only on `size_ref_max`,
+#    which is fixed across species, so a given value is always the same
+#    circle. Plotly Express rescales to whatever is currently plotted.
+# 2. Log spacing. Area-proportional sizing (diameter ∝ √value) crushes the
+#    bottom of the range: 1, 2 and 3 land within ~3px of each other while
+#    a single unit near the top is worth a quarter of a pixel. BUV counts
+#    live mostly at the low end, so that is where the resolution is needed.
+#
+# The trade-off is explicit: with a log scale, bubble AREA is no longer
+# proportional to the count, so areas must not be read as ratios. The
+# caption says so, and hover carries the real number.
+_MAX_PX = 34
+_MIN_PX = 5
+
+
+def _bubble_px(values: pd.Series, size_ref_max: float) -> pd.Series:
+    """Bubble diameter in pixels, log-scaled against `size_ref_max`."""
+    log_scale = _MAX_PX / math.log1p(size_ref_max) if size_ref_max > 0 else _MAX_PX
+    return (np.log1p(values.clip(lower=0)) * log_scale).clip(lower=_MIN_PX)
 
 
 def render_mpa_populations(
@@ -201,12 +235,18 @@ def render_mpa_populations(
     species=None,
 ) -> None:
     """Species and diversity across the MPAs: picker, trend, and the site map."""
-    # The shared species filter narrows what the panel's own picker offers,
-    # so picking snapper in the sidebar makes this panel show snapper rather
-    # than ignoring the selection. Applied to the sightings only; the effort
-    # denominators are per site, not per species, and stay whole.
-    if species:
-        df_context = df_context[df_context["display_name"].isin(species)]
+    # The shared species filter narrows what the panel's PICKER OFFERS, and
+    # nothing else. It used to narrow `df_context` itself, which quietly
+    # broke three things downstream, because that frame is also the panel's
+    # "everything in scope" reference: the map's site list lost every site
+    # that had never recorded the picked species (so a real absence became
+    # an absent dot), the richness mode counted only the picked species,
+    # and the bubble size reference rescaled with the selection. The chart
+    # data is narrowed later by `map_sci`, which is the one species the map
+    # is drawing anyway.
+    picker_src = (
+        df_context[df_context["display_name"].isin(species)] if species else df_context
+    )
     df = df_context
     # Deployments analysed per site, used by the map and the trend. Computed
     # here rather than passed in: the Site detail table on the Sites page builds
@@ -224,40 +264,27 @@ def render_mpa_populations(
         "Tick species to compare them side by side, each on its own scale."
     )
 
-    # Indicator species come from config (reporting.indicator_species), intersected
-    # with what is present so the default is never empty. `real_species` also
-    # keeps the unidentified bucket out of the picker: it is N unknown species
-    # wearing one label, not a species to map.
-    present = real_species(df_context)
-    sci_to_display = (
-        present.dropna(subset=["display_name"])
-        .drop_duplicates("scientific_name")
-        .set_index("scientific_name")["display_name"]
-        .to_dict()
-    )
-    indicator_present = [s for s in config.indicator_species if s in sci_to_display]
-    other_present = sorted(s for s in sci_to_display if s not in indicator_present)
+    # Indicator species first, then the long tail (`mpa_data.species_choices`).
+    sci_to_display, indicator_present, other_present = species_choices(picker_src)
 
     # One measure at a time on the map. MaxN is never summed across species, so a
     # multi-select would either lie (by adding them) or need several maps. Diversity
     # indices are the legitimate way to reduce many species to one number per site.
     radio_order = indicator_present + other_present
     if not radio_order:
+        # `return`, not `st.stop()`: this panel sits mid-page on the Report
+        # home, and stopping the script here would also drop every section
+        # rendered after it.
         st.info("No species available in this selection.")
-        st.stop()
-
-    DIVERSITY_MEASURES = {
-        "Species richness": lambda counts: len(counts),
-        "Shannon diversity": shannon,
-        "Simpson diversity": simpson,
-        "Pielou evenness": pielou,
-    }
+        return
 
     OTHER = "Other species…"
 
     mode_col, pick_col = st.columns([1, 3])
     with mode_col:
-        map_mode = st.radio("Show", ["Single species", "Biodiversity"], key="map_mode")
+        map_mode = st.radio(
+            "Show", ["Single species", "Species richness"], key="map_mode"
+        )
     with pick_col:
         if map_mode == "Single species":
             # Indicator species sit in the visible radio; everything else lives one
@@ -283,16 +310,12 @@ def render_mpa_populations(
             measure_label = f"Mean MaxN, {sci_to_display[map_sci]}"
         else:
             map_sci = None
-            diversity_name = st.radio(
-                "Metric", list(DIVERSITY_MEASURES), horizontal=True, key="map_div"
+            measure_label = "Species richness"
+            st.caption(
+                "Species recorded per site, across all real species; the "
+                "generic `fish` class is excluded because it is not one "
+                "species."
             )
-            measure_label = diversity_name
-
-    st.caption(
-        "Diversity indices are computed per site across all real species, the "
-        "generic `fish` class is excluded, since it would otherwise register as one "
-        "very abundant species and flatten every evenness score."
-    )
 
     # ── Indicator species over time, protected vs unprotected ────────────────────
 
@@ -310,101 +333,39 @@ def render_mpa_populations(
             help="**Inside vs outside** is the report's central comparison: "
             "protected against unprotected, partial regimes excluded from "
             "both. **Each protection status** keeps every recorded regime as "
-            "its own line — solid means protected, dashed partial, dotted "
+            "its own line, solid means protected, dashed partial, dotted "
             "unprotected.",
         )
         == "Each protection status"
     )
     if by_status:
         st.caption(
-            "One line per recorded protection status. Deployments whose "
-            "status is not recorded are grouped as 'Not recorded'. Lines "
-            "resting on few deployments swing hard — hover for the number "
+            "One line per recorded protection status, opening on the MPA "
+            "and no-protection lines; the other regimes are greyed out in "
+            "the legend, click one to add its line. Deployments whose site "
+            "has no protection metadata are grouped as 'Not recorded'. Lines "
+            "resting on few deployments swing hard, hover for the number "
             "behind each point."
         )
-
-        def protection_class(status):
-            return status.fillna("Not recorded")
-
     else:
         st.caption(
             "Protected covers "
             + ", ".join(config.protected_statuses)
-            + ". Partial regimes (Mataitai, Taiapure, seafloor-only) count as "
-            "unprotected because they do not restrict the take of these "
-            "species. Deployments whose protection status is not recorded are "
-            "left out of both lines."
+            + ". Unprotected covers "
+            + ", ".join(config.unprotected_statuses)
+            + ". Partial regimes (Mataitai, Taiapure, seafloor-only, Type II "
+            "MPA) are a third group, 'Other': they restrict some fishing "
+            "without clearly protecting these species, so they are left out "
+            "of both lines rather than folded into either. Deployments whose "
+            "protection status is not recorded are left out too."
         )
-        # The shared bucketing (config.protected_statuses; unknown → None), so
-        # this trend and the Species view's comparison classify every
-        # deployment the same way.
-        protection_class = protection_group
 
-    trend_effort = effort_view.copy()
-    trend_effort["protection"] = protection_class(trend_effort["protection_status"])
-    effort_by_year = effort_per(
-        trend_effort.dropna(subset=["survey_year"]), ["survey_year", "protection"]
+    # Which line each deployment belongs to and the year × protection grid
+    # both live in `mpa_data.protection_trend`.
+    trend, classes, trend_effort = protection_trend(
+        df_context, effort_view, map_sci, by_status
     )
-
-    trend_src = df_context.dropna(subset=["survey_year"]).copy()
-    trend_src["protection"] = protection_class(trend_src["protection_status"])
-
-    if map_sci:
-        subject = trend_src[trend_src["scientific_name"] == map_sci]
-        measured = (
-            subject.groupby(["survey_year", "protection"])["maxn"]
-            .sum()
-            .reset_index(name="total")
-        )
-        y_title = "Mean MaxN per analysed deployment"
-    else:
-        real = real_species(trend_src)
-        per_year = real.groupby(["survey_year", "protection", "scientific_name"])[
-            "maxn"
-        ].sum()
-        fn = DIVERSITY_MEASURES[diversity_name]
-        measured = (
-            per_year.groupby(["survey_year", "protection"])
-            .apply(lambda s: fn(list(s)))
-            .reset_index(name="value")
-        )
-        y_title = diversity_name
-
-    # A complete year × protection grid, so years with no survey show as a gap in the
-    # line rather than being closed up, a compressed axis silently implies continuous
-    # monitoring that did not happen.
-    years_present = sorted(effort_by_year["survey_year"].dropna().unique())
-    # Which lines the grid holds: the two sides, or every status with either a
-    # measurement or effort — a status surveyed but never sighted still gets a
-    # line of real zeros rather than vanishing.
-    classes = (
-        sorted(
-            set(measured["protection"].dropna())
-            | set(effort_by_year["protection"].dropna()),
-            key=protection_sort_key,
-        )
-        if by_status
-        else ["Protected", "Unprotected"]
-    )
-    if years_present:
-        full_years = range(int(min(years_present)), int(max(years_present)) + 1)
-        grid = pd.MultiIndex.from_product(
-            [list(full_years), classes],
-            names=["survey_year", "protection"],
-        ).to_frame(index=False)
-        trend = grid.merge(
-            measured, on=["survey_year", "protection"], how="left"
-        ).merge(effort_by_year, on=["survey_year", "protection"], how="left")
-        if map_sci:
-            # Only years that were actually surveyed get a value; a surveyed year with
-            # no sighting is a real zero, an unsurveyed year stays NaN and breaks the line.
-            trend["value"] = (trend["total"].fillna(0) / trend["analysed"]).where(
-                trend["analysed"].notna()
-            )
-        else:
-            trend["value"] = trend["value"].where(trend["analysed"].notna())
-    else:
-        trend = pd.DataFrame()
+    y_title = "Mean MaxN per analysed deployment" if map_sci else "Species richness"
 
     if trend.empty or trend["value"].notna().sum() == 0:
         st.info("No dated observations for this selection.")
@@ -433,6 +394,19 @@ def render_mpa_populations(
         # The markers still show exactly which years were surveyed, and hover
         # carries the deployment count behind each point.
         fig_trend.update_traces(line={"width": 2}, marker={"size": 9}, connectgaps=True)
+        # In per-status mode only the reserve and no-protection lines start
+        # selected; partial and unrecorded regimes sit greyed out in the
+        # legend. A no-op for the grouped mode, whose two lines both survive.
+        focus_inside_outside(fig_trend)
+        # Autorange ignores greyed-out traces, so without a pinned range the
+        # axis would shrink to the visible lines and hide that the 'Not
+        # recorded' line (the legacy imports) reaches further back.
+        fig_trend.update_xaxes(
+            range=[
+                int(trend["survey_year"].min()) - 0.5,
+                int(trend["survey_year"].max()) + 0.5,
+            ]
+        )
         style(
             fig_trend,
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.04, "title": None},
@@ -443,11 +417,27 @@ def render_mpa_populations(
         st.plotly_chart(fig_trend, use_container_width=True)
         st.caption(
             "Every year in the range is on the axis. Markers are the years "
-            "actually surveyed for that protection class — the line between "
+            "actually surveyed for that protection class, the line between "
             "them bridges unsurveyed years (surveys run on a 1–2 year "
             "cadence), it does not mean continuous monitoring. Hover for the "
             "number of deployments behind each point."
         )
+        # Same note as the Species view: say what the greyed 'Not recorded'
+        # line holds, so an axis reaching further back than the visible lines
+        # is explained rather than looking broken.
+        if by_status:
+            nr = trend_effort[trend_effort["protection"] == NOT_RECORDED]
+            nr_years = nr["survey_year"].dropna()
+            if not nr.empty and not nr_years.empty:
+                st.info(
+                    f"**{nr['drop_id'].nunique():,} deployments have no "
+                    "protection status recorded**, their sites are not in "
+                    "the SharePoint sites list. Most are legacy imports, "
+                    f"spanning {int(nr_years.min())}–{int(nr_years.max())}; "
+                    "in the earliest years they are the only data, which is "
+                    "why the axis reaches further back than the visible "
+                    "lines. Click 'Not recorded' in the legend to see them."
+                )
 
     st.divider()
 
@@ -461,55 +451,18 @@ def render_mpa_populations(
         # radio is off-screen, and an unlabelled bubble map says nothing about which
         # animal it describes.
         st.markdown(f"#### {trend_subject} by site")
-        # Site skeleton: every site in the selection that has coordinates, whether or
-        # not the chosen species was seen there. Built from df_context (all filters
-        # except species) so switching the radio never changes which sites exist,
-        # only how big their bubbles are.
+        # Site skeleton: every site in the selection that has coordinates,
+        # whether or not the chosen species was seen there. Built from
+        # `df_context`, which carries every filter EXCEPT species (see the
+        # note at the top of this function), so neither the radio nor the
+        # sidebar species filter changes which sites exist, only how big
+        # their bubbles are.
         site_geo = site_skeleton(df_context, site_effort, cols=("region",))
 
-        if map_sci:
-            per_site = (
-                df_context[df_context["scientific_name"] == map_sci]
-                .groupby("site_id")["maxn"]
-                .sum()
-                .reset_index(name="total_maxn")
-            )
-            mapped = site_geo.merge(per_site, on="site_id", how="left")
-            mapped["total_maxn"] = mapped["total_maxn"].fillna(0)
-            mapped["value"] = mapped["total_maxn"] / mapped["analysed"].clip(lower=1)
-        else:
-            # Diversity is computed from summed MaxN per species at each site, with
-            # the generic and unidentified classes dropped first.
-            real = real_species(df_context)
-            counts = real.groupby(["site_id", "scientific_name"])["maxn"].sum()
-            fn = DIVERSITY_MEASURES[diversity_name]
-            scores = (
-                counts.groupby("site_id")
-                .apply(lambda s: fn(list(s)))
-                .reset_index(name="value")
-            )
-            mapped = site_geo.merge(scores, on="site_id", how="left")
-            mapped["value"] = mapped["value"].fillna(0)
-
-        # Absolute size reference, so a mean MaxN of 13 is the same circle whichever
-        # species is showing. Plotly Express rescales to whatever the current maximum
-        # happens to be, which silently makes a rare species look as abundant as a
-        # common one. The reference is the largest per-site value across ALL species
-        # (or all sites, for a diversity metric) in the current filter selection, it
-        # changes when the filters change, but never when the radio changes.
-        if map_sci:
-            all_species_per_site = (
-                df_context.groupby(["site_id", "scientific_name"])["maxn"]
-                .sum()
-                .reset_index()
-                .merge(site_effort, on="site_id", how="left")
-            )
-            all_species_per_site["per_dep"] = all_species_per_site["maxn"] / (
-                all_species_per_site["analysed"].fillna(1).clip(lower=1)
-            )
-            size_ref_max = float(all_species_per_site["per_dep"].max() or 1.0)
-        else:
-            size_ref_max = float(mapped["value"].max() or 1.0)
+        mapped = site_values(df_context, site_geo, map_sci)
+        # Absolute size reference, fixed across the species radio, see
+        # `mpa_data.bubble_reference`.
+        size_ref_max = bubble_reference(df_context, site_effort, mapped, map_sci)
 
         if mapped.empty:
             st.warning(
@@ -524,29 +477,6 @@ def render_mpa_populations(
             # reserve-effect map they are half the argument.
             present_sites = mapped[mapped["value"] > 0]
             zero_sites = mapped[mapped["value"] <= 0]
-
-            # Diameters are computed here in pixels rather than left to Plotly, for
-            # two reasons.
-            #
-            # 1. Absolute scale. The transform below depends only on `size_ref_max`,
-            #    which is fixed across species, so a given value is always the same
-            #    circle. Plotly Express rescales to whatever is currently plotted.
-            # 2. Log spacing. Area-proportional sizing (diameter ∝ √value) crushes the
-            #    bottom of the range: 1, 2 and 3 land within ~3px of each other while
-            #    a single unit near the top is worth a quarter of a pixel. BUV counts
-            #    live mostly at the low end, so that is where the resolution is needed.
-            #
-            # The trade-off is explicit: with a log scale, bubble AREA is no longer
-            # proportional to the count, so areas must not be read as ratios. The
-            # caption says so, and hover carries the real number.
-            MAX_PX = 34
-            MIN_PX = 5
-            log_scale = (
-                MAX_PX / math.log1p(size_ref_max) if size_ref_max > 0 else MAX_PX
-            )
-
-            def bubble_px(values):
-                return (np.log1p(values.clip(lower=0)) * log_scale).clip(lower=MIN_PX)
 
             fig_map = go.Figure()
             colour_map = protection_color_map(mapped["protection_status"])
@@ -570,7 +500,7 @@ def render_mpa_populations(
                         name=status,
                         marker={
                             # Already in pixels, sizemode is "diameter" by default.
-                            "size": bubble_px(grp["value"]),
+                            "size": _bubble_px(grp["value"], size_ref_max),
                             "color": colour_map.get(status, NEUTRAL),
                             "opacity": 0.85,
                         },
@@ -681,7 +611,7 @@ def render_mpa_populations(
             zero_note = (
                 f" **{len(zero_sites):,} small dots** are sites that were analysed but "
                 "recorded none, they keep their protection colour, so an empty site "
-                "inside a reserve is still distinguishable from an empty one outside."
+                "inside an MPA is still distinguishable from an empty one outside."
                 if not zero_sites.empty
                 else ""
             )
@@ -713,116 +643,18 @@ def render_mpa_populations(
 
 # ── Ported from the Experiments page ──────────────────────────────────────
 #
-# Copied, not moved: the Experiments page still holds its own copy, so the
-# two can be read against each other before either is retired. Widget keys
-# carry a `rep_` prefix here, since Streamlit scopes keys per page and the
-# originals keep the unprefixed names.
-
-
-def render_diversity(df: pd.DataFrame) -> None:
-    # Species counts only: the unidentified bucket is N unknown species
-    # under one label, so counting it as one both understates richness and
-    # puts a meaningless row in the matrix.
-    df = real_species(df)
-    # The Experiments page built this once for every chart on it and passed it
-    # through its context. Here each chart makes its own from the frame it was
-    # given, from the same shared `protection_color_map`, so a status is the
-    # same colour wherever it appears without a context to thread through.
-    prot_cmap = protection_color_map(sorted(df["protection_status"].dropna().unique()))
-    section("Diversity")
-    st.caption(
-        "**Shannon (H)** rewards evenness, a reserve with 10 evenly-distributed species "
-        "scores higher than one with 30 species dominated by one. "
-        "**Simpson (1−D)** = probability that two random observations are different species. "
-        "**Pielou / evenness (J')** = Shannon normalised by ln(species count); 1 = perfectly even, near 0 = one species dominates."
-    )
-
-    df = df[
-        df["scientific_name"].notna()
-        & df["reserve_code"].notna()
-        & (df["reserve_code"] != "")
-    ].copy()
-    if df.empty:
-        st.warning("No data after filters.")
-        return
-
-    tot = df.groupby(["reserve_code", "display_name"])["maxn"].sum().reset_index()
-
-    rows = []
-    for reserve, grp in tot.groupby("reserve_code"):
-        counts = grp["maxn"].values
-        if counts.sum() == 0:
-            continue
-        n_spp = int(grp["display_name"].nunique())
-        h = shannon(counts)
-        rows.append(
-            {
-                "Reserve": reserve,
-                "Species": n_spp,
-                "Total MaxN": int(counts.sum()),
-                "Shannon (H)": round(h, 3),
-                "Simpson (1-D)": round(simpson(counts), 3),
-                "Pielou / evenness": round(pielou(counts), 3),
-            }
-        )
-    if not rows:
-        st.warning("Not enough data to compute diversity.")
-        return
-
-    div_df = pd.DataFrame(rows)
-
-    # Dominant protection status per reserve, for colouring
-    reserve_prot = (
-        df.groupby("reserve_code")["protection_status"]
-        .agg(lambda x: x.value_counts().index[0] if len(x) else "unknown")
-        .rename("protection_status")
-    )
-    div_df = div_df.merge(reserve_prot, left_on="Reserve", right_index=True, how="left")
-    div_df["protection_status"] = div_df["protection_status"].fillna("unknown")
-
-    metric_choice = st.radio(
-        "Diversity index",
-        ["Shannon (H)", "Simpson (1-D)", "Pielou / evenness"],
-        horizontal=True,
-        key="rep_div_metric",
-    )
-
-    fig = px.bar(
-        div_df.sort_values(metric_choice, ascending=True),
-        x=metric_choice,
-        y="Reserve",
-        color="protection_status",
-        color_discrete_map=prot_cmap,
-        orientation="h",
-        hover_data={
-            "Species": True,
-            "Total MaxN": True,
-            "Shannon (H)": ":.3f",
-            "Simpson (1-D)": ":.3f",
-        },
-        labels={"protection_status": "Protection"},
-        height=max(350, len(div_df) * 32 + 100),
-    )
-    style(
-        fig,
-        legend_title_text="Protection status",
-        yaxis_title=None,
-        margin={"l": 10, "r": 10, "t": 10, "b": 10},
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("Full table"):
-        st.dataframe(
-            div_df.sort_values(metric_choice, ascending=False), hide_index=True
-        )
+# Ported from the old Experiments page, which has since been retired, so
+# these are now the only copies. The `rep_` prefix on the widget keys is a
+# leftover of that move: harmless, and renaming keys would reset anyone's
+# saved selections for no gain.
 
 
 def render_community_composition(df: pd.DataFrame) -> None:
     section("Composition")
     st.caption(
-        "Top-N species relative abundance per reserve. Shows which species "
+        "Top-N species relative abundance per MPA. Shows which species "
         "dominate where, colour patterns reveal community similarities and "
-        "differences across reserves."
+        "differences across MPAs."
     )
 
     df = df[df["scientific_name"].notna() & df["site_id"].notna()]
@@ -830,35 +662,9 @@ def render_community_composition(df: pd.DataFrame) -> None:
         st.warning("No data after filters.")
         return
 
-    top_n = st.slider("Top N species per reserve", 3, 12, 6, key="rep_comm_top")
+    top_n = st.slider("Top N species per MPA", 3, 12, 6, key="rep_comm_top")
 
-    tot = df.groupby(["reserve_code", "display_name"])["maxn"].sum().reset_index()
-    reserve_totals = tot.groupby("reserve_code")["maxn"].sum().rename("reserve_total")
-    tot = tot.merge(reserve_totals, on="reserve_code")
-    tot["pct"] = (tot["maxn"] / tot["reserve_total"] * 100).round(1)
-
-    keep_rows = []
-    for reserve, grp in tot.groupby("reserve_code"):
-        top = grp.nlargest(top_n, "pct")
-        other_pct = grp["pct"].sum() - top["pct"].sum()
-        keep_rows.append(top)
-        if other_pct > 0:
-            keep_rows.append(
-                pd.DataFrame(
-                    [
-                        {
-                            "reserve_code": reserve,
-                            "display_name": "Other",
-                            "maxn": 0,
-                            "reserve_total": 0,
-                            "pct": round(other_pct, 1),
-                        }
-                    ]
-                )
-            )
-    plot_df = pd.concat(keep_rows, ignore_index=True)
-
-    reserve_order = reserve_totals.sort_values(ascending=False).index.tolist()
+    plot_df, reserve_order = composition_shares(df, top_n)
 
     fig = px.bar(
         plot_df,
@@ -868,8 +674,8 @@ def render_community_composition(df: pd.DataFrame) -> None:
         orientation="h",
         category_orders={"reserve_code": reserve_order},
         labels={
-            "pct": "% of MaxN within reserve",
-            "reserve_code": "Reserve",
+            "pct": "% of MaxN within MPA",
+            "reserve_code": "MPA",
             "display_name": "Species",
         },
         height=max(320, len(reserve_order) * 32 + 80),
@@ -886,218 +692,130 @@ def render_community_composition(df: pd.DataFrame) -> None:
         sorted_df = plot_df.sort_values(
             ["reserve_code", "pct"], ascending=[True, False]
         )
-        st.dataframe(sorted_df, hide_index=True)
+        st.dataframe(
+            sorted_df,
+            hide_index=True,
+            column_config={
+                "reserve_code": st.column_config.TextColumn("MPA", pinned=True)
+            },
+        )
 
     source_coverage_note(df, "this composition")
 
 
-def render_reserve_trends(df: pd.DataFrame) -> None:
+def render_reserve_trends(
+    df: pd.DataFrame,
+    species_filter: list | None = None,
+    df_all: pd.DataFrame | None = None,
+) -> None:
+    """Per-MPA year-on-year trends.
+
+    `df` follows every sidebar filter including Species; `df_all` is the
+    species-UNfiltered twin. Richness reads `df_all`: "how many species per
+    deployment" must not shrink to 1 because snapper is ticked in the
+    sidebar. The Selected-species metric reads `df`, which is the filter
+    doing its job.
+    """
     section("Trends")
+    st.badge("In development", color="red")
     st.caption(
-        "For each reserve: how is the chosen metric changing year-on-year? "
-        "Lines show the metric over time; the table fits a linear trend per reserve "
-        "and labels each as **↑ Recovering / → Stable / ↓ Declining**."
+        "Experimental. For each MPA: how is the chosen metric changing "
+        "year-on-year? Lines show the metric over time; the table fits a "
+        "linear trend per MPA and labels each as "
+        "**↑ Recovering / → Stable / ↓ Declining**."
     )
 
-    df = df[
-        df["scientific_name"].notna()
-        & df["survey_year"].notna()
-        & df["reserve_code"].notna()
-        & (df["reserve_code"] != "")
-    ].copy()
-    if df.empty:
+    df = reserve_trend_rows(df)
+    df_all = reserve_trend_rows(df_all) if df_all is not None else df
+    if df.empty and df_all.empty:
         st.warning("No data after filters.")
         return
 
-    # Richness first, and therefore the default: total MaxN sums across
-    # species, so one schooling species dominates it — kept as an explicit
-    # "all species summed" option for the within-reserve time comparison,
-    # where the species mix partially cancels, but not as the headline.
+    # Two metrics only. Total-MaxN-summed and the inside/outside ratio were
+    # removed on review (2026-10-02): summing MaxN across species mixes
+    # animals that cannot be added, and the ratio collapsed too much into
+    # one number to be read safely.
     metric_choice = st.radio(
         "Metric",
-        [
-            "Species richness per deployment",
-            "Total MaxN per deployment (all species summed)",
-            "Reserve effect ratio (inside ÷ outside)",
-            "Flagship species MaxN",
-        ],
+        [RICHNESS_METRIC, SELECTED_METRIC],
         horizontal=False,
         key="rep_trends_metric",
     )
-
-    flagship_selected = None
-    if metric_choice == "Flagship species MaxN":
-        all_species = sorted(df["display_name"].unique())
-        # Default to Snapper + Blue cod if present
-        defaults = [
-            s for s in all_species if "Pagrus auratus" in s or "Parapercis colias" in s
-        ]
-        flagship_selected = st.multiselect(
-            "Flagship species (empty = falls back to all-species mean)",
-            options=all_species,
-            default=defaults,
-            key="rep_trends_flagship",
+    if metric_choice == RICHNESS_METRIC:
+        st.caption(
+            "Richness counts the species recorded in a deployment, across "
+            "ALL species (the sidebar Species filter does not narrow this "
+            "metric). Two caveats: some older annotation sets did not "
+            "record every species present, and ML-only deployments can "
+            "miss very rare species."
         )
 
+    indicator_selected = None
+    if metric_choice == SELECTED_METRIC:
+        all_species = sorted(df["display_name"].unique())
+        if species_filter:
+            # The sidebar Species filter already narrowed the frame; this
+            # metric follows it rather than carrying a second picker.
+            indicator_selected = all_species
+        else:
+            # Filter empty: snapper, the report-wide default.
+            indicator_selected = [s for s in all_species if "Pagrus auratus" in s]
+        if indicator_selected:
+            st.caption(
+                "Species: **"
+                + ", ".join(indicator_selected[:6])
+                + ("…" if len(indicator_selected) > 6 else "")
+                + "**, change with the sidebar Species filter."
+            )
+
     min_years = st.slider(
-        "Minimum years of data per reserve",
+        "Minimum years of data per MPA",
         2,
         8,
         3,
         key="rep_trends_min_years",
-        help="Reserves with fewer years are shown but not labelled with a trend direction.",
+        help="MPAs with fewer years are shown but not labelled with a trend direction.",
     )
 
-    df["survey_year"] = df["survey_year"].astype(int)
-
     # ── Compute per-(reserve, year) metric ───────────────────────────────────
-    def _agg_total_maxn_per_dep(grp):
-        """Per (reserve, year): total MaxN per drop, then mean across drops."""
-        per_drop = grp.groupby("drop_id")["maxn"].sum()
-        return per_drop.mean()
+    # Both metrics read the species-UNfiltered frame: the denominator is
+    # every deployment in the cell, and the sidebar species filter would
+    # otherwise drop the deployments that did not record the picked species
+    # (pinning the mean to "among those that had it"). The selected-species
+    # metric narrows to its species inside the aggregation instead.
+    frame = df_all
 
-    def _agg_richness_per_dep(grp):
-        per_drop = grp.groupby("drop_id")["scientific_name"].nunique()
-        return per_drop.mean()
-
-    def _agg_flagship_maxn(grp, species_list):
-        sub = grp[grp["display_name"].isin(species_list)]
-        if sub.empty:
-            return 0.0
-        per_drop = sub.groupby("drop_id")["maxn"].sum()
-        return per_drop.mean()
-
-    # Which side of the boundary each deployment sits on. Computed for every
-    # metric, not just the ratio: a reserve is surveyed inside AND outside, and
-    # collapsing both into one line per reserve was the bug this replaced. The
-    # old code labelled the whole reserve by whichever side happened to carry
-    # more annotation rows, so AHE (43% inside) read "No protection" while SLI
-    # (58% inside) read "Marine Reserve" — the same kind of place, labelled
-    # oppositely, and liable to flip when the year filter moved.
-    df = df.assign(_side=protection_group(df["protection_status"]))
-    partial = int((df["_side"] == PARTIAL).sum())
-    df = df[df["_side"].isin([INSIDE, OUTSIDE])]
+    # Which side of the boundary each deployment sits on, and why one reserve
+    # gets two lines: see `mpa_data.split_sides`.
+    frame, partial = split_sides(frame)
     if partial:
         st.caption(
             f"{partial:,} annotation rows are left out: a partial or unclear "
-            "protection regime is neither the reserve nor its control."
+            "protection regime is neither the MPA nor its control."
         )
-    if df.empty:
-        st.warning("No deployments sit clearly inside or outside a reserve.")
+    if frame.empty:
+        st.warning("No deployments sit clearly inside or outside an MPA.")
         return
 
-    if metric_choice == "Species richness per deployment":
-        series = (
-            df.groupby(["reserve_code", "survey_year", "_side"])
-            .apply(_agg_richness_per_dep, include_groups=False)
-            .reset_index(name="metric")
-        )
+    if metric_choice == RICHNESS_METRIC:
+        series = reserve_trend_series(frame, RICHNESS_METRIC)
         y_title = "Mean species per deployment"
-    elif metric_choice == "Total MaxN per deployment (all species summed)":
-        series = (
-            df.groupby(["reserve_code", "survey_year", "_side"])
-            .apply(_agg_total_maxn_per_dep, include_groups=False)
-            .reset_index(name="metric")
-        )
-        y_title = "Mean total MaxN per deployment (all species)"
-    elif metric_choice == "Reserve effect ratio (inside ÷ outside)":
-        by_side = (
-            df.groupby(["reserve_code", "survey_year", "_side"])
-            .apply(_agg_total_maxn_per_dep, include_groups=False)
-            .unstack("_side")
-        )
-        if INSIDE not in by_side.columns or OUTSIDE not in by_side.columns:
-            st.warning(
-                "Need both inside-reserve and outside-reserve deployments "
-                "to compute this ratio."
+    else:  # Selected species MaxN
+        if not indicator_selected:
+            st.info(
+                "No snapper in this selection. Pick species with the "
+                "sidebar Species filter to use this metric."
             )
             return
-        by_side["metric"] = by_side[INSIDE] / by_side[OUTSIDE].replace(0, np.nan)
-        series = by_side["metric"].reset_index()
-        series = series.dropna(subset=["metric"])
-        y_title = "MaxN ratio (inside ÷ outside)"
-    else:  # Flagship species MaxN
-        if not flagship_selected:
-            st.info("Pick at least one flagship species.")
-            return
-        series = (
-            df.groupby(["reserve_code", "survey_year", "_side"])
-            .apply(
-                lambda g: _agg_flagship_maxn(g, flagship_selected),
-                include_groups=False,
-            )
-            .reset_index(name="metric")
-        )
-        y_title = f"Mean flagship MaxN per deployment ({len(flagship_selected)} spp)"
+        series = reserve_trend_series(frame, SELECTED_METRIC, indicator_selected)
+        y_title = f"Mean MaxN per deployment ({len(indicator_selected)} species)"
 
     if series.empty:
         st.warning("No data after applying the metric.")
         return
 
-    # The ratio metric already compares the two sides, so it has one line per
-    # reserve; every other metric has one per side.
-    if "_side" not in series.columns:
-        series["_side"] = "Inside ÷ outside"
-    series = series.rename(columns={"_side": "Side"})
-
     # ── Linear trend per reserve ────────────────────────────────────────────
-    trend_rows = []
-    for (reserve, side), grp in series.groupby(["reserve_code", "Side"]):
-        grp = grp.dropna(subset=["metric"]).sort_values("survey_year")
-        n_years = grp["survey_year"].nunique()
-        prot = side
-
-        if n_years < min_years:
-            first_year = int(grp["survey_year"].min()) if not grp.empty else None
-            latest_year = int(grp["survey_year"].max()) if not grp.empty else None
-            first_metric = (
-                round(float(grp["metric"].iloc[0]), 2) if not grp.empty else None
-            )
-            latest_metric = (
-                round(float(grp["metric"].iloc[-1]), 2) if not grp.empty else None
-            )
-            trend_rows.append(
-                {
-                    "Reserve": reserve,
-                    "Side": prot,
-                    "n_years": int(n_years),
-                    "slope": np.nan,
-                    "direction": "insufficient data",
-                    "first_year": first_year,
-                    "latest_year": latest_year,
-                    "first_metric": first_metric,
-                    "latest_metric": latest_metric,
-                }
-            )
-            continue
-
-        slope, _ = np.polyfit(grp["survey_year"].values, grp["metric"].values, 1)
-        # Stability threshold: 5% of the mean of the metric (per-year basis)
-        eps = 0.05 * abs(grp["metric"].mean()) if grp["metric"].mean() else 0
-        if slope > eps:
-            direction = "↑ Recovering"
-        elif slope < -eps:
-            direction = "↓ Declining"
-        else:
-            direction = "→ Stable"
-
-        trend_rows.append(
-            {
-                "Reserve": reserve,
-                "Side": prot,
-                "n_years": int(n_years),
-                "slope": round(float(slope), 3),
-                "direction": direction,
-                "first_year": int(grp["survey_year"].min()),
-                "latest_year": int(grp["survey_year"].max()),
-                "first_metric": round(float(grp["metric"].iloc[0]), 2),
-                "latest_metric": round(float(grp["metric"].iloc[-1]), 2),
-            }
-        )
-
-    trends_df = pd.DataFrame(trend_rows).sort_values(
-        "slope", ascending=False, na_position="last"
-    )
+    trends_df = linear_trends(series, min_years)
 
     # ── Line chart ──────────────────────────────────────────────────────────
     fig = px.line(
@@ -1112,53 +830,42 @@ def render_reserve_trends(df: pd.DataFrame) -> None:
         labels={
             "survey_year": "Survey year",
             "metric": y_title,
-            "reserve_code": "Reserve",
+            "reserve_code": "MPA",
         },
         height=480,
     )
     style(
         fig,
-        legend_title_text="Reserve",
+        legend_title_text="MPA",
         xaxis={"dtick": 1},
         margin={"l": 10, "r": 10, "t": 10, "b": 10},
-        plot_bgcolor="white",
+        plot_bgcolor=PLOT_BG_WHITE,
     )
-    fig.update_xaxes(gridcolor="#EEEEEE")
-    fig.update_yaxes(gridcolor="#EEEEEE")
-
-    if metric_choice == "Reserve effect ratio (inside ÷ outside)":
-        # Reference line at ratio = 1 (parity between inside and outside)
-        fig.add_hline(
-            y=1,
-            line_dash="dash",
-            line_color="#888",
-            line_width=1,
-            annotation_text="parity",
-            annotation_position="right",
-        )
+    fig.update_xaxes(gridcolor=GRID_ON_WHITE)
+    fig.update_yaxes(gridcolor=GRID_ON_WHITE)
 
     year_axis(fig)
     st.plotly_chart(fig, use_container_width=True)
 
     # ── Honest caveat ───────────────────────────────────────────────────────
     st.caption(
-        "Trend lines fit a simple linear regression per reserve; 3+ years of data "
+        "Trend lines fit a simple linear regression per MPA; 3+ years of data "
         "required for a direction label. Real recovery often takes 5–10+ years and "
         "isn't linear, treat short-term trends as hints, not conclusions."
     )
 
     # ── Summary metrics ─────────────────────────────────────────────────────
-    n_up = int((trends_df["direction"] == "↑ Recovering").sum())
-    n_down = int((trends_df["direction"] == "↓ Declining").sum())
-    n_flat = int((trends_df["direction"] == "→ Stable").sum())
-    n_insuff = int((trends_df["direction"] == "insufficient data").sum())
+    n_up = int((trends_df["direction"] == RECOVERING).sum())
+    n_down = int((trends_df["direction"] == DECLINING).sum())
+    n_flat = int((trends_df["direction"] == STABLE).sum())
+    n_insuff = int((trends_df["direction"] == INSUFFICIENT).sum())
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("↑ Recovering", n_up)
     c2.metric("→ Stable", n_flat)
     c3.metric("↓ Declining", n_down)
     c4.metric("Insufficient data", n_insuff)
 
-    st.markdown("**Per-reserve trend table**")
+    st.markdown("**Per-MPA trend table**")
     st.dataframe(
         trends_df.rename(
             columns={
@@ -1192,9 +899,9 @@ def render_inside_share(df) -> None:
     """
     section("Inside vs outside")
     st.caption(
-        "Deployments inside the reserve boundary against those outside it, per "
-        "reserve. A reserve effect is a comparison between the two, so a "
-        "reserve sampled almost entirely on one side supports a much weaker "
+        "Deployments inside the MPA boundary against those outside it, per "
+        "MPA. An MPA effect is a comparison between the two, so an "
+        "MPA sampled almost entirely on one side supports a much weaker "
         "comparison than the bar length alone suggests."
     )
 
@@ -1202,30 +909,11 @@ def render_inside_share(df) -> None:
         st.info("No annotations in this selection.")
         return
 
-    # All three groups here, unlike the comparisons: this chart describes how
-    # the surveying was spread, and the partial-regime deployments are part of
-    # that picture even though no comparison can use them.
-    sided = df.assign(Side=protection_group(df["protection_status"])).dropna(
-        subset=["Side"]
-    )
-    per_reserve = (
-        sided.groupby(["reserve_code", "Side"])["drop_id"]
-        .nunique()
-        .unstack("Side")
-        .fillna(0)
-    )
-    for column in (INSIDE, OUTSIDE, PARTIAL):
-        if column not in per_reserve.columns:
-            per_reserve[column] = 0
-    per_reserve["total"] = (
-        per_reserve[INSIDE] + per_reserve[OUTSIDE] + per_reserve[PARTIAL]
-    )
-    per_reserve = per_reserve[per_reserve["total"] > 0]
+    # All three groups here, unlike the comparisons (`mpa_data.inside_share`).
+    per_reserve = inside_share(df)
     if per_reserve.empty:
         st.info("No annotated deployments in this selection.")
         return
-    per_reserve["share_inside"] = per_reserve[INSIDE] / per_reserve["total"]
-    per_reserve = per_reserve.sort_values("share_inside")
 
     long = (
         per_reserve[[INSIDE, OUTSIDE, PARTIAL]]
@@ -1254,7 +942,7 @@ def render_inside_share(df) -> None:
 
     table = per_reserve.reset_index().rename(
         columns={
-            "reserve_code": "Reserve",
+            "reserve_code": "MPA",
             INSIDE: "Protected",
             OUTSIDE: "Unprotected",
             PARTIAL: "Other",
@@ -1267,7 +955,7 @@ def render_inside_share(df) -> None:
         st.dataframe(
             table[
                 [
-                    "Reserve",
+                    "MPA",
                     "Protected",
                     "Unprotected",
                     "Other",
@@ -1278,13 +966,14 @@ def render_inside_share(df) -> None:
             hide_index=True,
             width="stretch",
             column_config={
+                "MPA": st.column_config.TextColumn("MPA", pinned=True),
                 "Share inside": st.column_config.ProgressColumn(
                     "Share inside",
                     min_value=0,
                     max_value=100,
                     format="%.0f%%",
                     help="Annotated deployments inside the boundary, as a share "
-                    "of the reserve's annotated deployments.",
+                    "of the MPA's annotated deployments.",
                 ),
             },
         )
@@ -1392,3 +1081,146 @@ def render_depth(dep: pd.DataFrame, ann: pd.DataFrame) -> None:
                 "Species with five or more depth-carrying deployments, up "
                 "to the 15 most-recorded, shallowest median first."
             )
+
+
+def render_habitat(
+    dep: pd.DataFrame, ann: pd.DataFrame, ann_all: pd.DataFrame | None = None
+) -> None:
+    """Species against the NZMHCS habitat classes. Under development.
+
+    Reads the `nzmhcs_abiotic` / `nzmhcs_biotic` columns the pipeline
+    normalises at ingest (short codes and long spellings merged to one
+    label per class). Coverage is sparse, only some surveys recorded
+    habitat, so every number names its denominator.
+
+    A deployment listing several classes counts under each: the question
+    is "what does this class hold", not a partition of effort.
+    """
+    section("Habitat")
+    st.badge("In development", color="red")
+
+    abiotic = explode_habitat(dep, "nzmhcs_abiotic")
+    biotic = explode_habitat(dep, "nzmhcs_biotic")
+    if abiotic.empty and biotic.empty:
+        st.info(
+            "No deployments in this selection carry habitat metadata. "
+            "On an older database, run the pipeline's `--ingest` once to "
+            "populate the NZMHCS columns."
+        )
+        return
+
+    # Coverage first, in numbers: habitat was only recorded by some surveys,
+    # and every chart below rests on this slice, not on the whole selection.
+    n_ab = int(abiotic["drop_id"].nunique())
+    n_bi = int(biotic["drop_id"].nunique())
+    st.caption(
+        f"Habitat comes from the deployment metadata's NZMHCS fields, which "
+        f"only some surveys filled in: **{n_ab:,} of the "
+        f"{dep['drop_id'].nunique():,} deployments in this selection** carry "
+        f"substrate data ({n_bi:,} biotic). Everything below is about those "
+        "deployments only."
+    )
+
+    left, right = st.columns(2)
+    for col, frame, title, key in (
+        (left, abiotic, "Substrate (abiotic)", "hab_abiotic"),
+        (right, biotic, "Biotic habitat", "hab_biotic"),
+    ):
+        with col:
+            st.markdown(f"**{title}**")
+            if frame.empty:
+                st.caption("No data in this selection.")
+                continue
+            counts = (
+                frame.groupby("habitat")["drop_id"]
+                .nunique()
+                .sort_values()
+                .reset_index(name="deployments")
+            )
+            fig = px.bar(
+                counts,
+                x="deployments",
+                y="habitat",
+                orientation="h",
+                text="deployments",
+                height=max(240, 24 * len(counts) + 60),
+            )
+            fig.update_traces(
+                marker_color=SINGLE_SERIES, textposition="outside", cliponaxis=False
+            )
+            style(fig, legend=False)
+            fig.update_yaxes(title=None)
+            fig.update_xaxes(title="Deployments with habitat recorded")
+            st.plotly_chart(fig, key=key)
+
+    # ── Who turns up on what ─────────────────────────────────────────────────
+    # Detection rate and abundance per substrate class, for the most-recorded
+    # species in the current selection (the sidebar Species filter narrows
+    # `ann`, so picking species narrows these columns too). Peak per (drop,
+    # species) first, so a species seen in many intervals of one video is one
+    # deployment with one MaxN, same as everywhere else in the report.
+    #
+    # Denominators ("annotated deps" per class) come from the
+    # species-UNfiltered frame, or a sidebar species pick would shrink them
+    # to the deployments recording that species and every rate would read
+    # 100%. The numerators stay on the filtered peaks, which is the filter
+    # choosing which species columns appear.
+    denom_ann = ann_all if ann_all is not None else ann
+    joined = abiotic.merge(species_peaks(ann), on="drop_id", how="inner")
+    if joined.empty:
+        st.caption(
+            "None of the habitat-carrying deployments are annotated under "
+            "the current filters, so the species breakdown is empty."
+        )
+        return
+
+    det_df, maxn_df, sp_cols = substrate_tables(abiotic, joined, denom_ann)
+    if det_df.empty:
+        st.caption(
+            "No substrate class has five or more annotated deployments under "
+            "the current filters."
+        )
+        return
+
+    # Heatmap shading via a pandas Styler: `st.dataframe` renders its cell
+    # backgrounds, and `background_gradient` picks black or white text per
+    # cell for contrast, so the tables stay readable in either app theme.
+    st.markdown(
+        "**Detection rate by substrate**, % of each class's annotated "
+        "deployments recording the species"
+    )
+    st.dataframe(
+        det_df.style.background_gradient(
+            cmap="Blues", subset=sp_cols, vmin=0, vmax=100
+        ).format("{:.0f}%", subset=sp_cols),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Substrate": st.column_config.TextColumn("Substrate", pinned=True),
+        },
+    )
+
+    st.markdown(
+        "**How many, when seen**, mean MaxN across the deployments in the "
+        "class that recorded the species"
+    )
+    # One green scale across the whole matrix, same convention as the
+    # sandbox: schooling species dominate it, so read down a column.
+    vmax = pd.to_numeric(maxn_df[sp_cols].stack(), errors="coerce").max()
+    st.dataframe(
+        maxn_df.style.background_gradient(
+            cmap="Greens", subset=sp_cols, vmin=0, vmax=max(float(vmax or 1), 1)
+        ).format("{:.1f}", subset=sp_cols),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Substrate": st.column_config.TextColumn("Substrate", pinned=True),
+        },
+    )
+    st.caption(
+        "Classes with at least five annotated deployments; columns are the "
+        "most-recorded species under the current filters. A 0.0 in the MaxN "
+        "table means never recorded on that substrate. Small denominators "
+        "and uneven surveys blur both tables, read them as coverage, not "
+        "as a finding."
+    )

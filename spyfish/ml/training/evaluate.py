@@ -270,7 +270,9 @@ def run_evaluation_pipeline(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Evaluate new model
-    local_results_dir = config.training_results_dir / f"{timestamp}_{model_type}"
+    # Same shape as the model name standard (type first, stamp last), so a
+    # results folder and the model it evaluated sort and read the same way.
+    local_results_dir = config.training_results_dir / f"{model_type}_{timestamp}"
     new_metrics = evaluate_model(
         model_path, data_yaml, split=split, imgsz=imgsz, output_dir=local_results_dir
     )

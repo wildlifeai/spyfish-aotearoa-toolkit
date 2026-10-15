@@ -96,6 +96,14 @@ class ColumnsConfig(BaseConfig):
         return self._col("depth_column")
 
     @property
+    def nzmhcs_abiotic_column(self) -> str:
+        return self._col("nzmhcs_abiotic_column")
+
+    @property
+    def nzmhcs_biotic_column(self) -> str:
+        return self._col("nzmhcs_biotic_column")
+
+    @property
     def protection_status_aliases(self) -> dict:
         """Lowercased ProtectionStatus → the canonical spelling to store."""
         return get_required(self._yaml_config, "protection_status_aliases", "")
@@ -127,6 +135,11 @@ class ColumnsConfig(BaseConfig):
     def unidentified_label(self) -> str:
         """What the report calls the merged non-species classes."""
         return get_required(self.reporting, "unidentified_label", "reporting")
+
+    @property
+    def species_search_default(self) -> list:
+        """Scientific names the Species search view opens on, in preference order."""
+        return get_required(self.reporting, "species_search_default", "reporting")
 
     @property
     def indicator_species(self) -> list:
@@ -180,6 +193,14 @@ class ColumnsConfig(BaseConfig):
         return self._col("scientific_name_column")
 
     @property
+    def csv_common_name_column(self) -> str:
+        return self._col("common_name_column")
+
+    @property
+    def csv_is_bad_deployment_column(self) -> str:
+        return self._col("is_bad_deployment_column")
+
+    @property
     def csv_maxn_time_column(self) -> str:
         return self._col("maxn_time_column")
 
@@ -196,6 +217,10 @@ class ColumnsConfig(BaseConfig):
         return self._col("annotated_by_column")
 
     @property
+    def csv_source_column(self) -> str:
+        return self._col("source_column")
+
+    @property
     def csv_interval_annotation_column(self) -> str:
         return self._col("interval_annotation_column")
 
@@ -209,6 +234,10 @@ class ColumnsConfig(BaseConfig):
 
     # ML MaxN CSV only — persistence-filter provenance (absent from citsci/expert
     # MaxN CSVs, so consumers must guard on column presence).
+
+    @property
+    def csv_model_name_column(self) -> str:
+        return self._col("model_name_column")
 
     @property
     def csv_raw_max_interval_column(self) -> str:

@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 from typing import Dict, Optional, Set
 
 import pandas as pd
@@ -14,6 +15,87 @@ from spyfish.database.manager import DatabaseManager, parse_geo_value
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.validation.data_validator import DataValidator
 
+# NZMHCS habitat values arrive as a mix of short codes ("SND"), long labels
+# ("Sand") and JSON-ish list strings ('["SND"]', '["Spg, Tur"]'). Each token is
+# lowercased and mapped through this table; unmapped tokens are kept as typed
+# so a new class is visible rather than silently dropped. Keys are lowercase.
+# Lives here rather than in config.yaml: it is reference data for the one
+# function below, not a setting anyone tunes.
+NZMHCS_ALIASES = {
+    # abiotic (substrate)
+    "snd": "Sand",
+    "sand": "Sand",
+    "slt": "Silt",
+    "silt": "Silt",
+    "cbl": "Cobbles",
+    "cobbles": "Cobbles",
+    "pbl": "Pebbles",
+    "pebbles": "Pebbles",
+    "grn": "Gravel",
+    "shl": "Shell",
+    "pr": "Platform/patch reef",
+    "reef": "Platform/patch reef",
+    "prc": "Platform reef with crevices",
+    "platform reef with crevices": "Platform reef with crevices",
+    "prl": "Platform reef (low)",
+    "lbc": "Large boulder complex",
+    "large boulder complex": "Large boulder complex",
+    "sbc": "Small boulder complex",
+    "small boulder complex": "Small boulder complex",
+    "bedrock": "Bedrock",
+    "sedimentation low": "Sedimentation (low)",
+    "sedimentation med": "Sedimentation (med)",
+    # biotic
+    "tur": "Turfing algae",
+    "turfing": "Turfing algae",
+    "spg": "Sponges",
+    "bar": "Barren",
+    "cca": "Crustose coralline algae",
+    "crustose coralline algae": "Crustose coralline algae",
+    "eck": "Ecklonia kelp",
+    "kelp (ecklonia radiata)": "Ecklonia kelp",
+    "eca": "Erect coralline algae",
+    "erect coralline algae": "Erect coralline algae",
+    "mixed low seaweed": "Mixed low seaweed",
+    "mixed large brown seaweeds": "Mixed large brown seaweeds",
+    "mix": "Mixed",
+    "inv": "Invertebrates",
+    "car": "Carpophyllum",
+    "carpophyllum sp.": "Carpophyllum",
+    "cau": "Caulerpa",
+    "mac": "Macrocystis",
+    "small kelp": "Small kelp",
+    "sed": "Sediment film",
+    "ulv": "Ulva",
+    "und": "Undaria",
+}
+
+
+def parse_nzmhcs_value(value) -> Optional[str]:
+    """Normalise one NZMHCS habitat cell to comma-joined canonical labels.
+
+    Raw cells mix short codes ("SND"), long labels ("Sand") and JSON-ish list
+    strings ('["SND"]', '["Spg, Tur"]', even double-encoded '["[\"Sand\"]"]').
+    Strip the list syntax, split on commas, map each token through
+    `NZMHCS_ALIASES` (lowercased), and keep unmapped tokens as typed so
+    a new class shows up in the data rather than vanishing. Placeholder
+    tokens (empty, "0", "-") mean "no data" and return None, same as a blank.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    s = str(value)
+    for _ in range(3):  # peels the double-encoded lists too
+        s = re.sub(r'[\[\]"\\]', "", s)
+    seen: list = []
+    for token in s.split(","):
+        token = token.strip()
+        if token in ("", "0", "-", "nan", "None"):
+            continue
+        label = NZMHCS_ALIASES.get(token.lower(), token)
+        if label not in seen:
+            seen.append(label)
+    return ", ".join(seen) if seen else None
+
 
 def check_pending_arrivals(
     known_files: Optional[Set[str]] = None,
@@ -25,8 +107,18 @@ def check_pending_arrivals(
     Picks up EVERY drop with ml_status='pending', whatever its recorded
     video_presence, and re-checks S3:
       - not present → leave as-is
-      - present + DEEP_ARCHIVE → video_presence=archived (no ml advance)
+      - present + DEEP_ARCHIVE, not restored → video_presence=archived (no ml advance)
+      - present + DEEP_ARCHIVE, restored → treated as downloadable (below)
       - present + downloadable → video_presence=present, advance ml_status to ready.
+
+    The listing cannot see a restore: a restored object keeps its DEEP_ARCHIVE
+    storage class and only the per-object Restore header says a readable copy
+    exists. So every archived pending drop costs one head_object here. That is
+    a few hundred cheap calls per run against hours of GPU that would otherwise
+    never be reached: 118 SLI videos sat restored for a week (2026-10-09) while
+    this check kept them `archived` and --ml kept skipping them. Note the
+    readable copy expires; a drop advanced here and not processed before then
+    fails at download time, since nothing re-checks a drop once it is ml_ready.
 
     The presence filter used to be (absent, archived), on the assumption that a
     drop already marked `present` must have been advanced already. It leaves a
@@ -46,8 +138,8 @@ def check_pending_arrivals(
 
     logging.info(f"Checking S3 for {len(pending)} pending drops...")
 
+    storage = S3Handler(bucket=config.s3_bucket)
     if known_files is None or media_file_info is None:
-        storage = S3Handler(bucket=config.s3_bucket)
         logging.info(
             f"Downloading master file list from S3 bucket (prefix: {config.media_s3_prefix})..."
         )
@@ -70,12 +162,18 @@ def check_pending_arrivals(
 
         storage_class = media_file_info.get(video_path)
         if storage_class == "DEEP_ARCHIVE":
-            if current_presence != VideoPresence.ARCHIVED:
-                db.update_deployment_fields(
-                    drop_id, video_presence=VideoPresence.ARCHIVED
+            if storage.is_restored(video_path):
+                logging.info(
+                    f"{drop_id}: DEEP_ARCHIVE but a restored copy is readable, "
+                    f"treating as present."
                 )
-                logging.info(f"{drop_id}: video in DEEP_ARCHIVE, marked archived.")
-            continue
+            else:
+                if current_presence != VideoPresence.ARCHIVED:
+                    db.update_deployment_fields(
+                        drop_id, video_presence=VideoPresence.ARCHIVED
+                    )
+                    logging.info(f"{drop_id}: video in DEEP_ARCHIVE, marked archived.")
+                continue
 
         logging.info(f"✅ Video confirmed for {drop_id}. Advancing ml_status → ready.")
         db.update_deployment_fields(drop_id, video_presence=VideoPresence.PRESENT)
@@ -391,6 +489,8 @@ def _sync_deployments_to_db(
             latitude=parse_geo_value(row.get(config.latitude_column)),
             longitude=parse_geo_value(row.get(config.longitude_column)),
             depth=parse_geo_value(row.get(config.depth_column)),
+            nzmhcs_abiotic=parse_nzmhcs_value(row.get(config.nzmhcs_abiotic_column)),
+            nzmhcs_biotic=parse_nzmhcs_value(row.get(config.nzmhcs_biotic_column)),
         )
         new_count += 1
 

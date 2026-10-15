@@ -28,6 +28,11 @@ csv_mapping:
   targeted_latitude_column: "TargetedLatitude"   # BUV Survey Sites.csv — planned
   targeted_longitude_column: "TargetedLongitude" # BUV Survey Sites.csv — planned
   depth_column: "DepthDeployment"               # BUV Deployment.csv only
+  # NZ Marine Habitat Classification Scheme fields, BUV Deployment.csv only.
+  # Sparse (~12% / ~7% filled) and free-ish text; normalised at ingest via
+  # `NZMHCS_ALIASES` in spyfish/orchestrator/ingest.py.
+  nzmhcs_abiotic_column: "NZMHCS_Abiotic"
+  nzmhcs_biotic_column: "NZMHCS_Biotic"
   # Selection CSV columns
   # All time columns are absolute seconds from frame 0 of the source video file.
   clip_start_absolute_column: "ClipStartAbsoluteSeconds"
@@ -37,13 +42,16 @@ csv_mapping:
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
+  common_name_column: "CommonName"  # BUV Species.csv — used to resolve common names in legacy annotation sheets
   maxn_time_column: "TimeOfMax"
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
+  source_column: "Source"  # annotations export only: which account a row belongs to: legacy / biigle_volume_N / model name (AnnotatedBy says only who)
   time_seconds_column: "TimeAbsoluteSeconds"
   subject_id_column: "SubjectID"  # Zooniverse subject_id — written into citsci MaxN CSVs and the annotations DB external_id for provenance
   # ML MaxN CSV only — persistence-filter provenance columns (absent from citsci/expert MaxN CSVs).
+  model_name_column: "ModelName"                # which model produced the row; AnnotatedBy is just "ml", as in the DB
   raw_max_interval_column: "RawMaxInterval"     # single-frame max before the persistence filter; >= MaxInterval
   spike_flag_column: "SpikeFlag"                # true when the persistence filter reduced this interval's count
   spike_time_seconds_column: "SpikeTimeSeconds" # absolute seconds of the suppressed raw peak frame (empty unless SpikeFlag)
@@ -108,9 +116,16 @@ reporting:
   # writes to say it reviewed this deployment and saw nothing. It must never be
   # counted as a species, but it must stay in the frame, because it is what
   # makes a real zero distinguishable from "this source never looked".
+  # "Sp1".."Sp7" are legacy workbook placeholders meaning "an unidentified
+  # species, the Nth distinct one in THIS survey" (species_map_global.yaml
+  # maps "Unidentified spp. 1" onto them). They are not species, and worse,
+  # they are not even stable names: Sp1 in one survey and Sp1 in another are
+  # different animals, so counting "Sp1" as one species programme-wide is
+  # wrong in both directions. 21 deployments across 8 surveys carry them.
   non_species_classes: ["fish", "bait", "unknown", "Unknown", "UnID", "unid",
                         "Fish: final", "Fish - Final", "Fish: review required",
-                        "To review", "NULL DEPLOYMENT"]
+                        "To review", "NULL DEPLOYMENT",
+                        "Sp1", "Sp2", "Sp3", "Sp4", "Sp5", "Sp6", "Sp7"]
 
   # What the report calls them once they are merged. One bucket, shown rather
   # than silently dropped: "we saw something and could not name it" is a real
@@ -130,30 +145,36 @@ reporting:
   # measure, so summing every species together (mixing a snapper with a spotty)
   # answers no useful question. Used as the map's default selection; the user can
   # override it per view.
+  # What the Species search view opens on, first match in the data wins.
+  # Something memorable rather than the commonest species, but nothing a
+  # poacher would want a site list for (CLAUDE.md, "Sensitive data"): morays
+  # and rays are not fished, and both are seen on dozens of deployments.
+  # Falls back to `indicator_species`, then the first name in the list.
+  species_search_default:
+    - "Gymnothorax prasinus"      # yellow moray
+    - "Myliobatis tenuicaudatus"  # eagle ray
+    - "Bathytoshia brevicaudata"  # short-tailed stingray
+
   indicator_species:
     - "Pagrus auratus"      # snapper — the classic NZ reserve-effect indicator
     - "Parapercis colias"   # blue cod — the southern equivalent
     - "Jasus edwardsii"     # rock lobster — heavily fished, strong reserve response
 
-  # ProtectionStatus values that count as "protected" for inside/outside reserve
-  # comparisons. Everything else is treated as unprotected. Partial regimes
-  # (Mataitai, Taiapure, seafloor-only) are deliberately NOT here — they restrict
-  # some fishing but not the take of these indicator species, so counting them as
-  # protected would blunt the very contrast the comparison exists to show.
-  # Exactly one status counts as protected, and exactly one as unprotected.
-  # Everything else is a partial or unclear regime (High Protection Area, Type
-  # II MPA, Taiapure, Mataitai, Fisheries Act closures, Seafloor Protection,
-  # "Other"), and those restrict *some* fishing without clearly protecting the
-  # species this report counts. They form a third group, "Other", which the
-  # inside-versus-outside comparisons leave out and say so, rather than being
-  # folded into whichever side happens to look right.
-  #
-  # 487 of 3,064 deployments (16%) sat in that third group when this was
-  # written. Two of those statuses used to count as protected here while the
-  # MPA view's own classifier read them as outside, so the same deployment was
-  # on opposite sides of the comparison depending on the chart.
+  # ProtectionStatus values that count as "protected" for inside/outside MPA
+  # comparisons. Partial regimes (Mataitai, Taiapure, seafloor-only) are
+  # deliberately NOT here — they restrict some fishing but not the take of
+  # these indicator species, so counting them as protected would blunt the
+  # very contrast the comparison exists to show.
+  # Two statuses count as protected and exactly one as unprotected. Everything
+  # else is a partial or unclear regime (Type II MPA, Taiapure, Mataitai,
+  # Fisheries Act closures, Seafloor Protection, "Other"), and those restrict
+  # *some* fishing without clearly protecting the species this report counts.
+  # They form a  third group, "Other", which the inside-versus-outside
+  # comparisons leave out and say so, rather than being folded into whichever
+  # side happens to look right.
   protected_statuses:
     - "Type I MPA (Marine Reserve)"
+    - "High Protection Area"
 
   unprotected_statuses:
     - "No protection"
@@ -163,9 +184,15 @@ paths:
   # Base directory for all project data
   base_dir: "process_files"
   deployment_targets_csv: process_files/deployment_targets.csv
-  # Legacy directories (at project root, synced to S3)
+  # Legacy directories (at project root, synced to S3, gitignored)
   legacy:
     zooniverse: "process_files/zooniverse/legacy_classifications"
+    # Hand-maintained knowledge files for the legacy workbook extraction
+    # (fix_keys.yaml, species / survey maps, site matching) plus the cached
+    # SharePoint lists under reference/. Under process_files/ so they travel
+    # to S3 with the other pipeline data and stay out of git: reference/
+    # and the site coordinates are sensitive (CLAUDE.md, "Sensitive data").
+    annotations_help: "process_files/legacy_data_help"
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
@@ -202,7 +229,7 @@ paths:
 
 
 ml_inference:
-  limit_processing: 5 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 9 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
   imgsz: 640  #1920
@@ -217,6 +244,16 @@ ml_inference:
   maxn_persistence_seconds: 1.0    # Rolling-min window: count must hold this long to count toward MaxN (3 frames at ml_fps 3).
   maxn_gap_fill_seconds: 0.4       # Zero-gaps up to this long between detections take min(neighbours) first ("threshold flicker" forgiveness — 49% of gaps between runs are 1 frame). Never invents detections: an isolated blip stays exposed.
   maxn_exclude_classes: ["bait"]   # Classes whose detections never count toward MaxN and never get a MaxN row. The bait fish strapped to the canister is a real fish visually; only the class split keeps it out of abundance counts.
+  # Legacy review frames (2026-10-12). Deployments that carry legacy expert
+  # annotations (per-30s-interval workbook counts, external_id='legacy') get
+  # their expert MaxN moments pulled from the video after --ml, so the expert's
+  # count and the model's boxes sit on the same frame. The clean frame goes to
+  # frames/ once (model-independent, shared with the BIIGLE/Zooniverse uploads);
+  # the box-drawn copy goes to qa_frames/legacy/<model>/ so a re-run with
+  # another model lands beside the old one rather than over it.
+  legacy_review:
+    random_intervals: 3            # Besides each species' peak, this many other scored intervals per species (seeded by DropID, so the same ones come back). Checks the analyst's counting at ordinary moments, not just the peak.
+    max_time_delta_seconds: 0.5    # The clean frame is the raw-CSV frame nearest the legacy second, so the drawn boxes match the pixels. Beyond this gap (no detection near that second) the frame is seeked by time instead and drawn with no boxes.
   max_boxes_per_frame: 80          # Sanity ceiling: if a drop's inference averages more detections/frame than this, treat it as degenerate (model saturating max_det on out-of-distribution footage, or confidence_threshold mis-set to ~0) and fail the drop instead of building a giant COCO. No real BUV frame has 80 fish; the flood case hits YOLO's max_det=300.
   batch_size: 32                   # Frames per YOLO predict() call during video inference. Batching amortises per-call overhead and keeps the GPU fed (single-frame calls leave an A100 at ~0% util). 32 fits comfortably at imgsz=640 on a 40GB A100; lower to 8–16 for larger imgsz or smaller GPUs.
   # YOLO NMS, applied at inference (passed to model.predict). Cleans overlapping/stacked
@@ -263,6 +300,7 @@ extraction:
     per_species_maxn: 2        # Mandatory for counting: no peak frame for a species = no MaxN for it at all
     per_species_confusing: 1   # High count, low confidence — resolves detection uncertainty
     fish_bands: 3      # Frames spanning the catch-all's box-size range. Measured diagonal spread was 4.1x for `fish` vs 1.8-2.7x for named species — it holds several different animals, so band by size rather than take the N largest counts. Self-limiting: a drop whose boxes are all one size yields one frame.
+    random_detection_export: 3 # Random moments that HAVE at least one box, any species/confidence: the fair sample of ordinary detections for precision. Every other detection bucket is biased on purpose (peaks, low confidence, size extremes). Blind is the recall twin and may land on nothing.
     blind_export: 3            # ALWAYS taken, never mere filler: every other bucket is chosen by the model, so these are the only frames that can reveal a fish it never detected. A dense drop is precisely where that check matters, so this must not be squeezed out by a full budget.
     start_export: 1            # Health check on the opening of the deployment
     # ONE knob for review effort. Quotas are multiplied by it and spacing is
@@ -306,6 +344,30 @@ extraction:
     min_confidence: 0.25             # Count detections at or above this conf — lower than maxn_conf=0.5 on purpose, surfaces transient multi-fish moments
     citsci_dedupe_tolerance_seconds: 1.0 # Drop ML-peak rows within this many seconds of any citsci-selected frame (avoids near-duplicates)
 
+  # Metadata slate: the handwritten whiteboard (site, date, time, lat/lon, depth)
+  # rangers hold up to the camera before the drop. Scanned once per deployment at
+  # the start of --ml, when the video is on local disk; the best frame is saved as
+  # {drop}_slate.jpg in the drop folder for cross-checking SharePoint metadata.
+  # A slate is the largest bright, unsaturated blob that is big, convex and
+  # board-shaped, smooth inside (whiteboard, not non-slip deck) and carries a
+  # handful of small dark strokes (handwriting). Thresholds were tuned on ONE
+  # video (KSF_20240124_BUV_KSF_085_06, slate at 0-3 s): revisit once a batch of
+  # slates has been collected.
+  slate_detection:
+    scan_width: 480            # analysis resolution; the saved frame is full-res
+    step_seconds: 1.0
+    max_seconds: 120           # ceiling when sampling_start is missing or 0; the pipeline otherwise stops at sampling_start
+    grace_seconds: 3.0         # keep looking this long after the last hit for a better frame
+    paper_value_min: 150       # HSV value: bright
+    paper_saturation_max: 50   # HSV saturation: not coloured (white/grey)
+    ink_value_max: 90          # dark strokes inside the panel
+    min_paper_frac: 0.10       # largest white blob must cover >= this share of the frame
+    min_solidity: 0.80         # blob area / convex hull area: a held-up board is convex
+    max_aspect: 2.0            # long/short side of the blob: boards ~1.3, deck strips 3-6
+    max_edge_frac: 0.15        # Canny edge share inside the blob: whiteboard smooth, deck textured
+    min_strokes: 5             # small dark components inside the blob (handwriting); blank board = 0
+    stroke_area_px: [4, 400]   # component area at scan_width; smaller = noise, larger = shadow/object
+
 zooniverse:
   project_id: 14054          # Upload target — single project only. spyfish-aotearoa main.
   source_project_ids:        # All projects to fetch classifications FROM
@@ -315,6 +377,24 @@ zooniverse:
   min_clips_per_video: 30  # Minimum clips per video — if ML strategy selects fewer, top up with evenly-spaced health checks
   min_agreement_pct: 50.0 # Aggregator filter: drop (subject, species) rows where vote_count / total_classifiers < this. Handles the full retirement-1 (expert) → retirement-30 (broad public) range without per-workflow tuning.
   consensus_something_here_pct: 50.0 # Consensus-fish rule: when no single species clears min_agreement_pct but at least this % of voters saw SOMETHING (votes - nothing_here_votes), emit one row with species="fish".
+  # Validation uploads (--zooniverse-frames / --zooniverse-crops): volunteers
+  # check the ML output directly. Frames are picked by the SAME selector and
+  # quotas as BIIGLE expert review (extraction.frame_strategy); every ML box in
+  # a picked frame then becomes a crop. Sets are uploaded as vframes_{drop} and
+  # crops_{drop} and attached to their workflows by hand, like clips.
+  validation:
+    # Replaces frame_strategy.effort_multiplier for validation only; every quota
+    # still comes from frame_strategy. Measured x1 = 22-37 frames per drop,
+    # x2 = 42-66, x3 = 58-95. At ~4.7 boxes per frame, x3 is ~270-450 crops,
+    # ~2-4 volunteer-hours per drop at 5 votes x 6 s. The knob to turn down.
+    effort_multiplier: 3
+    crops:
+      min_bbox_px: 60          # Smaller boxes are too blurry once enlarged; still judged on the frame.
+      crop_scale: 1.5          # Crop is 1.5x the box, so the animal fills ~45% of it (pilot: 2.0 left a 73px box at 25%).
+      max_frame_fraction: 0.9  # Crop window never wider than 90% of the frame's short side.
+      crop_image_px: 800       # Saved crop is 800x800 px: sharp on a phone, ~100 KB.
+    frames:
+      max_width_px: 1920       # Frames are saved at native width up to this; drawn boxes map back via the recorded scale.
 
 deployment_validation:
   buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
@@ -694,6 +774,7 @@ training:
     - Evechinus chloroticus   # kina: static benthic urchin, not a MaxN target; parked 2026-08-21, revisit for a dedicated kina/substrate task
   local_training_dir: "process_files/training"
   excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
+  test_drops_file: "process_files/training_lists/test_drops.txt"           # FROZEN test set: always test, never train/val; append-only, see scripts/propose_test_split.py
   # BIIGLE volume ids whose drops always go to TRAIN (old-label / legacy training
   # volumes whose annotations shouldn't be evaluated against). Resolved offline
   # via the volume_id column stamped into each drop's _biigle_training_raw.csv
@@ -735,12 +816,23 @@ training_extraction:
 
 
 validation_patterns:
-  # The date segment is YYYYMMDD constrained to a real calendar date in 20xx, not
-  # a bare \d{8}. A loose \d{8} accepts DDMMYYYY entered by hand (e.g. 23042026),
-  # which then parses as year 2304 and stretches every year axis in the dashboard.
-  drop_id:   "^[A-Z]{3}_20\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])_BUV_[A-Z]{3}_\\d{3}_\\d{2}$"
-  survey_id: "^[A-Z]{3}_20\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])_BUV$"
+  # The date segment is YYYYMMDD constrained to a real calendar date in 19xx/20xx,
+  # not a bare \d{8}. 19xx is admitted because the earliest real BUV survey is
+  # Poor Knights 1998; the century is still pinned to 19/20 so a DDMMYYYY entered
+  # by hand (e.g. 23042026, which would parse as year 2304 and stretch every year
+  # axis in the dashboard) is still rejected — the day never starts with 19 or 20
+  # in a way that also leaves a valid month and day behind it.
+  drop_id:   "^[A-Z]{3}_(?:19|20)\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])_BUV_[A-Z]{3}_\\d{3}_\\d{2}$"
+  survey_id: "^[A-Z]{3}_(?:19|20)\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])_BUV$"
   site_id:   "^[A-Z]{3}_\\d{3}$"
+  # Model names: {type}_{YYYYMMDD}[_{HHMMSS}], type first, training stamp
+  # LAST, nothing after it (species_20260822_192536, cfd_binary_water_20260301).
+  # The file stem of the promoted weights IS the model name in the annotations
+  # database (external_id), and "newest model wins" sorts on the stamp, so a
+  # name that breaks the rule is refused before the pipeline runs (decision
+  # 2026-10-15). Stamp-first names from older promotions are rewritten to this
+  # form by `AnnotationDatabaseManager.init_db`.
+  model_name: "^[a-z][a-z0-9_]*?_(20\\d{6})(?:_(\\d{6}))?$"
 
 validation_rules:
   deployments:

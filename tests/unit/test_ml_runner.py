@@ -78,16 +78,22 @@ def test_get_inference_targets_caps_at_limit(
 @patch("spyfish.orchestrator.ml_runner.os.path.exists")
 @patch("spyfish.orchestrator.ml_runner.DatabaseManager")
 @patch("spyfish.orchestrator.ml_runner.S3Handler")
-def test_get_inference_targets_backfills_on_download_failure(
+def test_get_inference_targets_never_backfills_past_the_limit(
     mock_s3_class, mock_db_class, mock_exists, mock_makedirs
 ):
-    """Regression: limit used to be applied BEFORE download loop, so failures
-    silently reduced the batch size. Now failures should be backfilled from
-    later candidates until we have `limit` successes."""
+    """A failed drop shrinks the batch; it is never replaced from further
+    down the queue.
+
+    This reverses an earlier choice (backfill until `limit` succeed). That
+    walk had no bound: on 2026-10-14 a 9-drop targeted run tried to download
+    every one of 800+ ml_ready drops because three targets had no video, and
+    only a mis-set bucket (every download 404'd) kept it from pulling the
+    whole backlog at egress rates. The batch is the top `limit` by priority;
+    what fails in it is logged, not papered over."""
     mock_db = mock_db_class.return_value
     mock_s3 = mock_s3_class.return_value
     mock_db.get_deployments_eligible.return_value = _make_records(5)
-    # First 2 downloads fail, next 3 succeed
+    # First 2 downloads fail, the rest would succeed if asked
     mock_s3.download_object_from_s3.side_effect = [False, False, True, True, True]
     mock_exists.side_effect = lambda p: str(p).endswith(".db")
 
@@ -95,13 +101,9 @@ def test_get_inference_targets_backfills_on_download_failure(
     runner.limit = 3
     targets = runner.get_inference_targets()
 
-    # Should still get 3 targets (drops 03, 04, 05) despite early failures
-    assert len(targets) == 3
-    assert [t["drop_id"] for t in targets] == [
-        "KSF_20240124_BUV_KSF_085_03",
-        "KSF_20240124_BUV_KSF_085_04",
-        "KSF_20240124_BUV_KSF_085_05",
-    ]
+    # Only drop 03 survives; 04 and 05 are outside the top 3 and never touched
+    assert [t["drop_id"] for t in targets] == ["KSF_20240124_BUV_KSF_085_03"]
+    assert mock_s3.download_object_from_s3.call_count == 3
 
 
 @patch("spyfish.orchestrator.ml_runner.os.makedirs")
@@ -261,3 +263,58 @@ def test_finalize_batch_results_only_touches_claimed_drops(
         if call.args[1:] == (MlStatus.COLUMN, MlStatus.ERROR)
     }
     assert errored == {"KSF_20240124_BUV_KSF_085_01"}
+
+
+@patch("spyfish.orchestrator.ml_runner.process_one_drop")
+@patch("spyfish.orchestrator.ml_runner.extract_slate_frame")
+@patch("spyfish.orchestrator.ml_runner.run_inference_main")
+@patch("spyfish.orchestrator.ml_runner.AnnotationDatabaseManager")
+@patch("spyfish.orchestrator.ml_runner.os.path.exists")
+@patch("spyfish.orchestrator.ml_runner.DatabaseManager")
+@patch("spyfish.orchestrator.ml_runner.S3Handler")
+def test_run_inference_loop_extracts_slate_before_ml_and_survives_its_failure(
+    mock_s3_class,
+    mock_db_class,
+    mock_exists,
+    mock_ann_db_class,
+    mock_inference,
+    mock_slate,
+    mock_process_one_drop,
+):
+    """The slate JPEG is taken from the local video before inference; a slate
+    failure is logged and the drop still runs ML and completes."""
+    from pathlib import Path
+
+    mock_db = mock_db_class.return_value
+    mock_exists.return_value = True
+    mock_db.get_deployment.return_value = {"ml_status": MlStatus.COMPLETE}
+
+    targets = _make_records(2)
+    for t in targets:
+        t["VideoURL"] = f"/media/{t['drop_id']}.mp4"
+    failing = targets[0]["drop_id"]
+
+    order = []
+    mock_slate.side_effect = lambda drop_id, path, max_seconds=None: (
+        order.append(("slate", drop_id)),
+        (
+            (_ for _ in ()).throw(RuntimeError("cannot open"))
+            if drop_id == failing
+            else None
+        ),
+    )
+    mock_inference.side_effect = lambda args: order.append(("ml", args["drop_id"]))
+
+    successes = MLRunner().run_inference_loop(targets)
+
+    assert successes == [t["drop_id"] for t in targets]
+    assert order == [
+        ("slate", targets[0]["drop_id"]),
+        ("ml", targets[0]["drop_id"]),
+        ("slate", targets[1]["drop_id"]),
+        ("ml", targets[1]["drop_id"]),
+    ]
+    first = mock_slate.call_args_list[0]
+    assert first.args == (failing, Path(f"/media/{failing}.mp4"))
+    # the scan is capped at sampling_start: the rig is on the bottom by then
+    assert first.kwargs == {"max_seconds": targets[0]["sampling_start"]}

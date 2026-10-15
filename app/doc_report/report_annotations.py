@@ -12,9 +12,9 @@ import pandas as pd
 import streamlit as st
 from ecology_data import source_bucket
 
-from .charts.annotations import render_arrival_and_peak
+from .charts.annotations import render_arrival_and_peak, render_discovery_curve
 from .charts.deployments import render_annotation_detail
-from .data import arrival_and_peak
+from .data import arrival_and_peak, discovery_curve
 from .layout import chips, section
 
 
@@ -40,7 +40,14 @@ def render(ctx: dict) -> None:
         "Operations side."
     )
 
-    chips(["One deployment", "Arrival and MaxN time", "Reviewed, nothing seen"])
+    chips(
+        [
+            "One deployment",
+            "Arrival and MaxN time",
+            "Deployment length check",
+            "Reviewed, nothing seen",
+        ]
+    )
 
     dep = ctx["deployments"]
     if dep.empty:
@@ -57,13 +64,19 @@ def render(ctx: dict) -> None:
     st.divider()
     render_arrival_and_peak(arrival_and_peak(ctx["annotations_all_sources"]))
 
+    # The deployment-length validation: cumulative best-count-so-far per
+    # minute, against the final MaxN. Unfiltered annotations for the same
+    # reason as above, the count path only exists in the ML rows.
+    st.divider()
+    render_discovery_curve(discovery_curve(ctx["annotations_all_sources"]))
+
     # ── Reviewed, nothing seen ───────────────────────────────────────────────
     st.divider()
     section("Reviewed, nothing seen")
     st.caption(
         "Deployments where a source finished its review and recorded no "
         "animals at all. These are real zeros, the denominators every "
-        "abundance figure divides by — not gaps: a source that never looked "
+        "abundance figure divides by, not gaps: a source that never looked "
         "does not appear here. All sources are shown regardless of the Source "
         "filter, since an absence is only meaningful next to who else looked."
     )
@@ -106,15 +119,17 @@ def render(ctx: dict) -> None:
         width="stretch",
         height=min(400, 60 + 35 * len(table)),
         column_config={
-            "drop_id": st.column_config.TextColumn("DropID", width="large"),
+            "drop_id": st.column_config.TextColumn(
+                "DropID", width="large", pinned=True
+            ),
             "Empty review by": st.column_config.TextColumn(
                 "Empty review by",
                 help="Sources whose finished review of this deployment "
-                "recorded nothing. Other sources may have seen animals — "
+                "recorded nothing. Other sources may have seen animals, "
                 "the Source disagreement panel on the Operations side flags "
                 "those conflicts.",
             ),
-            "link_to_marine_reserve": st.column_config.TextColumn("Marine reserve"),
+            "link_to_marine_reserve": st.column_config.TextColumn("MPA"),
             "protection_status": st.column_config.TextColumn("Protection"),
             "site_id": st.column_config.TextColumn("SiteID", width="small"),
             "survey_year": st.column_config.NumberColumn(

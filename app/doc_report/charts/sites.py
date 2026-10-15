@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from ecology_data import load_sites
-from theme import protection_color_map
+from theme import SINGLE_SERIES, TRANSPARENT, protection_color_map
 
 from ..charting import style, top_n_slider
 from ..data import effort_per, real_species
@@ -294,13 +294,15 @@ def render_click_to_filter(df: pd.DataFrame, show_coords: bool) -> None:
         text="MaxN",
         hover_data=["Deployments"],
     )
-    fig.update_traces(marker_color="#1E6FB4", textposition="outside", cliponaxis=False)
+    fig.update_traces(
+        marker_color=SINGLE_SERIES, textposition="outside", cliponaxis=False
+    )
     style(
         fig,
         height=max(320, 26 * len(species)),
         margin={"l": 0, "r": 0, "t": 10, "b": 0},
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor=TRANSPARENT,
+        paper_bgcolor=TRANSPARENT,
     )
     fig.update_yaxes(title=None)
     st.plotly_chart(fig, key="rep_click_species")

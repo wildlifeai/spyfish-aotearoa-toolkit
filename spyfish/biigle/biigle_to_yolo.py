@@ -474,12 +474,46 @@ def draw_frames_on_images(
 # ---------------------------------------------------------------------------
 
 
+def _merge_annotation_sources(
+    drop_dir: Path, srcs: Dict[str, Path]
+) -> List[Tuple[str, pd.DataFrame, Path]]:
+    """Both annotation sources of one drop, as (source, rows, image dir) to convert.
+
+    The expert review volume and the survey training volume sample different
+    frames of the same video (the ML frame selector vs the training-frame
+    sampler, which never produce the same filename), so their annotations are
+    complementary and both are kept. Should a frame ever be in both volumes,
+    the expert's rows for it win and the training rows for it are dropped, so
+    one animal is never boxed twice; that is logged, since it means the two
+    samplers overlapped.
+    """
+    expert = pd.read_csv(srcs["expert"]) if "expert" in srcs else None
+    training = pd.read_csv(srcs["training"]) if "training" in srcs else None
+    if expert is not None and training is not None and "filename" in training.columns:
+        overlap = set(expert.get("filename", pd.Series(dtype=str)).astype(str))
+        clash = training["filename"].astype(str).isin(overlap)
+        if clash.any():
+            logging.warning(
+                f"  {drop_dir.name}: {training.loc[clash, 'filename'].nunique()} frame(s) "
+                f"are in both the expert and the training volume; using the expert's "
+                f"annotations for them."
+            )
+            training = training[~clash]
+    out = []
+    if expert is not None:
+        out.append(("expert_raw", expert, drop_dir / "frames"))
+    if training is not None:
+        out.append(("training_raw", training, drop_dir / "training_frames"))
+    return out
+
+
 def biigle_to_yolo(
     deployment_data_dir: Path,
     class_map_path: Path,
 ) -> Dict[str, int]:
     """
-    Finds all expert CSVs in deployment_data and converts them to YOLO .txt files.
+    Finds all expert and training raw CSVs in deployment_data and converts them
+    to YOLO .txt files, both sources of a drop together.
 
     Labels are written into each drop's labels/ folder (sibling of frames/).
     prepare_training_data then walks these to assemble the unified training dataset.
@@ -488,13 +522,11 @@ def biigle_to_yolo(
     expert_suffix = config.biigle_expert_raw_suffix
     training_suffix = config.biigle_training_raw_suffix
 
-    # One authoritative source per drop. A drop can carry both a
-    # `_biigle_expert_raw.csv` (from --biigle-sync) and a
-    # `_biigle_training_raw.csv` (from download-project of a "video labels"
-    # volume). The training_raw export is the fuller, more recent set for the
-    # video-era drops, so it WINS. Frozen `legacy_video_*` exports are ignored.
-    # See claude_docs/todo.md "Two annotation sources per drop" for the open
-    # questions behind this preference.
+    # A drop can carry both a `_biigle_expert_raw.csv` (from --biigle-sync, the
+    # drop's own review volume) and a `_biigle_training_raw.csv` (from
+    # download-training-volume, the survey training volume). The two volumes
+    # sample different frames of the same video, so both are converted: see
+    # `_merge_annotation_sources`. Frozen `legacy_video_*` exports are ignored.
     candidates: Dict[Path, Dict[str, Path]] = {}
     for csv_path in sorted(deployment_data_dir.glob("**/annotations/*.csv")):
         name = csv_path.name
@@ -519,47 +551,34 @@ def biigle_to_yolo(
         f"({n_classes} classes) from {class_map_path}"
     )
 
-    n_expert = sum(1 for s in candidates.values() if "expert" in s)
+    n_both = sum(1 for s in candidates.values() if len(s) > 1)
     logging.info(
-        f"{len(candidates)} drop(s) with annotations, "
-        f"{n_expert} via expert_raw (preferred), "
-        f"{len(candidates) - n_expert} via training_raw."
+        f"{len(candidates)} drop(s) with annotations: "
+        f"{sum(1 for s in candidates.values() if 'expert' in s)} with expert_raw, "
+        f"{sum(1 for s in candidates.values() if 'training' in s)} with training_raw, "
+        f"{n_both} with both (merged)."
     )
 
-    both = sorted(d.name for d, s in candidates.items() if len(s) > 1)
-    if both:
-        logging.warning(
-            f"{len(both)} drop(s) have BOTH expert_raw and training_raw. "
-            f"expert_raw wins — a focused per-drop review beats bulk survey "
-            f"labelling — and the training_raw file is NOT converted to labels "
-            f"for these drops. If the training volume holds annotations the "
-            f"review does not, they are lost from this training run; see "
-            f"claude_docs/annotation_source_consolidation_brief.md. "
-            f"Affected: {', '.join(both[:10])}"
-            + (f" (+{len(both) - 10} more)" if len(both) > 10 else "")
-        )
-
     for drop_dir, srcs in sorted(candidates.items()):
-        # Provenance beats vintage: the drop's own expert review wins over the
-        # survey-pooled training volume (decided 2026-08-22, replacing the
-        # June 2026 "training wins" stopgap).
-        chosen = srcs.get("expert") or srcs["training"]
-        which = "expert_raw" if "expert" in srcs else "training_raw"
         labels_dir = drop_dir / "labels"
-        images_dir = drop_dir / "frames"
-        # Wipe per-drop labels first so two sources / two runs can never mix
-        # stale .txt (the source-side version of the labels_staged staleness).
+        # Wipe per-drop labels first so two runs can never mix stale .txt (the
+        # source-side version of the labels_staged staleness). Everything that
+        # belongs here is rebuilt below: boxes from the raw CSVs, negatives
+        # from the reviewed-frames lists.
         if labels_dir.exists():
             shutil.rmtree(labels_dir)
-        convert_annotations_to_yolo(
-            pd.read_csv(chosen),
-            class_map,
-            labels_dir,
-            images_dir,
-            context=f"{drop_dir.name} [{which}]",
-        )
+        for which, df, images_dir in _merge_annotation_sources(drop_dir, srcs):
+            convert_annotations_to_yolo(
+                df,
+                class_map,
+                labels_dir,
+                images_dir,
+                context=f"{drop_dir.name} [{which}]",
+            )
         n_bg = _write_background_labels(drop_dir, labels_dir)
-        logging.debug(f"  Wrote labels for {drop_dir.name} ({which}) → {labels_dir}")
+        logging.debug(
+            f"  Wrote labels for {drop_dir.name} ({'+'.join(srcs)}) → {labels_dir}"
+        )
         if n_bg:
             logging.info(
                 f"  {drop_dir.name}: {n_bg} reviewed-but-empty frame(s) written as "
@@ -572,33 +591,39 @@ def biigle_to_yolo(
 def _write_background_labels(drop_dir: Path, labels_dir: Path) -> int:
     """Write an empty .txt for every reviewed frame the report never mentioned.
 
-    The universe CSV (written by `sync_biigle_annotations` from the volume's own
-    file list) is the set of frames the expert was SHOWN. `convert_annotations_to_yolo`
+    A drop can have two reviewed-frames CSVs, one per volume it was reviewed in:
+    the expert review volume (written by `sync_biigle_annotations`) and the
+    survey training volume (written by `download_training_volume_labels`). Each
+    is the set of frames the expert was SHOWN in that volume; both are read. `convert_annotations_to_yolo`
     writes a .txt only for frames carrying at least one annotation, because it
     groups the annotation report by filename. The difference between the two is
     exactly the reviewed-but-empty frames, and an empty .txt is how YOLO spells
     "background image".
 
-    Deliberately driven by the universe CSV and NOT by the JPEGs in `frames/`:
+    Deliberately driven by the reviewed-frames CSV and NOT by the JPEGs in `frames/`:
     `--biigle-upload` re-extracts frames, so the directory can hold frames newer
     than the volume that was reviewed. Calling those "empty" would teach the
     model that unreviewed water contains no fish, which is worse than the missing
-    negatives it fixes. No universe file (drops synced before this existed) means
+    negatives it fixes. No reviewed-frames file (drops synced before this existed) means
     no negatives written, never guessed ones.
 
     Returns the number of background labels written.
     """
-    universe_path = (
-        drop_dir
-        / "annotations"
-        / (f"{drop_dir.name}{config.biigle_expert_universe_suffix}")
-    )
-    if not universe_path.exists():
-        return 0
-    try:
-        names = pd.read_csv(universe_path)["filename"].astype(str).tolist()
-    except Exception as e:
-        logging.warning(f"  {drop_dir.name}: unreadable universe CSV ({e}), skipping")
+    names: List[str] = []
+    for suffix in (
+        config.biigle_expert_reviewed_frames_suffix,
+        config.biigle_training_reviewed_frames_suffix,
+    ):
+        reviewed_frames_path = drop_dir / "annotations" / f"{drop_dir.name}{suffix}"
+        if not reviewed_frames_path.exists():
+            continue
+        try:
+            names += pd.read_csv(reviewed_frames_path)["filename"].astype(str).tolist()
+        except Exception as e:
+            logging.warning(
+                f"  {drop_dir.name}: unreadable {reviewed_frames_path.name} ({e}), skipping"
+            )
+    if not names:
         return 0
 
     labels_dir.mkdir(parents=True, exist_ok=True)
@@ -702,7 +727,7 @@ def download_training_volume_labels(
     Negatives: a Biigle annotation report only contains
     frames that HAVE annotations, so the no-fish frames are
     ``volume file list − annotated``. We fetch the volume's full file list (the
-    universe the expert was shown) via ``get_volume_images`` and write an empty
+    list of frames the expert was shown) via ``get_volume_images`` and write an empty
     ``.txt`` for every frame that has no annotation, both the no-fish frames
     inside reviewed drops and every frame of a fully-empty drop. An empty
     ``.txt`` is a YOLO background image; the dataset-level background proportion
@@ -763,17 +788,17 @@ def download_training_volume_labels(
         class_map_path=class_map_path or config.class_map_path
     ).name_to_class_id()
 
-    # Universe: every frame the expert was shown. The report lists only
-    # annotated frames, so negatives = universe − annotated. /volumes/{id}/files
+    # Reviewed frames: every frame the expert was shown. The report lists only
+    # annotated frames, so negatives = reviewed − annotated. /volumes/{id}/files
     # returns bare IDs, so get_volume_images is the only way to resolve filenames.
-    logging.info(f"Volume {volume_id}: resolving full file list (universe)...")
+    logging.info(f"Volume {volume_id}: resolving full file list (reviewed frames)...")
     images = handler.get_volume_images(volume_id)
-    universe_by_drop: Dict[str, List[str]] = {}
+    reviewed_by_drop: Dict[str, List[str]] = {}
     for img in images:
         fname = img.get("filename")
         if not fname or "__frame_" not in fname:
             continue
-        universe_by_drop.setdefault(drop_id_from_frame_filename(fname), []).append(
+        reviewed_by_drop.setdefault(drop_id_from_frame_filename(fname), []).append(
             fname
         )
 
@@ -785,7 +810,7 @@ def download_training_volume_labels(
         drop_ids = df["filename"].astype(str).map(drop_id_from_frame_filename)
         report_by_drop = {d: g.copy() for d, g in df.groupby(drop_ids)}
 
-    all_drops = sorted(set(universe_by_drop) | set(report_by_drop))
+    all_drops = sorted(set(reviewed_by_drop) | set(report_by_drop))
     if not all_drops:
         logging.warning(
             f"Volume {volume_id}: no '{'{drop_id}__frame_<secs>s.jpg'}' filenames "
@@ -830,6 +855,12 @@ def download_training_volume_labels(
         slice_df["volume_id"] = volume_id
         slice_df.to_csv(raw_path, index=False)
 
+        # The frames this volume showed the expert, so biigle_to_yolo can
+        # rebuild this drop's negatives after it wipes labels/.
+        pd.DataFrame({"filename": sorted(reviewed_by_drop.get(drop_id, []))}).to_csv(
+            config.get_biigle_training_reviewed_frames_csv_path(drop_id), index=False
+        )
+
         # Positives → YOLO boxes. convert_annotations_to_yolo writes one .txt per
         # annotated frame (a frame carrying only workflow labels yields an empty
         # .txt, which is itself a valid negative).
@@ -843,16 +874,16 @@ def download_training_volume_labels(
             positives = sum(1 for n in file_summary.values() if n > 0)
             boxes = sum(file_summary.values())
 
-        # Negatives: every universe frame without a label gets an empty .txt.
+        # Negatives: every reviewed frame without a label gets an empty .txt.
         negatives = 0
-        for fname in universe_by_drop.get(drop_id, []):
+        for fname in reviewed_by_drop.get(drop_id, []):
             stem = Path(fname).stem
             if stem in written_stems:
                 continue
             (labels_dir / f"{stem}.txt").write_text("")
             written_stems.add(stem)
             negatives += 1
-        # Total negatives = universe negatives just written + any annotated
+        # Total negatives = reviewed-frame negatives just written + any annotated
         # frames whose only labels were workflow markers (convert wrote those as
         # empty .txt too). Derive from the truth, total frames minus positives.
         negatives = len(written_stems) - positives
@@ -921,7 +952,7 @@ def download_training_volume_labels(
             orphan_boxes = sum(file_summary.values())
 
         for prefix in skipped:
-            for fname in universe_by_drop.get(prefix, []):
+            for fname in reviewed_by_drop.get(prefix, []):
                 stem = Path(fname).stem
                 if stem in written_orphan_stems:
                     continue

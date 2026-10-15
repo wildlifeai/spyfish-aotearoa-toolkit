@@ -65,5 +65,44 @@ class ZooniverseConfig(BaseConfig):
             get_required(self._zooniverse, "consensus_something_here_pct", "zooniverse")
         )
 
+    # ── validation uploads (--zooniverse-frames / --zooniverse-crops) ────────
+
+    @property
+    def _zooniverse_validation(self) -> dict:
+        return get_required(self._zooniverse, "validation", "zooniverse")
+
+    @property
+    def zooniverse_validation_effort_multiplier(self) -> int:
+        """Effort multiplier for the validation frame selection.
+
+        Overrides `extraction.frame_strategy.effort_multiplier` for validation
+        only; every quota still comes from `frame_strategy`, so tuning the
+        BIIGLE strategy tunes validation with it.
+        """
+        return int(
+            get_required(
+                self._zooniverse_validation,
+                "effort_multiplier",
+                "zooniverse.validation",
+            )
+        )
+
+    @property
+    def zooniverse_validation_crops(self) -> dict:
+        """Crop rendering params: min_bbox_px, crop_scale, max_frame_fraction, crop_image_px."""
+        crops = get_required(
+            self._zooniverse_validation, "crops", "zooniverse.validation"
+        )
+        for key in ("min_bbox_px", "crop_scale", "max_frame_fraction", "crop_image_px"):
+            get_required(crops, key, "zooniverse.validation.crops")
+        return crops
+
+    @property
+    def zooniverse_validation_frame_max_width_px(self) -> int:
+        frames = get_required(
+            self._zooniverse_validation, "frames", "zooniverse.validation"
+        )
+        return int(get_required(frames, "max_width_px", "zooniverse.validation.frames"))
+
 
 zooniverse_config = ZooniverseConfig()

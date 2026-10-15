@@ -126,3 +126,55 @@ def test_bucket_classes_are_never_rare(tmp_path):
     # silently exclude everything
     sp = reg.get("Jasus edwardsii")
     assert sp is not None and not sp.is_bucket
+
+
+def test_exemption_applies_only_to_the_named_drops(tmp_path):
+    """The exemption is for TRAINING volume; val needs balance, not bulk.
+
+    Applied to every split it inflated val 640 -> 997 images with frames from
+    deployments already in val, and cost snapper 493 training boxes to the
+    resulting split shift (2026-08-25).
+    """
+    root = _drop(tmp_path)
+    # this drop is NOT in the exempt set, so the cap applies in full
+    ff, _, stats = select_frames_per_drop(
+        drops={DROP},
+        species_labels_dir=root,
+        extras_set=set(),
+        dominant_class_ids=DOMINANT,
+        rare_class_ids={LOBSTER},
+        cap=10,
+        rng=random.Random(42),
+        rare_exempt_drops=set(),
+    )
+    assert len(ff[DROP]) == 10, "cap must apply to a non-exempt drop"
+    assert stats["rare_exempt"] == 0
+
+    # same drop, now named as exempt
+    ff2, _, stats2 = select_frames_per_drop(
+        drops={DROP},
+        species_labels_dir=root,
+        extras_set=set(),
+        dominant_class_ids=DOMINANT,
+        rare_class_ids={LOBSTER},
+        cap=10,
+        rng=random.Random(42),
+        rare_exempt_drops={DROP},
+    )
+    assert len(ff2[DROP]) == 15 and stats2["rare_exempt"] == 5
+
+
+def test_none_means_every_drop_is_exempt(tmp_path):
+    """Backwards-compatible default, so a caller that does not pass the set
+    keeps the previous behaviour rather than silently losing the exemption."""
+    root = _drop(tmp_path)
+    ff, _, stats = select_frames_per_drop(
+        drops={DROP},
+        species_labels_dir=root,
+        extras_set=set(),
+        dominant_class_ids=DOMINANT,
+        rare_class_ids={LOBSTER},
+        cap=10,
+        rng=random.Random(42),
+    )
+    assert stats["rare_exempt"] == 5

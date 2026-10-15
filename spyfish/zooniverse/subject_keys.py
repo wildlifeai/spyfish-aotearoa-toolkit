@@ -8,6 +8,13 @@ read from this single source of truth, so producer and consumer can't drift.
 If you change a key here, change it in upload.py at the same time.
 """
 
+# Validation manifest columns naming the rendered image per row. Here, not in
+# `validation_frames.py`, so `upload.py` can read them without importing the
+# renderer (which pulls in cv2 and the YOLO inference module). The renderer
+# writes these columns; the uploader reads them.
+FRAME_PATH_COLUMN = "FramePath"
+CROP_PATH_COLUMN = "CropPath"
+
 
 class SubjectKeys:
     VIDEO_FILENAME = "#VideoFilename"

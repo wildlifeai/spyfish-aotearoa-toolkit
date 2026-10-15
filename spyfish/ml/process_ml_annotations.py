@@ -16,7 +16,9 @@ from spyfish.database.annotation_manager import (
     null_deployment_row,
 )
 from spyfish.database.manager import DatabaseManager
+from spyfish.extraction.extract_frames import nearest_raw_frame
 from spyfish.ml.draw_frames import draw_boxes_on_video_frames
+from spyfish.ml.legacy_review_frames import write_legacy_review_frames
 from spyfish.utils import seconds_to_time
 from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
 
@@ -243,7 +245,8 @@ def process_maxn(
                     config.csv_scientific_name_column: class_name,
                     config.csv_maxn_time_column: seconds_to_time(best_time),
                     config.csv_max_interval_column: persistent,
-                    config.csv_annotated_by_column: model_name,
+                    config.csv_annotated_by_column: "ml",
+                    config.csv_model_name_column: model_name,
                     config.csv_interval_annotation_column: interval_seconds,
                     config.csv_confidence_agreement_column: round(best_conf, 4),
                     config.csv_maxn_time_seconds_column: best_time,
@@ -288,6 +291,9 @@ def _ingest_ml_annotations(
     model_name: str,
 ):
     """Extracts ingestion logic into a helper method."""
+    # The name becomes `external_id` on every row and "newest model wins"
+    # sorts on its stamp, so a name off the standard is refused here.
+    config.validate_model_name(model_name)
     # Persistence-suppressed rows (MaxInterval 0) stay CSV-only: they exist so
     # review selection can surface the spike, but "reviewed, nothing sustained"
     # must not become a named species observation in the annotations DB. A
@@ -341,8 +347,13 @@ def _run_qa_visualizations(
     maxn_conf: float,
     interval: float,
     raw_csv_path: Optional[str] = None,
+    model_name: Optional[str] = None,
 ):
-    """Draw MaxN timeline plot and lowest-confidence annotated frames for human QA review."""
+    """Draw MaxN timeline plot and lowest-confidence annotated frames for human QA review.
+
+    Each QA frame carries a banner with the model name, threshold, second and
+    counts, so the frame reads on its own like the legacy review frames do.
+    """
     # Save MaxN timeline visualisation
     plot_maxn_timeline(
         raw_df=raw_df,
@@ -366,10 +377,9 @@ def _run_qa_visualizations(
     # Map TimeOfMaxAbsSeconds back to raw CSV frame numbers
     frame_indices = []
     for t_sec in review_df[config.csv_maxn_time_seconds_column]:
-        closest = raw_df.iloc[(raw_df["time_seconds"] - t_sec).abs().argsort()[:1]]
-        if closest.empty:
-            continue
-        frame_indices.append(int(closest["frame"].iloc[0]))
+        frame_index, _ = nearest_raw_frame(raw_df, t_sec)
+        if frame_index is not None:
+            frame_indices.append(frame_index)
 
     # 4 evenly-spaced random frames across the detected range for general coverage
     t_min, t_max = raw_df["time_seconds"].min(), raw_df["time_seconds"].max()
@@ -400,6 +410,7 @@ def _run_qa_visualizations(
         frame_list=frame_indices,
         confidence_threshold=base_conf,
         drop_id=drop_id,
+        model_name=model_name,
     )
 
 
@@ -471,6 +482,7 @@ def process_one_drop(
                 config.csv_maxn_time_column,
                 config.csv_max_interval_column,
                 config.csv_annotated_by_column,
+                config.csv_model_name_column,
                 config.csv_interval_annotation_column,
                 config.csv_confidence_agreement_column,
                 config.csv_maxn_time_seconds_column,
@@ -494,10 +506,28 @@ def process_one_drop(
                 maxn_conf=maxn_conf,
                 interval=interval,
                 raw_csv_path=raw_csv,
+                model_name=model_name,
             )
         except Exception as e:
             logging.error(
                 f"QA visualisation failed for {drop_id} (non-fatal): {e}",
+                exc_info=True,
+            )
+        # Legacy expert moments on the same footage, clean frame + boxed QA
+        # copy per model. Separate try: a QA plot failure above must not cost
+        # the legacy frames, and vice versa. Both are diagnostic only.
+        try:
+            write_legacy_review_frames(
+                drop_id=drop_id,
+                video_path=video_dir / f"{drop_id}.mp4",
+                raw_df=raw_df,
+                model_name=model_name,
+                ann_db=ann_db,
+                base_conf=base_conf,
+            )
+        except Exception as e:
+            logging.error(
+                f"Legacy review frames failed for {drop_id} (non-fatal): {e}",
                 exc_info=True,
             )
 

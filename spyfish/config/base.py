@@ -166,6 +166,53 @@ class ExpertStatus:
     }
 
 
+class ZooFramesStatus:
+    """Zooniverse validation frames: whole frames with every ML box drawn, for
+    volunteers to draw the fish the model missed (recall).
+
+    No SKIPPED: a drop with no detections still gets blind frames, and those are
+    the purest recall check there is. COMPLETE is set by the (not yet built)
+    validation sync once the set is retired. ERROR retries straight to UPLOADED
+    because the stage re-selects ERROR drops and the upload is idempotent.
+    """
+
+    COLUMN = "zoo_frames_status"
+
+    PENDING = "zoo_frames_pending"
+    UPLOADED = "zoo_frames_uploaded"
+    COMPLETE = "zoo_frames_complete"
+    ERROR = "zoo_frames_error"
+
+    VALID_TRANSITIONS: dict = {
+        PENDING: {UPLOADED},
+        UPLOADED: {COMPLETE, ERROR},
+        ERROR: {UPLOADED, PENDING},
+    }
+
+
+class ZooCropsStatus:
+    """Zooniverse validation crops: one crop per ML box in the validation frames,
+    for volunteers to judge right species / right box (precision).
+
+    SKIPPED when the selected frames hold no box worth cropping (all too small or
+    too large for a crop window). Those boxes are still judged on the frames.
+    """
+
+    COLUMN = "zoo_crops_status"
+
+    PENDING = "zoo_crops_pending"
+    UPLOADED = "zoo_crops_uploaded"
+    COMPLETE = "zoo_crops_complete"
+    SKIPPED = "zoo_crops_skipped"
+    ERROR = "zoo_crops_error"
+
+    VALID_TRANSITIONS: dict = {
+        PENDING: {UPLOADED, SKIPPED},
+        UPLOADED: {COMPLETE, ERROR},
+        ERROR: {UPLOADED, SKIPPED, PENDING},
+    }
+
+
 class ReportingStatus:
     COLUMN = "reporting_status"
 
@@ -194,7 +241,14 @@ class ReportingStatus:
 #                                          and ERROR for clearing validation_errors
 #   - StageRunner._run_drop_stage()     , sets section to ERROR on exception
 
-SECTION_STATUSES: tuple = (MlStatus, CitSciStatus, ExpertStatus, ReportingStatus)
+SECTION_STATUSES: tuple = (
+    MlStatus,
+    CitSciStatus,
+    ExpertStatus,
+    ReportingStatus,
+    ZooFramesStatus,
+    ZooCropsStatus,
+)
 
 SECTIONS: dict[str, type] = {s.COLUMN: s for s in SECTION_STATUSES}
 

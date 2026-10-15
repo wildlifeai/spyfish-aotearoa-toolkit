@@ -1,10 +1,10 @@
 """Shared ecology data layer for the Streamlit app.
 
 Single source of truth for loading + enriching annotation data. Used by the
-Experiments page (``pages/🧪_Experiments.py``) and the DOC report's data layer
-(``doc_report/data.py`` and ``doc_report/species_search.py``). Page-specific viz helpers
-stay in their own pages, only the page-agnostic loaders and the drop_id/site
-enrichment live here.
+DOC report's data layer (``doc_report/data.py`` and the views that import
+from it), the advanced pages under ``pages/_advanced/`` and the UoA app in
+``in_progress/uoa/``. Page-specific viz helpers stay in their own pages, only
+the page-agnostic loaders and the drop_id/site enrichment live here.
 """
 
 import math
@@ -22,12 +22,19 @@ from spyfish.config.base import (
 )
 from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import AnnotationDatabaseManager
+from spyfish.database.annotation_manager import (
+    LEGACY_EXTERNAL_ID,
+    AnnotationDatabaseManager,
+    newest_model_only,
+)
 from spyfish.database.connection import connect_readonly
 
 # Plausibility floor for survey dates. Looser than the first real Spyfish survey
-# (2011) so legacy and partner data with earlier dates is not discarded.
-EARLIEST_SURVEY_YEAR = 2000
+# (2011) so legacy and partner data with earlier dates is not discarded — the
+# earliest real BUV survey is Poor Knights 1998, so a 1998 date is legitimate,
+# not a typo. The floor exists only to reject mangled dates (e.g. a year like
+# 1304 from a DDMMYYYY slip); the upper bound catches the common forward slips.
+EARLIEST_SURVEY_YEAR = 1998
 
 
 # Source precedence used wherever we collapse to a single "best" annotation per
@@ -49,9 +56,21 @@ EARLIEST_SURVEY_YEAR = 2000
 # run were sampled blind, with no selection pass behind them at all, those
 # deserve less trust than this ranking gives them.)
 #
+# `expert_legacy` is not an `annotated_by` value: it is the key `source_key`
+# gives expert rows whose `external_id` is "legacy" (the historical CSV
+# backfill, a full-video review). It sits below a BIIGLE review of the same
+# deployment so that, where both exist, "Best available" shows the fresh
+# review rather than merging two expert accounts into one inflated count.
+#
 # Anything unranked falls to 99 in `best_per_drop_species`, so a new source must
 # be added here or it silently sorts below ml.
-SOURCE_PRIORITY = {"expert": 0, "expert_training": 1, "citsci": 2, "ml": 3}
+SOURCE_PRIORITY = {
+    "expert": 0,
+    "expert_legacy": 1,
+    "expert_training": 2,
+    "citsci": 3,
+    "ml": 4,
+}
 
 # Both are expert judgement; `expert_training` only differs in how its frames
 # were picked (see SOURCE_PRIORITY above). Everywhere a view shows or filters
@@ -60,14 +79,41 @@ SOURCE_PRIORITY = {"expert": 0, "expert_training": 1, "citsci": 2, "ml": 3}
 EXPERT_SOURCES = ("expert", "expert_training")
 
 
+def source_key(df: pd.DataFrame) -> pd.Series:
+    """The SOURCE_PRIORITY key for each row.
+
+    `annotated_by`, except that a legacy expert row (`external_id` ==
+    "legacy") becomes `expert_legacy`. The one place that reads `external_id`
+    to rank, so the three best-available call sites (report, sites, species
+    search) cannot disagree about which expert account wins. A frame without
+    an `external_id` column ranks on `annotated_by` alone.
+    """
+    key = df["annotated_by"].astype(object)
+    if "external_id" in df.columns:
+        legacy = (df["annotated_by"] == "expert") & (
+            df["external_id"] == LEGACY_EXTERNAL_ID
+        )
+        key = key.mask(legacy, "expert_legacy")
+    return key
+
+
+def source_rank(df: pd.DataFrame) -> pd.Series:
+    """SOURCE_PRIORITY applied via `source_key`; unranked sources fall to 99."""
+    return source_key(df).map(SOURCE_PRIORITY).fillna(99)
+
+
 def source_bucket(annotated_by: pd.Series) -> pd.Series:
     """Collapse `annotated_by` to the three user-facing buckets.
 
-    ML rows carry the model name, so ML is "neither expert nor citsci" rather
-    than a literal value. Every view that labels, filters or counts by source
-    must go through this one function, a view that hand-rolls the mapping will
-    drift (the old species-search tiles looked up the literal key "ml" and
-    showed 0 forever).
+    `annotated_by` is `'expert'`, `'expert_training'`, `'citsci'` or `'ml'`,
+    in the DB and in the MaxN CSVs alike; the model name is a separate field
+    (`external_id` in the DB, `ModelName` in the ML CSV). Anything that is not
+    expert or citsci is bucketed as ML.
+
+    Every view that labels, filters or counts by source must go through this
+    one function, a view that hand-rolls the mapping will drift (the old
+    species-search tiles looked up the literal key "ml" and showed 0 forever
+    — which is what the elimination guards against).
     """
     return annotated_by.map(
         lambda s: (
@@ -89,23 +135,29 @@ UNPROTECTED = "Unprotected"
 # because folding it into either one answers the reserve question with
 # deployments that cannot answer it.
 OTHER_PROTECTION = "Other"
+# No protection metadata at all (the site is not in the SharePoint sites
+# list, above all legacy imports). `protection_group` returns None for these;
+# this is the label a chart gives that None when it draws the deployments
+# as their own line or row rather than dropping them. One spelling, so the
+# MPA trend, the Species charts and the notes about them agree.
+UNRECORDED_PROTECTION = "Not recorded"
 
 
 def protection_group(status: pd.Series) -> pd.Series:
     """Protected / Unprotected / Other / None from `protection_status`.
 
-    Three groups, not two. `config.protected_statuses` and
-    `config.unprotected_statuses` each name exactly the statuses that mean what
-    they say; everything else (High Protection Area, Type II MPA, taiapure,
-    mataitai, Fisheries Act closures, seafloor protection, "Other") is a
-    partial or unclear regime and becomes **Other**.
+    Three groups, not two. `config.protected_statuses` (Type I MPA and High
+    Protection Area) and `config.unprotected_statuses` each
+    name exactly the statuses that mean what they say; everything else
+    (Type II MPA, taiapure, mataitai, Fisheries Act closures, seafloor
+    protection, "Other") is a partial or unclear regime and becomes **Other**.
 
     That third group used to be split across the two sides: the config counted
-    High Protection Area and Type II MPA as protected while the MPA view's own
-    substring classifier read them as outside, so one deployment sat on
-    opposite sides of the comparison depending on which chart was open. Naming
-    both ends and leaving the remainder as Other means neither side can absorb
-    a deployment nobody has decided about.
+    Type II MPA as protected while the MPA view's own substring classifier
+    read it as outside, so one deployment sat on opposite sides of the
+    comparison depending on which chart was open. Naming both ends and leaving
+    the remainder as Other means neither side can absorb a deployment nobody
+    has decided about.
 
     Missing or "unknown" metadata maps to None, still separate from Other: one
     is "we know it is partial", the other is "we do not know".
@@ -185,7 +237,7 @@ def pielou(counts) -> float:
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_maxn() -> pd.DataFrame:
-    df = AnnotationDatabaseManager().get_maxn_summary()
+    df = AnnotationDatabaseManager(read_only=True).get_maxn_summary()
     # The DB speaks NULL_DEPLOYMENT ("reviewed, nothing seen"); app frames
     # speak NaN, which every notna/groupby path here already treats as
     # "no species" while keeping the row. NaN is unambiguous in a frame: a
@@ -205,7 +257,7 @@ def search_species_annotations(scientific_name: str) -> pd.DataFrame:
     selection is fetched once per session.
     """
     with connect_readonly(config.annotations_db_path) as conn:
-        return pd.read_sql(
+        df = pd.read_sql(
             "SELECT drop_id, scientific_name, time_of_max, time_of_max_seconds, "
             "max_interval, annotated_by, confidence_agreement, external_id "
             "FROM annotations WHERE scientific_name = ? "
@@ -213,6 +265,14 @@ def search_species_annotations(scientific_name: str) -> pd.DataFrame:
             conn,
             params=(scientific_name,),
         )
+        # The newest model is chosen from every model that ran on the drop,
+        # not just those that saw this species (see `newest_model_only`).
+        models = pd.read_sql(
+            "SELECT DISTINCT drop_id, external_id FROM annotations "
+            "WHERE annotated_by = 'ml'",
+            conn,
+        )
+    return newest_model_only(df, models)
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
@@ -230,8 +290,31 @@ def load_sites(include_coords: bool = False) -> pd.DataFrame:
         return pd.read_sql(f"SELECT {columns} FROM sites", conn)
 
 
+# `ingest_status` given to deployments synthesised from legacy annotations that
+# have no SharePoint record (the "Include drops not in SharePoint" tick). Not a
+# pipeline status and never stored: it exists so status splits show these
+# drops as their own segment instead of blending them into a real status or
+# dropping them. `theme.INGEST_STATUS_COLORS` keys the same string.
+NO_SHAREPOINT_RECORD = "no SharePoint record"
+
+
+def analysed_by_status(dep: pd.DataFrame) -> pd.Series:
+    """Ingested, and the pipeline records results for at least one section.
+
+    The status half of "analysed" for `load_effort` below. Expert `uploaded`
+    counts as well as `complete`. Not the same as `stage_flags`
+    (doc_report/data.py), which counts annotations; `load_effort` unions
+    this with drops that hold annotation rows.
+    """
+    return (dep[IngestStatus.COLUMN] == IngestStatus.OK) & (
+        (dep[MlStatus.COLUMN] == MlStatus.COMPLETE)
+        | (dep[CitSciStatus.COLUMN] == CitSciStatus.COMPLETE)
+        | dep[ExpertStatus.COLUMN].isin([ExpertStatus.UPLOADED, ExpertStatus.COMPLETE])
+    )
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
-def load_effort() -> pd.DataFrame:
+def load_effort(exclude_bad: bool = False) -> pd.DataFrame:
     """One row per ANALYSED deployment, the denominator for any mean abundance.
 
     An abundance index must divide by the deployments someone actually looked at.
@@ -248,32 +331,33 @@ def load_effort() -> pd.DataFrame:
     in it has no annotation rows but should still count as effort.
     """
     with connect_readonly(config.db_path) as conn:
-        by_status = pd.read_sql(
-            """
-            SELECT drop_id FROM deployments
-            WHERE ingest_status = ?
-              AND (
-                    ml_status = ?
-                 OR citsci_status = ?
-                 OR expert_status IN (?, ?)
-              )
-            """,
+        statuses = pd.read_sql(
+            "SELECT drop_id, "
+            f"{IngestStatus.COLUMN}, {MlStatus.COLUMN}, "
+            f"{CitSciStatus.COLUMN}, {ExpertStatus.COLUMN} FROM deployments",
             conn,
-            params=(
-                IngestStatus.OK,
-                MlStatus.COMPLETE,
-                CitSciStatus.COMPLETE,
-                ExpertStatus.UPLOADED,
-                ExpertStatus.COMPLETE,
-            ),
         )
+    by_status = statuses.loc[analysed_by_status(statuses), ["drop_id"]]
     # Union with drops that actually hold annotations. The two disagree slightly
     # (114 vs 116 here) because section statuses drift from the annotation data.
     # Status alone would put a drop's sightings in the numerator while leaving it
     # out of the denominator, which surfaces as a frequency above 100%.
     with connect_readonly(config.annotations_db_path) as conn:
         annotated = pd.read_sql("SELECT DISTINCT drop_id FROM annotations", conn)
-    return pd.concat([by_status, annotated]).drop_duplicates("drop_id")
+    effort = pd.concat([by_status, annotated]).drop_duplicates("drop_id")
+    if not exclude_bad:
+        return effort
+    # Opt-in, matching the reporting layer's "Exclude bad deployments"
+    # toggle (`doc_report.data.build_context`): when a bad deployment's
+    # annotations are dropped from the numerators, it must leave the
+    # denominator too, or every mean is deflated by effort that contributed
+    # nothing. Default off because the flag is unreliable, see the note
+    # there and `claude_docs/todo.md`.
+    with connect_readonly(config.db_path) as conn:
+        bad = pd.read_sql(
+            "SELECT drop_id FROM deployments WHERE is_bad_deployment = 1", conn
+        )["drop_id"]
+    return effort[~effort["drop_id"].isin(set(bad))]
 
 
 @st.cache_data(ttl=3600)

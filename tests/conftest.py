@@ -40,7 +40,7 @@ from spyfish.database.manager import DatabaseManager
 
 # ── Canonical identifiers ─────────────────────────────────────────────────────
 
-MODEL_NAME = "yolov8n"
+MODEL_NAME = "yolov8n_20260101_000000"
 
 # All three drops come from the same survey so cross-drop survey-level tests work.
 DROP_NORMAL = "KSF_20240124_BUV_KSF_085_01"  # READY_FOR_ML  — inference not yet run
@@ -74,11 +74,14 @@ csv_mapping:
   confidence_agreement_column: "ConfidenceAgreement"
   confusion_score_column: "ConfusionScore"
   scientific_name_column: "ScientificName"
+  common_name_column: "CommonName"
   maxn_time_column: "TimeOfMax"
   max_interval_column: "MaxInterval"
   annotated_by_column: "AnnotatedBy"
   interval_annotation_column: "IntervalAnnotation"
+  source_column: "Source"
   time_seconds_column: "TimeAbsSeconds"
+  model_name_column: "ModelName"
   raw_max_interval_column: "RawMaxInterval"
   spike_flag_column: "SpikeFlag"
   spike_time_seconds_column: "SpikeTimeSeconds"
@@ -124,6 +127,9 @@ ml_inference:
   maxn_persistence_seconds: 1.0
   maxn_gap_fill_seconds: 0.4
   maxn_exclude_classes: ["bait"]
+  legacy_review:
+    random_intervals: 2
+    max_time_delta_seconds: 0.5
   remote_host: "mahuika"
   remote_user: "testuser"
   extraction:
@@ -155,6 +161,15 @@ zooniverse:
   min_clips_per_video: 6
   min_agreement_pct: 25.0
   max_frames_per_run: 3
+  validation:
+    effort_multiplier: 3
+    crops:
+      min_bbox_px: 60
+      crop_scale: 1.5
+      max_frame_fraction: 0.9
+      crop_image_px: 800
+    frames:
+      max_width_px: 1920
 
 orchestrator:
   is_test_run: true
@@ -195,6 +210,7 @@ validation_patterns:
   drop_id:   "^[A-Z]{3}_\\\\d{8}_BUV_[A-Z]{3}_\\\\d{3}_\\\\d{2}$"
   survey_id: "^[A-Z]{3}_\\\\d{8}_BUV$"
   site_id:   "^[A-Z]{3}_\\\\d+$"
+  model_name: "^[a-z][a-z0-9_]*?_(20\\\\d{6})(?:_(\\\\d{6}))?$"
 
 validation_rules:
   deployments:
@@ -337,7 +353,8 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "ScientificName": "Pagrus auratus",
                 "TimeOfMax": "00:00:04.000",  # seconds_to_time(4.0)
                 "MaxInterval": 2,
-                "AnnotatedBy": MODEL_NAME,
+                "AnnotatedBy": "ml",
+                "ModelName": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.875,  # (0.85 + 0.90) / 2
                 "TimeOfMaxAbsSeconds": 4.0,
@@ -347,7 +364,8 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
                 "ScientificName": "Pagrus auratus",
                 "TimeOfMax": "00:00:10.000",  # seconds_to_time(10.0)
                 "MaxInterval": 1,
-                "AnnotatedBy": MODEL_NAME,
+                "AnnotatedBy": "ml",
+                "ModelName": MODEL_NAME,
                 "IntervalAnnotation": 10,
                 "ConfidenceAgreement": 0.95,  # frame 25 wins tiebreak
                 "TimeOfMaxAbsSeconds": 10.0,
@@ -367,7 +385,8 @@ _ML_COMPLETE_MAXN_ROWS = [
         "ScientificName": "Notolabrus fucicola",
         "TimeOfMax": "00:00:05.000",
         "MaxInterval": 3,
-        "AnnotatedBy": MODEL_NAME,
+        "AnnotatedBy": "ml",
+        "ModelName": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.80,
         "TimeOfMaxAbsSeconds": 5.0,
@@ -377,7 +396,8 @@ _ML_COMPLETE_MAXN_ROWS = [
         "ScientificName": "Pagrus auratus",
         "TimeOfMax": "00:00:15.000",
         "MaxInterval": 2,
-        "AnnotatedBy": MODEL_NAME,
+        "AnnotatedBy": "ml",
+        "ModelName": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.75,
         "TimeOfMaxAbsSeconds": 15.0,
@@ -387,7 +407,8 @@ _ML_COMPLETE_MAXN_ROWS = [
         "ScientificName": "Parika scaber",
         "TimeOfMax": "00:00:25.000",
         "MaxInterval": 1,
-        "AnnotatedBy": MODEL_NAME,
+        "AnnotatedBy": "ml",
+        "ModelName": MODEL_NAME,
         "IntervalAnnotation": 10,
         "ConfidenceAgreement": 0.90,
         "TimeOfMaxAbsSeconds": 25.0,

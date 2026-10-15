@@ -11,19 +11,20 @@ interval we know the exact chapter file + second-offset it begins at, take a
 6-min window from there (spilling into the next chapter when it overruns the
 ~707-s chapter length), and compute ML MaxN inside that same window.
 
-Lives here (importable name) rather than in the emoji-named page file so two
+Lives here (importable name) rather than in the page file so two
 callers can share one implementation:
 
-* ``pages/_advanced/🆚_UoA_ML_vs_Expert.py``, the standalone page, a thin shim;
-* the Mussel Insights dashboard's "ML vs Expert detail" view (``embedded=True``).
+* the Mussel Insights dashboard's "ML vs Expert detail" view (``embedded=True``),
+  served by ``in_progress/uoa/app.py``.
 
-All data access goes through ``uoa_data``, no paths or constants live here.
+All data access goes through ``uoa.data``, no paths or constants live here.
 """
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from uoa_data import (
+from theme import SOURCE_COLORS
+from uoa.data import (
     CHAPTER_SEC,
     DEFAULT_CONF,
     DEPTH_LABEL,
@@ -43,9 +44,9 @@ from uoa_data import (
     ml_call,
     presence_flip,
     severity,
+    window_coverage,
+    window_segments,
 )
-
-MAXN_RE = r"max ?n"
 
 
 def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
@@ -170,6 +171,8 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
             ),
             "chapter": chap,
             "start_sec": round(start, 1),
+            "spills": len(window_segments(chap, start)) > 1,
+            "ml_coverage": round(100 * window_coverage(raw_by_key, dep, chap, start)),
             "fish_expert": expert_fish,
             "fish_ml": ml_fish,
             "fish_call": ml_call(expert_fish, ml_fish),
@@ -196,12 +199,27 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
     dep_choices = ["(all)"] + sorted(
         interval_df["deployment_id"].unique(), key=date_key
     )
-    chosen = st.selectbox("Filter deployment", dep_choices, key=k("dep"))
-    view = (
-        interval_df
-        if chosen == "(all)"
-        else interval_df[interval_df.deployment_id == chosen]
-    )
+    sel_cols = st.columns([2, 1])
+    with sel_cols[0]:
+        chosen = st.selectbox("Filter deployment", dep_choices, key=k("dep"))
+    with sel_cols[1]:
+        # From the retired block-aligned page, which hid blocks under 25%.
+        # Default 0 so nothing is hidden until asked: section 5 lists the
+        # partly covered intervals either way.
+        min_cov = st.slider(
+            "Minimum ML coverage %",
+            0,
+            100,
+            0,
+            5,
+            key=k("min_cov"),
+            help="Hide intervals where ML processed less than this share of "
+            "the 6-min window. A missing chapter reads as zero detections, so "
+            "low-coverage rows can show misses that are really unprocessed "
+            "footage. Applies to the table and scatter in this section.",
+        )
+    covered = interval_df[interval_df["ml_coverage"] >= min_cov]
+    view = covered if chosen == "(all)" else covered[covered.deployment_id == chosen]
     view = view.sort_values("fish_severity", ascending=False, na_position="last")
 
     st.caption(
@@ -209,13 +227,14 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
         "scene called empty outranks a small undercount. `fish_call`: **−** too few, "
         "**+** too many, **=** exact. `fish_flip` **⚠️** = presence/absence "
         "disagreement (one says fish, the other says none). `fish_abs_diff` = raw "
-        "count error."
+        "count error. `ml_coverage` = % of the window ML actually processed, "
+        "see section 5."
     )
     st.dataframe(view, hide_index=True, width="stretch")
 
     # Agreement scatter (fish-any), only rows where expert annotated
     st.subheader("Fish (any) MaxN, expert vs ML")
-    scat = interval_df.dropna(subset=["fish_expert"])
+    scat = covered.dropna(subset=["fish_expert"])
     if scat.empty:
         st.info("No expert-annotated intervals among the loaded ML deployments.")
     else:
@@ -292,7 +311,7 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
                 "treatment": treatment,
                 "lat": lat,
                 "lon": lon,
-                "expert_annotated": "—" if dep_unann else "✅",
+                "expert_annotated": "-" if dep_unann else "✅",
                 "fish_expert_peak": expert_peak,
                 "expert_total_peak": expert_total_peak,
                 "fish_ml_peak": ml_peak,
@@ -539,8 +558,8 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
                     badge = "🔴 " if pd.notna(sev_val) and sev_val > 0 else ""
                     if not bool(r.get("complete", True)):
                         badge += "⚠️ "
-                    hp = int(r["expert_peak"]) if pd.notna(r["expert_peak"]) else "—"
-                    sv = sev_val if pd.notna(sev_val) else "—"
+                    hp = int(r["expert_peak"]) if pd.notna(r["expert_peak"]) else "-"
+                    sv = sev_val if pd.notna(sev_val) else "-"
                     caption = (
                         f"{badge}{r['deployment_id']} · expert {hp} / "
                         f"ML {int(r['maxn_count'])} · sev {sv}"
@@ -554,6 +573,131 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
                             f"**{caption}**  \n_(no detections, no MaxN frame)_"
                         )
 
+    # ── Section 5: interval detail ───────────────────────────────────────────
+    #
+    # Carried over from the retired block-aligned page (the only parts of it
+    # the interval comparison above did not already cover): ML coverage, a
+    # bar per interval, and the chapter mapping the whole comparison rests on.
+
+    st.divider()
+    st.header("5. Interval detail")
+
+    st.subheader("ML coverage")
+    partial = interval_df[interval_df["ml_coverage"] < 100]
+    cov_cols = st.columns(3)
+    cov_cols[0].metric("Intervals", len(interval_df))
+    cov_cols[1].metric("Partly covered", int((partial["ml_coverage"] > 0).sum()))
+    cov_cols[2].metric("No ML at all", int((partial["ml_coverage"] == 0).sum()))
+    st.caption(
+        "Share of each 6-min window whose chapter has an ML raw CSV. A missing "
+        "chapter reads as zero detections, so an interval below 100% can show a "
+        "miss that is really footage ML never processed, most often the spill "
+        "into a next chapter that was not run, or a recording that ended "
+        "mid-window. Read the error columns for these rows with that in mind."
+    )
+    if partial.empty:
+        st.success("Every interval is fully covered by ML output.")
+    else:
+        st.dataframe(
+            partial[
+                [
+                    "deployment_id",
+                    "interval",
+                    "chapter",
+                    "start_sec",
+                    "spills",
+                    "ml_coverage",
+                    "fish_expert",
+                    "fish_ml",
+                ]
+            ].sort_values(["deployment_id", "interval"]),
+            hide_index=True,
+            width="stretch",
+        )
+
+    # The interval comparison needs an expert row, so ML deployments without
+    # one are dropped at the top. Named here rather than silently missing.
+    no_expert = sorted(set(ml_deps) - set(expert_ml["deployment_id"]), key=date_key)
+    if no_expert:
+        st.warning(
+            f"**{len(no_expert)} deployment(s) have ML output but no expert "
+            "rows**, so they appear nowhere above: "
+            + ", ".join(f"`{d}`" for d in no_expert)
+        )
+
+    st.subheader("Expert vs ML per interval")
+    bar_choices = sorted(interval_df["deployment_id"].unique(), key=date_key)
+    bar_dep = st.selectbox(
+        "Deployment",
+        bar_choices,
+        index=bar_choices.index(chosen) if chosen in bar_choices else 0,
+        key=k("bar_dep"),
+        help="Defaults to the deployment picked in section 1.",
+    )
+    bars = (
+        interval_df[interval_df["deployment_id"] == bar_dep]
+        .dropna(subset=["fish_expert", "interval"])
+        .sort_values("interval")
+    )
+    if bars.empty:
+        st.info("No expert-annotated intervals for this deployment.")
+    else:
+        long = bars.melt(
+            id_vars=["interval", "ml_coverage"],
+            value_vars=["fish_expert", "fish_ml"],
+            var_name="source",
+            value_name="maxn",
+        )
+        long["source"] = long["source"].map({"fish_expert": "Expert", "fish_ml": "ML"})
+        fig = px.bar(
+            long,
+            x="interval",
+            y="maxn",
+            color="source",
+            barmode="group",
+            hover_data=["ml_coverage"],
+            color_discrete_map={
+                "Expert": SOURCE_COLORS["expert"],
+                "ML": SOURCE_COLORS["ml"],
+            },
+            labels={
+                "interval": "6-min interval",
+                "maxn": "Fish (any) MaxN",
+                "source": "",
+                "ml_coverage": "ML coverage %",
+            },
+        )
+        fig.update_xaxes(dtick=1)
+        fig.update_layout(height=380)
+        st.plotly_chart(fig, key=k("interval_bars"))
+        st.caption(
+            "Same numbers as the section 1 table, one deployment at a time, so "
+            "a run of misses or an early peak is visible in order."
+        )
+
+    with st.expander("Chapter → interval mapping"):
+        st.caption(
+            "Which chapter and second each expert interval was matched to, from "
+            "`video_symlink` / `start_sec_in_chapter` in the expert CSV. Every "
+            "number above rests on this mapping, so this is where to check it "
+            "when a deployment looks wrong. `spills` = the window runs into the "
+            "next chapter."
+        )
+        st.dataframe(
+            interval_df[
+                [
+                    "deployment_id",
+                    "interval",
+                    "chapter",
+                    "start_sec",
+                    "spills",
+                    "ml_coverage",
+                ]
+            ].sort_values(["deployment_id", "interval"]),
+            hide_index=True,
+            width="stretch",
+        )
+
     # ── Methodology ──────────────────────────────────────────────────────────
 
     with st.expander("Methodology & caveats", expanded=False):
@@ -562,7 +706,10 @@ def render_body(embedded: bool = False, key_prefix: str = "uoa") -> None:
 **Time mapping**, each expert interval row carries `video_symlink`
 (→ deployment + chapter) and `start_sec_in_chapter`. The 6-min window is
 `[start, start+{INTERVAL_SEC}s)`; when it overruns the ~{CHAPTER_SEC}s chapter
-length the remainder is read from the next chapter's raw CSV.
+length the remainder is read from the next chapter's raw CSV. `ml_coverage`
+is the share of that window whose chapter actually has a raw CSV: a missing
+chapter counts as zero detections, so below 100% a "miss" may be unprocessed
+footage.
 
 **ML MaxN** = max over frames in the window of (detections in that frame, conf ≥
 threshold). Fish-any counts all classes; per-species counts one class.

@@ -33,6 +33,7 @@ from contextlib import contextmanager
 
 import streamlit as st
 import streamlit.components.v1 as components
+from theme import CHIP_BG_HOVER, CHIP_BORDER, CHIP_BORDER_HOVER
 
 # Set once per run by `shell.render`. A view that renders chips or filters
 # outside the report shell (or before the shell has built the header) falls back
@@ -46,7 +47,7 @@ def set_slots(chips_container, filters_container) -> None:
     _SLOTS["filters"] = filters_container
 
 
-_CHIP_CSS = """
+_CHIP_CSS = f"""
 <style>
   /* Streamlit hands the strip's element container a height measured before the
      pills exist, so the box stays 11px tall while the chips inside it stand
@@ -55,7 +56,7 @@ _CHIP_CSS = """
      what it holds. */
   .st-key-section_chips,
   .st-key-section_chips [data-testid="stElementContainer"],
-  .st-key-section_chips [data-testid="stMarkdown"] {
+  .st-key-section_chips [data-testid="stMarkdown"] {{
     height: auto !important;
     /* `height: auto` alone does not win. Streamlit's own layout keeps the box
        at the height it measured, and the pills overflow it. `min-height` is
@@ -63,32 +64,32 @@ _CHIP_CSS = """
        room: one pill's height, plus a row's worth for each extra line the
        strip wraps onto. */
     min-height: 1.9rem;
-  }
+  }}
   /* Flex, not a line of inline-blocks. An inline-block sits on the text
      baseline, so a pill taller than its line box hangs below it, the chips
      overflowed the header and the band's bottom edge cut through them. As flex
      items they are measured by their own height, and the row grows to fit.
      Right-justified: the chips share the title row and hang off its right
      edge, so a short strip does not leave a hole next to the title. */
-  .st-key-section_chips [data-testid="stMarkdownContainer"] p {
+  .st-key-section_chips [data-testid="stMarkdownContainer"] p {{
     display: flex;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: .2rem .3rem;
     margin: 0;
-  }
-  .st-key-section_chips a {
+  }}
+  .st-key-section_chips a {{
     padding: .12rem .6rem;
-    border: 1px solid rgba(128,128,128,.35);
+    border: 1px solid {CHIP_BORDER};
     border-radius: 1rem;
     font-size: .82rem;
     text-decoration: none;
     color: inherit;
-  }
-  .st-key-section_chips a:hover {
-    border-color: rgba(128,128,128,.75);
-    background: rgba(128,128,128,.12);
-  }
+  }}
+  .st-key-section_chips a:hover {{
+    border-color: {CHIP_BORDER_HOVER};
+    background: {CHIP_BG_HOVER};
+  }}
   /* Where a chip's target comes to rest.
      Streamlit's own toolbar is 60px and drawn OVER the page; the sticky header
      sits under it and now carries the chips too, so one measured height covers
@@ -96,22 +97,22 @@ _CHIP_CSS = """
      is what the browser scrolls to and what has to carry the margin, the
      wrapper selector is kept for versions that put it elsewhere. */
   h1[id], h2[id], h3[id], h4[id],
-  [data-testid="stHeadingWithActionElements"] {
+  [data-testid="stHeadingWithActionElements"] {{
     scroll-margin-top: calc(
       var(--header-height, 3.75rem)
       + var(--report-header-h, 7rem)
       + 1rem
     );
-  }
+  }}
   /* The measuring iframe below is zero-height but still a block, so it would
      take a full block gap out of the page for nothing. Out of flow, not
      hidden: a `display: none` iframe may never load, and the script inside it
      is what publishes the height everything above depends on. */
-  [data-testid="stElementContainer"]:has(> [data-testid="stIFrame"]) {
+  [data-testid="stElementContainer"]:has(> [data-testid="stIFrame"]) {{
     position: absolute;
     height: 0;
     visibility: hidden;
-  }
+  }}
 </style>
 """
 
@@ -195,7 +196,7 @@ def extra_filters(count: int = 3):
     outside the shell) still lands in the sidebar rather than mid-page.
 
     Yields a list so existing callers written against header columns
-    (`with filter_cols[0]:`) keep working unchanged — in the sidebar the
+    (`with filter_cols[0]:`) keep working unchanged, in the sidebar the
     "columns" simply stack.
     """
     slot = _SLOTS["filters"] or st.sidebar.container(key="view_filters")

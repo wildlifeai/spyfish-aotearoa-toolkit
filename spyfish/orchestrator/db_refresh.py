@@ -20,7 +20,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from spyfish.config.base import CitSciStatus, ExpertStatus, MlStatus
+from spyfish.config.base import (
+    CitSciStatus,
+    ExpertStatus,
+    MlStatus,
+    ZooCropsStatus,
+    ZooFramesStatus,
+)
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
@@ -306,6 +312,50 @@ def refresh_biigle(db: DatabaseManager) -> int:
     return updated
 
 
+# ── Pass 4. Zooniverse validation sets ───────────────────────────────────────
+
+
+def refresh_zooniverse_validation(db: DatabaseManager) -> int:
+    """zoo_frames_status / zoo_crops_status: a set on Zooniverse means uploaded.
+
+    A database restored from S3, or one machine uploading while another holds
+    the DB, can say `pending` for a drop whose `vframes_{drop}` or
+    `crops_{drop}` set already exists. Left alone, the next run of that stage
+    finds the set, compares it with a manifest it may not have, and raises.
+    One metadata query per candidate drop; drops already at uploaded,
+    complete or skipped are not asked about.
+
+    Never advances to COMPLETE: that needs the retirement check the validation
+    sync-back will do, and it is not built yet.
+    """
+    from spyfish.zooniverse.upload import (
+        CROP_KIND,
+        VALIDATION_FRAME_KIND,
+        existing_subject_count,
+    )
+
+    updated = 0
+    for status, kind in (
+        (ZooFramesStatus, VALIDATION_FRAME_KIND),
+        (ZooCropsStatus, CROP_KIND),
+    ):
+        settled = [status.UPLOADED, status.COMPLETE]
+        if hasattr(status, "SKIPPED"):
+            settled.append(status.SKIPPED)
+        for row in _ok_drops_not_at(db, status.COLUMN, settled):
+            drop_id = row["drop_id"]
+            count = existing_subject_count(kind, drop_id)
+            if not count:
+                continue
+            db.update_section_status(drop_id, status.COLUMN, status.UPLOADED)
+            logging.info(
+                f"  {status.COLUMN}: {drop_id} → {status.UPLOADED} "
+                f"({kind.set_name_prefix}{drop_id} holds {count} subjects)"
+            )
+            updated += 1
+    return updated
+
+
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 
@@ -313,10 +363,11 @@ def run_db_refresh(
     ml: bool = True,
     zooniverse: bool = True,
     biigle: bool = True,
+    zooniverse_validation: bool = True,
 ) -> None:
     """
     Reconcile pipeline DB status with artifact reality.
-    Runs all three passes by default; pass ml/zooniverse/biigle=False to scope.
+    Runs all four passes by default; pass a flag as False to scope.
     Finishes with sync_annotation_counts() to refresh denormalized count columns.
     """
     from spyfish.log_config import log_header
@@ -341,6 +392,12 @@ def run_db_refresh(
         log_header("DB Refresh. Biigle")
         n = refresh_biigle(db)
         logging.info(f"Biigle pass: {n} drop(s) updated.")
+        total += n
+
+    if zooniverse_validation:
+        log_header("DB Refresh. Zooniverse validation sets")
+        n = refresh_zooniverse_validation(db)
+        logging.info(f"Zooniverse validation pass: {n} drop(s) updated.")
         total += n
 
     logging.info(f"DB refresh complete: {total} total status update(s).")

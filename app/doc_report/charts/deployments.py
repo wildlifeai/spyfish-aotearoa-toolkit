@@ -8,7 +8,13 @@ importing another view to borrow a chart.
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from theme import INGEST_STATUS_COLORS
+from ecology_data import NO_SHAREPOINT_RECORD  # noqa: E402
+from theme import (
+    INGEST_STATUS_COLORS,
+    PIPELINE_FUNNEL_COLORS,
+    TEXT_ON_FILL,
+    USABLE_SPLIT_COLORS,
+)
 from utils import CACHE_TTL_SECONDS
 
 from spyfish.config.base import (
@@ -18,35 +24,14 @@ from spyfish.config.base import (
     IngestStatus,
     MlStatus,
     ReportingStatus,
-    VideoPresence,
+    ZooCropsStatus,
+    ZooFramesStatus,
 )
 from spyfish.config.wrapper import config
 
 from ..charting import style, year_axis
+from ..data import add_completion_flags
 from ..layout import section
-
-
-def _stage_flags(dep: pd.DataFrame) -> pd.DataFrame:
-    """Per-deployment booleans for each stage, measured by data presence.
-
-    Presence of annotations rather than the status columns. A drop carrying ML
-    annotations must have got through ML whatever its status column says, and
-    section statuses drift from the annotation data. Ingest problems found after
-    the fact do not unwind progress already made.
-    """
-    out = dep.copy()
-    out["ok"] = out["ingest_status"] == IngestStatus.OK
-    out["has_video"] = out["video_presence"] == VideoPresence.PRESENT
-    # Present OR archived: archived footage exists and its annotations are
-    # real work. Tapuae made the difference concrete — every one of its 103
-    # expert-annotated deployments is archived, so a funnel keyed on
-    # "present" showed zero expert work for the whole reserve.
-    out["footage_exists"] = out["video_presence"].isin(
-        [VideoPresence.PRESENT, VideoPresence.ARCHIVED]
-    )
-    for source in ("ml", "citsci", "expert"):
-        out[f"{source}_done"] = out[f"{source}_annotations"].fillna(0) > 0
-    return out
 
 
 def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
@@ -58,10 +43,10 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
 
     Each step is a subset of the one above, enforced, not implied, which is
     why the three annotation tiers are intersected with "Footage exists"
-    rather than counted over all deployments — without an intersection a
+    rather than counted over all deployments, without an intersection a
     lower tier can overtake the one above it. "Exists" means present OR
     archived: annotation happens while footage is present and survives its
-    archival, so keying the tiers on "present" erased finished work — Tapuae's
+    archival, so keying the tiers on "present" erased finished work, Tapuae's
     103 expert-annotated deployments, all archived, showed as zero. What still
     slips the tiers (annotated but failed ingest, or footage since removed)
     is reported in the caption below rather than silently vanishing.
@@ -111,15 +96,7 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
             y=stages["Stage"],
             x=stages["Count"],
             textinfo="value+percent initial",
-            marker_color=[
-                "#90A4AE",
-                "#D9603B",
-                "#E8A33D",
-                "#42A5F5",
-                "#009E73",
-                "#E69F00",
-                "#0072B2",
-            ],
+            marker_color=[PIPELINE_FUNNEL_COLORS[s] for s in stages["Stage"]],
         )
     )
     style(fig, height=380 if compact else 440)
@@ -134,7 +111,7 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
             f"**{int((ingested & ~df['footage_exists']).sum()):,}** have no "
             f"footage in S3, and "
             f"**{int((ingested & df['footage_exists'] & ~df['has_video']).sum()):,}** "
-            f"of the footage that exists is archived in cold storage — its "
+            f"of the footage that exists is archived in cold storage, its "
             f"annotations still count in the tiers, but new processing needs "
             f"a restore first."
         )
@@ -177,24 +154,36 @@ SPLITS = {
         .map({False: "ok", True: "bad"}),
         "order": ["ok", "bad"],
         "labels": {"ok": "Usable", "bad": "Bad deployment"},
-        "colors": {"ok": "#2E8B57", "bad": "#D9603B"},
+        "colors": USABLE_SPLIT_COLORS,
         "min_label_pct": 0,
     },
     "ingest_status": {
         "title": "Deployments per year, by ingest status",
-        "column": lambda df: df["ingest_status"].fillna("removed"),
+        "column": lambda df: df[IngestStatus.COLUMN].fillna(IngestStatus.REMOVED),
         # Usable at the bottom, then by how fixable the loss is: a validation
         # or metadata error sits directly on the usable share because it can be
         # corrected upstream and the deployment put back in play. An excluded
         # deployment went wrong in the field and never comes back, so it caps
         # the bar.
-        "order": ["ok", "validation_error", "metadata_error", "excluded", "removed"],
+        "order": [
+            IngestStatus.OK,
+            IngestStatus.VALIDATION_ERROR,
+            IngestStatus.METADATA_ERROR,
+            IngestStatus.EXCLUDED,
+            IngestStatus.REMOVED,
+            # Legacy-only drops (sidebar tick). Not an ingest failure, so it
+            # sits on top as its own segment; leaving it out of this list
+            # silently dropped those drops from the per-year totals while the
+            # Report home still counted them.
+            NO_SHAREPOINT_RECORD,
+        ],
         "labels": {
-            "ok": "Usable",
-            "excluded": "Bad deployment (excluded)",
-            "validation_error": "Validation error",
-            "metadata_error": "Metadata error",
-            "removed": "Removed",
+            IngestStatus.OK: "Usable",
+            IngestStatus.EXCLUDED: "Bad deployment (excluded)",
+            IngestStatus.VALIDATION_ERROR: "Validation error",
+            IngestStatus.METADATA_ERROR: "Metadata error",
+            IngestStatus.REMOVED: "Removed",
+            NO_SHAREPOINT_RECORD: "Legacy only (no SharePoint record)",
         },
         # The shared status palette, so a status is the same colour wherever it
         # appears in the app.
@@ -257,7 +246,7 @@ def render_deployments_per_year(
             ],
             textposition="inside",
             insidetextanchor="middle",
-            textfont=dict(color="white"),
+            textfont=dict(color=TEXT_ON_FILL),
             customdata=pct,
             hovertemplate=f"%{{x}}<br>{label}: "
             "%{y} (%{customdata:.0f}%)<extra></extra>",
@@ -344,41 +333,28 @@ SECTION_STATUS_ORDER = [
             ReportingStatus.ERROR,
         ],
     ),
+    (
+        "zoo_frames_status",
+        "Zoo frames",
+        [
+            ZooFramesStatus.PENDING,
+            ZooFramesStatus.UPLOADED,
+            ZooFramesStatus.COMPLETE,
+            ZooFramesStatus.ERROR,
+        ],
+    ),
+    (
+        "zoo_crops_status",
+        "Zoo crops",
+        [
+            ZooCropsStatus.PENDING,
+            ZooCropsStatus.UPLOADED,
+            ZooCropsStatus.COMPLETE,
+            ZooCropsStatus.ERROR,
+            ZooCropsStatus.SKIPPED,
+        ],
+    ),
 ]
-
-_PRESENCE_DISPLAY = {
-    VideoPresence.PRESENT: "Present",
-    VideoPresence.ARCHIVED: "Archived",
-    VideoPresence.ABSENT: "Absent",
-    VideoPresence.NO_VIDEO_BAD_DEP: "No video (bad dep.)",
-}
-
-
-def add_completion_flags(dep: pd.DataFrame) -> pd.DataFrame:
-    """`complete`, `total_annotations` and `video_status`, as the page defines them.
-
-    "Complete" means: expert or reporting complete, or every section explicitly
-    skipped. Note this reads the **status columns**, unlike the rest of the
-    report, which counts annotations, see the open question on the
-    reporting-numbers panel.
-    """
-    out = dep.copy()
-    out["complete"] = (
-        (out["expert_status"] == ExpertStatus.COMPLETE)
-        | (out["reporting_status"] == ReportingStatus.COMPLETE)
-        | (
-            (out["ml_status"] == MlStatus.SKIPPED)
-            & (out["citsci_status"] == CitSciStatus.SKIPPED)
-            & (out["expert_status"] == ExpertStatus.SKIPPED)
-        )
-    )
-    counts = out[["expert_annotations", "ml_annotations", "citsci_annotations"]]
-    out["total_annotations"] = counts.fillna(0).astype(int).sum(axis=1)
-    out["video_status"] = out["video_presence"].map(_PRESENCE_DISPLAY).fillna("Unknown")
-    out["needs_action"] = ~(
-        out["complete"] | out["is_bad_deployment"].fillna(0).astype(bool)
-    )
-    return out
 
 
 def render_section_progress(dep: pd.DataFrame) -> None:
@@ -536,7 +512,7 @@ def render_deployment_browser(dep: pd.DataFrame) -> None:
         hide_index=True,
         height=420,
         column_config={
-            "drop_id": st.column_config.TextColumn("DropID"),
+            "drop_id": st.column_config.TextColumn("DropID", pinned=True),
             "survey_id": st.column_config.TextColumn("SurveyID"),
             "complete": st.column_config.CheckboxColumn("Complete", width="small"),
             "is_bad_deployment": st.column_config.CheckboxColumn("Bad", width="small"),
@@ -584,7 +560,9 @@ def render_annotation_detail(dep: pd.DataFrame) -> None:
     if selected == "None":
         return
 
-    maxn = AnnotationDatabaseManager().get_maxn_summary(drop_id=selected)
+    maxn = AnnotationDatabaseManager(read_only=True).get_maxn_summary(
+        drop_id=selected, all_models=True
+    )
     if maxn.empty:
         st.info(f"No annotations found for {selected}.")
         return
@@ -597,7 +575,14 @@ def render_annotation_detail(dep: pd.DataFrame) -> None:
         .replace(NULL_DEPLOYMENT, "(nothing seen)")
         .fillna("(nothing seen)")
     )
-    maxn["time_of_max"] = maxn["time_of_max"].replace(NULL_DEPLOYMENT, "—")
+    # Common names, the same "Common name (Scientific name)" labels every
+    # Reporting view uses; names without a registry entry (and the absence
+    # label above) fall through unchanged.
+    from ecology_data import load_common_names
+
+    common = load_common_names()
+    maxn["scientific_name"] = maxn["scientific_name"].map(lambda s: common.get(s, s))
+    maxn["time_of_max"] = maxn["time_of_max"].replace(NULL_DEPLOYMENT, "-")
 
     st.dataframe(
         maxn[
@@ -613,7 +598,7 @@ def render_annotation_detail(dep: pd.DataFrame) -> None:
         width="stretch",
         hide_index=True,
         column_config={
-            "scientific_name": st.column_config.TextColumn("Species"),
+            "scientific_name": st.column_config.TextColumn("Species", pinned=True),
             "annotated_by": st.column_config.TextColumn("Source", width="small"),
             "maxn": st.column_config.NumberColumn("Peak MaxN", width="small"),
             "time_of_max": st.column_config.TextColumn("Time of MaxN", width="small"),
@@ -623,13 +608,14 @@ def render_annotation_detail(dep: pd.DataFrame) -> None:
             "external_id": st.column_config.TextColumn(
                 "Provenance",
                 help=(
-                    "Tracks which source produced each annotation. "
-                    "ML rows: model name (e.g. 'species_20260429_081503'). "
-                    "Expert rows: BIIGLE annotation_id, the unique ID of the "
-                    "bbox in BIIGLE; visible in the BIIGLE UI on each "
-                    "annotation's detail panel. "
-                    "CitSci rows: empty (Zooniverse classifications aren't "
-                    "individually addressable post-aggregation)."
+                    "Which SOURCE produced each annotation, never the row. "
+                    "ML rows: the model name (e.g. 'species_20260822_192536'); "
+                    "reports keep only the newest model per deployment, this "
+                    "table shows them all. Expert rows: 'legacy' for the "
+                    "historical workbook import, or 'biigle_volume_<id>' for "
+                    "the BIIGLE volume the review came from. CitSci rows: the "
+                    "Zooniverse subject id of that clip, so never group citsci "
+                    "by this column."
                 ),
             ),
         },
@@ -640,7 +626,7 @@ def render_annotation_detail(dep: pd.DataFrame) -> None:
 def _all_annotations_csv() -> bytes | None:
     from spyfish.database.annotation_manager import AnnotationDatabaseManager
 
-    df = AnnotationDatabaseManager().get_all_annotations_export_df()
+    df = AnnotationDatabaseManager(read_only=True).get_all_annotations_export_df()
     if df is None or df.empty:
         return None
     return df.to_csv(index=False).encode("utf-8")
