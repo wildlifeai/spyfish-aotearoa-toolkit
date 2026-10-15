@@ -282,13 +282,16 @@ def run_training_pipeline(species_data_yaml: str) -> dict:
     logging.info(f"Validating species dataset: {species_data_yaml}")
     validate_dataset(species_data_yaml)
     _clear_yolo_cache(local_training_dir)
-    run_dir = local_training_dir / "runs" / f"{timestamp}_species"
+    # Type first, stamp last: the run dir name becomes the promoted file name
+    # and so the model name in the annotations DB (validation_patterns.model_name).
+    run_name = config.validate_model_name(f"species_{timestamp}")
+    run_dir = local_training_dir / "runs" / run_name
     freeze_dataset_snapshot(Path(species_data_yaml), run_dir)
     best_pt = train_model(
         data_yaml=species_data_yaml,
         base_model_path=str(base_model_path),
         project_dir=local_training_dir / "runs",
-        run_name=f"{timestamp}_species",
+        run_name=run_name,
         epochs=config.training_epochs,
         patience=config.training_patience,
         imgsz=config.training_imgsz,

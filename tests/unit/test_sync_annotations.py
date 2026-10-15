@@ -73,21 +73,47 @@ def test_map_strips_common_name_prefix():
 def test_map_plain_species_name():
     row = pd.Series({"label_name": "Pagrus auratus", "annotation_id": "99"})
     _, mapped = _map_biigle_to_spyfish_schema(
-        row, "label_name", "DROP_01", "00:00:05.000", "frame_5.0s.jpg"
+        row, "label_name", "DROP_01", "00:00:05.000", "frame_5.0s.jpg", volume_id=4626
     )
     assert mapped["scientific_name"] == "Pagrus auratus"
-    assert mapped["external_id"] == "99"
+    assert mapped["external_id"] == "biigle_volume_4626"
     assert mapped["annotated_by"] == "expert"
     assert mapped["max_interval"] == 0  # incremented during aggregation
 
 
-def test_map_annotation_id_fallback():
-    """Falls back to 'id' when 'annotation_id' is missing."""
-    row = pd.Series({"label_name": "Pagrus auratus", "id": "77"})
+def test_map_external_id_is_the_volume_not_the_annotation():
+    """`external_id` names the SOURCE (volume), like the model name on ML rows.
+
+    The per-box annotation id was never read back and, being non-NULL, made
+    the sync's clear match legacy expert rows too. With no volume (bundle
+    synthesizer) the key still carries the BIIGLE prefix so ownership holds.
+    """
+    row = pd.Series({"label_name": "Pagrus auratus", "annotation_id": "77", "id": "78"})
+    _, mapped = _map_biigle_to_spyfish_schema(
+        row, "label_name", "DROP_01", None, "image_uuid_001.jpg", volume_id=12
+    )
+    assert mapped["external_id"] == "biigle_volume_12"
     _, mapped = _map_biigle_to_spyfish_schema(
         row, "label_name", "DROP_01", None, "image_uuid_001.jpg"
     )
-    assert mapped["external_id"] == "77"
+    assert mapped["external_id"].startswith("biigle_volume_")
+
+
+def test_aggregate_rows_all_carry_the_volume_key():
+    """Every aggregated row is owned by the volume it was synced from."""
+    df = pd.DataFrame(
+        {
+            "label_name": [
+                "Pagrus auratus",
+                "Pagrus auratus",
+                "Kina - Evechinus chloroticus",
+            ],
+            "annotation_id": ["1", "2", "3"],
+            "filename": ["D__frame_5.0s.jpg", "D__frame_5.0s.jpg", "D__frame_9.0s.jpg"],
+        }
+    )
+    result = aggregate_raw_to_maxn_rows(df, "DROP_01", volume_id=4626)
+    assert {r["external_id"] for r in result} == {"biigle_volume_4626"}
 
 
 def test_map_null_timestamp_uses_frame_key():

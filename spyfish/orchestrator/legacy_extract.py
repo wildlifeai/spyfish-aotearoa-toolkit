@@ -7,11 +7,104 @@ import pandas as pd
 from spyfish.config.base import ExpertStatus
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import (
+    LEGACY_EXTERNAL_ID,
     AnnotationDatabaseManager,
     null_deployment_row,
 )
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
+
+
+def legacy_time_of_max_seconds(drop_ids: pd.Series, times: pd.Series) -> pd.Series:
+    """Video-relative seconds for legacy TimeOfMax text.
+
+    The single source of truth for reading legacy time text — the ingest
+    below, the DB backfill script and the report dashboard all call this, so
+    one row cannot parse to two different moments in two places.
+    `tests/unit/test_one_time_parser.py` fails if a second reader appears.
+
+    Deliberately NOT `spyfish.utils.time_to_seconds`: that one is for
+    timestamps the pipeline wrote (already correct, no repair wanted) and
+    returns 0.0 for missing input, which here would read as "seen in the
+    first minute" rather than "time unknown".
+
+    Most legacy TimeOfMax text is honest `HH:MM:SS` with a zero hours field.
+    But a slice of the hand-entered workbooks reached the extractor as Excel
+    time cells that had swallowed `MM:SS` entries as `HH:MM` — "23:45"
+    meaning 23 minutes 45 seconds became the cell 23:45:00 — so their first
+    field holds MINUTES (rule from Kalindi, 2026-10-02: hand legacy has no
+    millisecond precision, and a nonzero first field there can only be
+    minutes, since no BUV video is an hour long).
+
+    Three cases, validated against the full import (72,694 timed rows: the
+    minutes-first reading leaves zero repaired rows past 37 minutes, where
+    reading them as written would leave 3,653):
+
+    * A nonzero first field on a hand row (no fractional seconds) is minutes:
+      seconds = first*60 + second. This also catches an analyst's "17:00"
+      for seventeen minutes, which Excel stored as 17:00:00.
+    * Within a deployment that holds any such row, the whole sheet went
+      through Excel's coercion, so its `00:SS:00`-shaped rows are seconds,
+      not minutes ("0:17" for seventeen seconds became 00:17:00). Rows with
+      a nonzero THIRD field are immune: the coercion always produces :00
+      seconds, so those are genuine `HH:MM:SS` even inside a flagged
+      deployment — which also protects mis-flagged sheets from being
+      corrupted by one typo.
+    * Everything else (fractional-second player exports included) parses as
+      written. Rows landing at 35-37 minutes are real observations from
+      videos running past the nominal cutoff and are kept.
+
+    Returns a float series aligned to the inputs; NaN where the text is
+    missing or unparseable. `legacy_time_reading` returns the same seconds
+    plus the as-written reading and the repair mask, for a caller that needs
+    to report how much was repaired — so no caller ever parses the text a
+    second time to find out.
+    """
+    return legacy_time_reading(drop_ids, times)["seconds"]
+
+
+def legacy_time_reading(drop_ids: pd.Series, times: pd.Series) -> pd.DataFrame:
+    """The one parse of legacy time text, with its workings exposed.
+
+    `legacy_time_of_max_seconds` is the answer most callers want; this is the
+    same computation returning three aligned columns:
+
+    * `seconds` — the value to store and use.
+    * `as_written` — what a naive `HH:MM:SS` read would have given.
+    * `repaired` — True where the two differ because the Excel-coercion rule
+      fired (see `legacy_time_of_max_seconds` for the rule itself).
+
+    It exists so a report of "how many rows did the repair touch" costs no
+    second parse. Two parses of one format is how the formats drift apart:
+    the second copy is written from the first's docstring, not its code, and
+    the next edge case is only ever fixed in one of them.
+    """
+    # Stripped first: the repair regex is anchored while `to_timedelta`
+    # tolerates surrounding spaces, so " 23:45:00" used to parse as written
+    # (23 hours) and dodge the repair that fixed its neighbours.
+    text = times.astype(str).str.strip()
+    as_written = pd.to_timedelta(text, errors="coerce").dt.total_seconds()
+    fields = text.str.extract(r"^(\d+):(\d+):(\d+)(\.\d+)?$")
+    first = pd.to_numeric(fields[0], errors="coerce")
+    second = pd.to_numeric(fields[1], errors="coerce")
+    third = pd.to_numeric(fields[2], errors="coerce")
+    hand = fields[3].isna() & first.notna()
+
+    minutes_first = hand & (first > 0)
+    # A missing DropID must not form a pseudo-deployment: `isin` treats NaN
+    # as equal to NaN, so without the guard every unkeyed row would share
+    # one coercion flag.
+    coerced_deps = set(drop_ids[minutes_first].dropna())
+    same_dep = drop_ids.notna() & drop_ids.isin(coerced_deps)
+    coerced = minutes_first | (hand & (third == 0) & same_dep)
+    seconds = as_written.where(~coerced, first * 60 + second)
+    return pd.DataFrame(
+        {
+            "seconds": seconds,
+            "as_written": as_written,
+            "repaired": coerced & seconds.notna() & (seconds != as_written),
+        }
+    )
 
 
 def parse_legacy_rows(df: pd.DataFrame) -> tuple[list, list]:
@@ -46,8 +139,17 @@ def parse_legacy_rows(df: pd.DataFrame) -> tuple[list, list]:
     conf_col = config.csv_confidence_agreement_column
     intv_col = config.csv_interval_annotation_column
 
+    # Seconds are derived at ingest so every consumer of the DB gets the
+    # repaired, video-relative value without re-deriving it from the text
+    # (the text column is kept verbatim for audit).
+    time_col = config.csv_maxn_time_column
+    if time_col in df.columns:
+        seconds = legacy_time_of_max_seconds(df[config.drop_id_column], df[time_col])
+    else:
+        seconds = pd.Series(float("nan"), index=df.index)
+
     annotations, placeholders = [], []
-    for row in df.to_dict("records"):
+    for i, row in enumerate(df.to_dict("records")):
         sci = row.get(config.csv_scientific_name_column)
         t_max = row.get(config.csv_maxn_time_column)
         m_intv = row.get(config.csv_max_interval_column)
@@ -58,24 +160,26 @@ def parse_legacy_rows(df: pd.DataFrame) -> tuple[list, list]:
             # external_id='legacy' matches the DELETE scope in the caller, so
             # a re-ingest replaces these rather than accumulating duplicates.
             annotations.append(
-                null_deployment_row(drop_id, "expert", external_id="legacy")
+                null_deployment_row(drop_id, "expert", external_id=LEGACY_EXTERNAL_ID)
             )
             continue
 
         conf = row.get(conf_col)
         confidence = None if (pd.isna(conf) or conf == "NA") else float(conf)
         intv_ann = row.get(intv_col)
+        secs = seconds.iloc[i]
 
         annotations.append(
             {
                 "drop_id": row[config.drop_id_column],
                 "scientific_name": None if pd.isna(sci) else sci,
                 "time_of_max": None if pd.isna(t_max) else t_max,
+                "time_of_max_seconds": None if pd.isna(secs) else float(secs),
                 "max_interval": 0 if pd.isna(m_intv) else m_intv,
                 "annotated_by": "expert",
                 "interval_annotation": None if pd.isna(intv_ann) else intv_ann,
                 "confidence_agreement": confidence,
-                "external_id": "legacy",  # distinguishes these from Biigle-synced expert annotations
+                "external_id": LEGACY_EXTERNAL_ID,  # distinguishes these from Biigle-synced expert annotations
             }
         )
     return annotations, placeholders
@@ -141,7 +245,8 @@ def ingest_legacy_expert_annotations():
         # Clear only legacy expert annotations to avoid wiping Biigle-synced expert data.
         with ann_db.get_writable_connection() as conn:
             conn.execute(
-                "DELETE FROM annotations WHERE annotated_by = 'expert' AND external_id = 'legacy'"
+                "DELETE FROM annotations WHERE annotated_by = 'expert' AND external_id = ?",
+                (LEGACY_EXTERNAL_ID,),
             )
 
         ann_db.add_annotations(annotations)

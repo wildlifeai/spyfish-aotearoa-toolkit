@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
+import numpy as np
 import pandas as pd
 import piexif
 
@@ -80,6 +81,46 @@ def read_video_rotation(cap: cv2.VideoCapture) -> int:
         return 0
 
 
+def read_frame_from_cap(
+    cap: cv2.VideoCapture,
+    seek_seconds: float,
+    frame_index: Optional[int] = None,
+    rotation: int = 0,
+):
+    """Seek an open capture and return one frame as an image, rotated, or None.
+
+    Seeks by `frame_index` when given (exact: the index inference recorded, so
+    the pixels are the ones its boxes were computed on), otherwise by time.
+    """
+    if frame_index is not None:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    else:
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_seconds * 1000.0)
+
+    ret, frame = cap.read()
+    if not ret:
+        logging.error(
+            f"cv2 failed to read frame at "
+            f"{'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}"
+        )
+        return None
+    if rotation:
+        frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
+    return frame
+
+
+def write_frame_jpeg(frame, out_path: Path) -> None:
+    """Save a frame as the standard clean JPEG, EXIF orientation pinned to 1."""
+    cv2.imwrite(str(out_path), frame)
+    # Embed EXIF Orientation = 1: rotation is already baked into the pixels,
+    # so no viewer should attempt to rotate again.
+    try:
+        exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Orientation: 1}})
+        piexif.insert(exif_bytes, str(out_path))
+    except Exception as e:
+        logging.debug(f"Could not embed EXIF orientation for {out_path}: {e}")
+
+
 def extract_one_frame_from_cap(
     cap: cv2.VideoCapture,
     seek_seconds: float,
@@ -94,31 +135,13 @@ def extract_one_frame_from_cap(
     moov atom over HTTP for remote videos) per frame.
 
     Caller also passes the pre-computed `rotation` so we don't re-read container
-    metadata on every call.
+    metadata on every call. Callers that also need the pixels use
+    `read_frame_from_cap` + `write_frame_jpeg` directly.
     """
-    if frame_index is not None:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-    else:
-        cap.set(cv2.CAP_PROP_POS_MSEC, seek_seconds * 1000.0)
-
-    ret, frame = cap.read()
-    if not ret:
-        logging.error(
-            f"cv2 failed to read frame at "
-            f"{'index ' + str(frame_index) if frame_index is not None else str(seek_seconds) + 's'}"
-        )
+    frame = read_frame_from_cap(cap, seek_seconds, frame_index, rotation)
+    if frame is None:
         return False
-
-    if rotation:
-        frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
-    cv2.imwrite(str(out_path), frame)
-    # Embed EXIF Orientation = 1: rotation is already baked into the pixels,
-    # so no viewer should attempt to rotate again.
-    try:
-        exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Orientation: 1}})
-        piexif.insert(exif_bytes, str(out_path))
-    except Exception as e:
-        logging.debug(f"Could not embed EXIF orientation for {out_path}: {e}")
+    write_frame_jpeg(frame, out_path)
     return True
 
 
@@ -161,6 +184,40 @@ def extract_frame(
         )
     finally:
         cap.release()
+
+
+# ── raw-CSV frame lookup ─────────────────────────────────────────────────────
+
+
+def nearest_raw_frame(
+    raw_df: pd.DataFrame, seconds: float, max_delta: Optional[float] = None
+) -> tuple[Optional[int], Optional[float]]:
+    """(``frame``, ``time_seconds``) of the raw-CSV row nearest ``seconds``.
+
+    The one place every caller resolves "a moment in the video" to the frame
+    inference actually ran on, so the pixels a frame is extracted from are the
+    ones its boxes were computed on, and so the COCO builder, the frame
+    extractor and the QA drawers all agree on which frame that is.
+
+    With ``max_delta`` None the nearest row always wins, however far away.
+    With a float, a nearest row farther than ``max_delta`` seconds returns
+    ``(None, None)``: the caller then knows the raw CSV has nothing for that
+    moment (sparse CSVs only hold frames with detections) and can seek by time
+    instead of snapping to a distant frame.
+
+    An empty frame, or one whose ``time_seconds`` are all NaN, returns
+    ``(None, None)`` rather than raising.
+    """
+    if raw_df.empty:
+        return None, None
+    times = pd.to_numeric(raw_df["time_seconds"], errors="coerce").to_numpy(dtype=float)
+    gaps = np.abs(times - float(seconds))
+    if np.isnan(gaps).all():
+        return None, None
+    pos = int(np.nanargmin(gaps))
+    if max_delta is not None and gaps[pos] > max_delta:
+        return None, None
+    return int(raw_df["frame"].iloc[pos]), float(times[pos])
 
 
 # ── YOLO → COCO conversion ───────────────────────────────────────────────────
@@ -259,21 +316,17 @@ def build_coco_from_raw_csv(
         candidates = raw_df
         if "drop_id" in raw_df.columns:
             candidates = raw_df[raw_df["drop_id"] == rec_drop_id]
-            if candidates.empty:
-                n_frames_without_detections += 1
-                continue
 
-        # Find the raw CSV frame closest to this time_of_max
-        deltas = (candidates["time_seconds"] - time_of_max).abs()
-        nearest_idx = deltas.idxmin()
-        nearest_delta = deltas.loc[nearest_idx]
-        if nearest_delta > max_time_delta_seconds:
-            # No raw-CSV row close enough, this frame has no detections.
-            # Skip rather than snap to a distant row.
+        # The raw CSV frame closest to this time_of_max, within tolerance.
+        _, nearest_time = nearest_raw_frame(
+            candidates, time_of_max, max_delta=max_time_delta_seconds
+        )
+        if nearest_time is None:
+            # No rows for this video, or none close enough: this frame has no
+            # detections. Skip rather than snap to a distant row.
             n_frames_without_detections += 1
             continue
 
-        nearest_time = candidates["time_seconds"].loc[nearest_idx]
         frame_rows = candidates[candidates["time_seconds"] == nearest_time]
 
         for _, row in frame_rows.iterrows():
@@ -402,16 +455,10 @@ def extract_frames_from_selections(
         for img_id, (_, row) in enumerate(df.iterrows(), start=1):
             # TimeOfMaxAbsSeconds is an absolute video timestamp, use it directly.
             seek_seconds = float(row[config.csv_clip_max_time_column])
-            frame_index = None
-
-            if not raw_df.empty:
-                # Find the nearest frame in the raw ML CSV to this peak time
-                # Using the exact same matching logic as the COCO builder ensures alignment
-                nearest = raw_df.iloc[
-                    (raw_df["time_seconds"] - seek_seconds).abs().argsort()[:1]
-                ]
-                if not nearest.empty:
-                    frame_index = int(nearest["frame"].iloc[0])
+            # The nearest raw ML CSV frame to this peak time (None when the
+            # raw CSV is empty, then we seek by time). Same lookup as the
+            # COCO builder, so the pixels and the boxes line up.
+            frame_index, _ = nearest_raw_frame(raw_df, seek_seconds)
 
             out_filename = generate_frame_filename(drop_id, seek_seconds)
             out_path = out_dir / out_filename

@@ -154,7 +154,7 @@ def _render_storage_note() -> None:
         if 'ongoing-request="true"' in restore:
             st.warning(
                 "🧊 This video is in frozen storage and a **restore is in "
-                "progress**. It cannot play yet — deep-archive restores "
+                "progress**. It cannot play yet, deep-archive restores "
                 "typically take up to 12–48 hours. Check back later."
             )
         elif 'ongoing-request="false"' in restore:
@@ -166,11 +166,11 @@ def _render_storage_note() -> None:
         else:
             st.error(
                 "🧊 This video is in **frozen storage (deep archive)**. The "
-                "player below will not work until the footage is restored — "
+                "player below will not work until the footage is restored, "
                 "ask the team to trigger a restore, then allow up to 48 hours."
             )
     elif storage_class:
-        st.caption(f"Storage: `{storage_class}` — playable now, no restore needed.")
+        st.caption(f"Storage: `{storage_class}`, playable now, no restore needed.")
 
 
 # Shareable links: ?drop_id=ABC123 pre-fills the input and auto-presigns on first
@@ -238,8 +238,6 @@ if presigned_url:
         "The video box will show even when there are issues, so check above/try again later, or raise an issue."
     )
     st.video(presigned_url)
-    st.caption("Generated Presigned URL:")
-    st.code(presigned_url, language="text")
 
     # --- Clip extractor ---
     st.divider()

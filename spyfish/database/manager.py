@@ -12,6 +12,7 @@ from spyfish.config.base import (
     VideoPresence,
 )
 from spyfish.config.wrapper import config
+from spyfish.database.connection import connect_readonly
 
 
 def parse_geo_value(value) -> Optional[float]:
@@ -75,11 +76,20 @@ class DatabaseManager:
     Uses pure sqlite3 with dict-like row factories for simplicity.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, read_only: bool = False):
+        """Open the pipeline database, creating its schema unless ``read_only``.
+
+        Readers (the dashboard, notebooks) pass ``read_only=True``: no
+        ``init_db()``, and every connection goes through ``connect_readonly``,
+        so a missing file raises instead of being created empty. See
+        ``spyfish/database/connection.py`` for why an empty file is harmful.
+        """
         self.db_path = (
             str(config.db_path) if db_path is None else str(Path(db_path).absolute())
         )
-        self.init_db()
+        self.read_only = read_only
+        if not read_only:
+            self.init_db()
         self._deployments_columns: frozenset[str] = self._read_deployments_columns()
 
     def _read_deployments_columns(self) -> frozenset[str]:
@@ -100,7 +110,10 @@ class DatabaseManager:
         (INSERT/UPDATE/DELETE), prefer get_writable_connection() which
         commits on exit and rolls back on exception.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        if self.read_only:
+            conn = connect_readonly(self.db_path)
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row  # Access columns by name
         return closing(conn)
 
@@ -111,6 +124,8 @@ class DatabaseManager:
         Use this for any DML (INSERT/UPDATE/DELETE). On exception, the
         transaction is rolled back and the exception re-raised.
         """
+        if self.read_only:
+            raise RuntimeError(f"{self.db_path} was opened read-only")
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         try:
@@ -140,6 +155,8 @@ class DatabaseManager:
                     citsci_status TEXT NOT NULL DEFAULT 'citsci_pending',
                     expert_status TEXT NOT NULL DEFAULT 'expert_pending',
                     reporting_status TEXT NOT NULL DEFAULT 'reporting_pending',
+                    zoo_frames_status TEXT NOT NULL DEFAULT 'zoo_frames_pending',
+                    zoo_crops_status TEXT NOT NULL DEFAULT 'zoo_crops_pending',
                     is_bad_deployment BOOLEAN NOT NULL DEFAULT 0,
                     sampling_start INTEGER,
                     sampling_end INTEGER,
@@ -151,6 +168,8 @@ class DatabaseManager:
                     latitude REAL,
                     longitude REAL,
                     depth REAL,
+                    nzmhcs_abiotic TEXT,
+                    nzmhcs_biotic TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -173,6 +192,26 @@ class DatabaseManager:
             _add_column_if_missing(cursor, "deployments", "latitude", "REAL")
             _add_column_if_missing(cursor, "deployments", "longitude", "REAL")
             _add_column_if_missing(cursor, "deployments", "depth", "REAL")
+            # NZMHCS habitat classes, normalised at ingest to comma-joined
+            # canonical labels ("Sand, Platform/patch reef"). TEXT because a
+            # deployment legitimately records several classes.
+            _add_column_if_missing(cursor, "deployments", "nzmhcs_abiotic", "TEXT")
+            _add_column_if_missing(cursor, "deployments", "nzmhcs_biotic", "TEXT")
+            # Zooniverse validation sections (frames for recall, crops for
+            # precision). The constant default fills every existing row, so an
+            # old DB comes up with all drops pending, same as a fresh insert.
+            _add_column_if_missing(
+                cursor,
+                "deployments",
+                "zoo_frames_status",
+                "TEXT NOT NULL DEFAULT 'zoo_frames_pending'",
+            )
+            _add_column_if_missing(
+                cursor,
+                "deployments",
+                "zoo_crops_status",
+                "TEXT NOT NULL DEFAULT 'zoo_crops_pending'",
+            )
 
             # Idempotent rename of biigle_status → expert_status. The column
             # represents data-presence semantics (does this drop have expert
@@ -353,6 +392,8 @@ class DatabaseManager:
         latitude: Optional[float] = None,
         longitude: Optional[float] = None,
         depth: Optional[float] = None,
+        nzmhcs_abiotic: Optional[str] = None,
+        nzmhcs_biotic: Optional[str] = None,
     ) -> None:
         """Insert a deployment, or update its metadata if it already exists.
 
@@ -360,11 +401,12 @@ class DatabaseManager:
         reporting status columns (set by SQL defaults on insert only).
         UPDATE-on-conflict: ingest_status, video_path, video_presence,
         is_bad_deployment, sampling_start, sampling_end, biigle_volume_id,
-        latitude, longitude, depth.
+        latitude, longitude, depth, nzmhcs_abiotic, nzmhcs_biotic.
         Annotation counts (ml/citsci/expert) are owned by sync_annotation_counts.
 
-        latitude/longitude/depth are COALESCEd so a re-ingest from a CSV that has
-        blanked them does not erase a previously recorded position.
+        latitude/longitude/depth and the NZMHCS habitat fields are COALESCEd so
+        a re-ingest from a CSV that has blanked them does not erase a
+        previously recorded value.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -374,9 +416,10 @@ class DatabaseManager:
                     drop_id, video_path, video_presence,
                     ingest_status, ml_status,
                     is_bad_deployment, sampling_start, sampling_end,
-                    biigle_volume_id, latitude, longitude, depth
+                    biigle_volume_id, latitude, longitude, depth,
+                    nzmhcs_abiotic, nzmhcs_biotic
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(drop_id) DO UPDATE SET
                     video_path=excluded.video_path,
                     video_presence=excluded.video_presence,
@@ -387,7 +430,9 @@ class DatabaseManager:
                     biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id),
                     latitude=COALESCE(excluded.latitude, deployments.latitude),
                     longitude=COALESCE(excluded.longitude, deployments.longitude),
-                    depth=COALESCE(excluded.depth, deployments.depth)
+                    depth=COALESCE(excluded.depth, deployments.depth),
+                    nzmhcs_abiotic=COALESCE(excluded.nzmhcs_abiotic, deployments.nzmhcs_abiotic),
+                    nzmhcs_biotic=COALESCE(excluded.nzmhcs_biotic, deployments.nzmhcs_biotic)
                 """,
                 (
                     drop_id,
@@ -402,6 +447,8 @@ class DatabaseManager:
                     latitude,
                     longitude,
                     depth,
+                    nzmhcs_abiotic,
+                    nzmhcs_biotic,
                 ),
             )
             conn.commit()

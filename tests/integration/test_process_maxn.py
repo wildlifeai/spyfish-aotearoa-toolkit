@@ -39,6 +39,9 @@ def test_process_maxn_matches_ground_truth(pipeline_env):
     assert list(result["TimeOfMaxAbsSeconds"]) == list(expected["TimeOfMaxAbsSeconds"])
     assert list(result["ConfidenceAgreement"]) == list(expected["ConfidenceAgreement"])
     assert list(result["TimeOfMax"]) == list(expected["TimeOfMax"])
+    # Same AnnotatedBy as the DB; the model is its own column.
+    assert set(result["AnnotatedBy"]) == {"ml"}
+    assert set(result["ModelName"]) == {MODEL_NAME}
 
 
 def test_process_maxn_respects_confidence_threshold(pipeline_env):

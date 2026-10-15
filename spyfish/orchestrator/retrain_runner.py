@@ -9,7 +9,9 @@ This module coordinates the full flow:
 """
 
 import logging
+import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +32,7 @@ from spyfish.ml.training.prepare_training_data import (
     prune_unpinned_empty_classes,
 )
 from spyfish.ml.training.split_data import (
+    apply_frozen_test,
     balance_val_drops,
     force_train_drops_from_volumes,
     split_data,
@@ -65,30 +68,40 @@ def _archive_pipeline_model_dir() -> None:
 def _derive_promoted_filename(model_path: str, model_type: str) -> str:
     """Derive the promoted filename from the training run directory.
 
-    `train.py` writes best.pt to `runs/{timestamp}_{model_type}/weights/best.pt`,
-    so `best.pt.parent.parent.name` is `{timestamp}_{model_type}`, a unique,
-    human-readable identifier that already encodes when the model was trained.
+    `train.py` writes best.pt to `runs/{model_type}_{timestamp}/weights/best.pt`,
+    so `best.pt.parent.parent.name` is `{model_type}_{timestamp}`, a unique,
+    human-readable identifier that already encodes when the model was trained
+    and follows the model name standard (`validation_patterns.model_name`).
 
     We reuse that directly as the promoted filename so:
       - every promotion produces a distinct file name
       - archive collisions are effectively impossible
       - you can cross-reference `results.csv` in the training run dir for metrics
 
-    If the path doesn't match the expected structure (e.g. a caller passes a
-    hand-constructed path), fall back to `promoted_{model_type}.pt` and log.
+    If the path doesn't match the expected structure (a hand-constructed
+    path, or a run dir from before the standard), fall back to
+    `{model_type}_{now}` so the promoted name still follows the standard.
     """
     try:
-        run_dir_name = Path(model_path).parent.parent.name  # {timestamp}_{model_type}
+        run_dir_name = Path(model_path).parent.parent.name
         if run_dir_name and model_type in run_dir_name:
-            return f"{run_dir_name}.pt"
+            # Run dirs from before the standard were `{stamp}_{type}`; keep
+            # the training stamp and put the type first.
+            swapped = re.match(
+                r"^(20\d{6}(?:_\d{6})?)_([a-z][a-z0-9_]*)$", run_dir_name
+            )
+            if swapped:
+                run_dir_name = f"{swapped.group(2)}_{swapped.group(1)}"
+            return f"{config.validate_model_name(run_dir_name)}.pt"
     except Exception:
         pass
+    fallback = f"{model_type}_{datetime.now():%Y%m%d_%H%M%S}"
     logging.warning(
-        f"Could not derive training run name from {model_path!r}; "
-        f"using fallback filename 'promoted_{model_type}.pt', "
-        "note this will overwrite any prior fallback-named promotion."
+        f"Could not derive a standard model name from {model_path!r}; "
+        f"promoting as {fallback}.pt (stamped with the promotion time, not "
+        "the training time)."
     )
-    return f"promoted_{model_type}.pt"
+    return f"{config.validate_model_name(fallback)}.pt"
 
 
 def _promote_model_locally(model_path: str, model_type: str):
@@ -269,11 +282,15 @@ def run_retraining(
     # Without forcing, the splitter pulls ~val_pct of each group into val,
     # essential for species diversity in val when extras dominate the dataset.
     logging.info("Splitting data into train/val/test...")
+    # Frozen test drops never reach the splitter, so the val balancer can't
+    # count on them; apply_frozen_test below puts them in test either way.
+    frozen_test = config.training_test_drops
     if config.training_auto_balance_val:
         # Species-balanced val: pick whole drops so each multi-source species
         # hits ~val_balance_pct of its boxes (the suggester, inline). Decodes
         # labels via the in-memory species_names, no class_map.json drift.
-        candidate_drops = sorted(set(_trainable_drops) | set(extra_drops))
+        all_candidates = set(_trainable_drops) | set(extra_drops)
+        candidate_drops = sorted(all_candidates - frozen_test)
         train_drops, val_drops, test_drops = balance_val_drops(
             labels_staged_dir=labels_staged_dir,
             species_names=species_names,
@@ -295,6 +312,14 @@ def run_retraining(
             output_dir=local_training_dir,
             extra_drop_ids=list(extra_drops),
         )
+        all_candidates = set(train_drops) | set(val_drops) | set(test_drops)
+
+    train_drops, val_drops, test_drops = apply_frozen_test(
+        list(train_drops),
+        list(val_drops),
+        list(test_drops) + sorted(frozen_test & all_candidates),
+        frozen_test,
+    )
 
     if dry_run:
         # Fast path: write just the maps the suggester needs (the 59-class

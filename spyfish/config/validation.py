@@ -27,6 +27,37 @@ class ValidationConfig(BaseConfig):
         }
 
     @property
+    def model_name_pattern(self) -> str:
+        """`{type}_{YYYYMMDD}[_{HHMMSS}]`, see `validation_patterns.model_name`."""
+        return self.get_validation_pattern("model_name")
+
+    def model_name_stamp(self, model_name) -> "str | None":
+        """`YYYYMMDDHHMMSS` from a canonical model name, or None if it is not one.
+
+        A date-only name gets `000000` for the time, so stamps compare as
+        plain strings. This is the one place that reads the training stamp
+        out of a name; `model_recency_key` and `pipeline_model_path` both
+        call it rather than keeping their own regex.
+        """
+        if model_name is None:
+            return None
+        m = re.match(self.model_name_pattern, str(model_name))
+        if not m:
+            return None
+        return m.group(1) + (m.group(2) or "000000")
+
+    def validate_model_name(self, model_name: str) -> str:
+        """Raise unless `model_name` follows the standard; returns it unchanged."""
+        if self.model_name_stamp(model_name) is None:
+            raise ValueError(
+                f"Model name {model_name!r} does not follow the standard "
+                f"{{type}}_{{YYYYMMDD}}[_{{HHMMSS}}] (pattern {self.model_name_pattern}). "
+                "The weights file stem is the model name stored on every ML "
+                "annotation, so rename the file, e.g. species_20260822_192536.pt."
+            )
+        return model_name
+
+    @property
     def validation_rules(self) -> dict:
         return get_required(self._yaml_config, "validation_rules", "")
 

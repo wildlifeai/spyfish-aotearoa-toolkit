@@ -7,11 +7,11 @@ and the label maps, and copies of facts about an external dataset drift.
 
 Dataset shape (see ``claude_docs/uoa_design.md``):
 
-* **Expert annotations**, ``hold/Annotations_CLEANED_v2.csv``: one row per
+* **Expert annotations**, ``hold/uoa/Annotations_CLEANED_v2.csv``: one row per
   6-minute interval per deployment, with per-species ``<Species> MaxN``
   columns. Rows flagged ``unannotated=True`` are placeholders where no expert
   ever looked (kept distinct from "looked and saw none").
-* **ML detections**, per GoPro-chapter raw CSVs under ``hold/`` named
+* **ML detections**, per GoPro-chapter raw CSVs under ``hold/uoa/`` named
   ``{deployment}_v{chapter}_{model}_raw.csv``, holding every detection at
   confidence ≥ 0.15 (the inference floor).
 * **deployment_id** = ``SITE_HAB_YYYYMMDD_BUCKET_TREAT``
@@ -27,13 +27,13 @@ import streamlit as st
 
 # ── Locations ────────────────────────────────────────────────────────────────
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPERT_CSV = REPO_ROOT / "hold" / "Annotations_CLEANED_v2.csv"
-# Any *_raw.csv under hold/ is discovered (e.g. hold/20220118_raw/, future days).
-RAW_ROOT = REPO_ROOT / "hold"
+REPO_ROOT = Path(__file__).resolve().parents[2]  # in_progress/uoa/data.py -> repo root
+EXPERT_CSV = REPO_ROOT / "hold" / "uoa" / "Annotations_CLEANED_v2.csv"
+# Any *_raw.csv under hold/uoa/ is discovered (e.g. 20220118_raw/, future days).
+RAW_ROOT = REPO_ROOT / "hold" / "uoa"
 # Per-deployment MaxN frames + manifest, rendered on NeSI by
 # render_deployment_maxn_frames.py and scp'd here.
-FRAMES_ROOT = REPO_ROOT / "hold" / "uoa_frames"
+FRAMES_ROOT = REPO_ROOT / "hold" / "uoa" / "uoa_frames"
 
 RAW_FILENAME_RE = re.compile(r"^(?P<dep>.+)_v(?P<chap>\d+)_(?P<model>.+)_raw\.csv$")
 
@@ -192,6 +192,40 @@ def load_ml_raw() -> tuple[dict, dict]:
 # ── Window / peak computations ───────────────────────────────────────────────
 
 
+def window_segments(chapter: int, start_sec: float) -> list[tuple[int, float, float]]:
+    """The (chapter, start, end) pieces of one 6-min window.
+
+    One piece, or two when the window overruns CHAPTER_SEC and spills into the
+    next chapter. Shared by `maxn_in_window` and `window_coverage` so the count
+    and its coverage always describe the same seconds.
+    """
+    end_sec = start_sec + INTERVAL_SEC
+    if end_sec <= CHAPTER_SEC:
+        return [(chapter, start_sec, end_sec)]
+    return [
+        (chapter, start_sec, CHAPTER_SEC),
+        (chapter + 1, 0.0, end_sec - CHAPTER_SEC),
+    ]
+
+
+def window_coverage(
+    raw_by_key: dict, deployment_id: str, chapter: int, start_sec: float
+) -> float:
+    """Share of the 6-min window (0-1) whose chapter has an ML raw CSV.
+
+    `maxn_in_window` reads a missing chapter as zero detections, so without
+    this an interval ML never ran on looks exactly like one where ML saw no
+    fish. Typical cause: the spill into a next chapter that was not
+    processed, or a recording that ended mid-window.
+    """
+    covered = sum(
+        w_end - w_start
+        for chap, w_start, w_end in window_segments(chapter, start_sec)
+        if (deployment_id, chap) in raw_by_key
+    )
+    return covered / INTERVAL_SEC
+
+
 def maxn_in_window(
     raw_by_key: dict,
     deployment_id: str,
@@ -204,18 +238,11 @@ def maxn_in_window(
 
     Spills into the next chapter when the window overruns CHAPTER_SEC. If
     class_name is given, counts only that class; otherwise counts all classes
-    (fish-any). Returns 0 if the chapter(s) have no raw CSV.
+    (fish-any). Returns 0 if the chapter(s) have no raw CSV: see
+    `window_coverage` for telling that apart from a real zero.
     """
-    end_sec = start_sec + INTERVAL_SEC
-    segments = []
-    if end_sec <= CHAPTER_SEC:
-        segments.append((chapter, start_sec, end_sec))
-    else:
-        segments.append((chapter, start_sec, CHAPTER_SEC))
-        segments.append((chapter + 1, 0.0, end_sec - CHAPTER_SEC))
-
     peak = 0
-    for chap, w_start, w_end in segments:
+    for chap, w_start, w_end in window_segments(chapter, start_sec):
         df = raw_by_key.get((deployment_id, chap))
         if df is None or df.empty:
             continue

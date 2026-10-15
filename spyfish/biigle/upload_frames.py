@@ -694,7 +694,8 @@ def upload_frames_to_biigle(
         project_id: Biigle project ID. Defaults to config.biigle_project_id.
 
     Returns:
-        Biigle volume info dict (contains 'id', 'name', etc.)
+        Biigle volume info dict (contains 'id', 'name', etc.). Frames with no
+        ML boxes (a drop the model found nothing in) are uploaded too.
     """
     logging.info(f"Starting Biigle upload for drop {drop_id}")
 
@@ -712,11 +713,12 @@ def upload_frames_to_biigle(
     with open(coco_json_path) as f:
         coco = json.load(f)
     if not coco.get("annotations"):
-        logging.error(
-            f"COCO annotations for {drop_id} have 0 annotations, "
-            "no ML detections to review. Skipping Biigle upload."
+        # Still uploaded: the frames are blind ones, and an expert looking at
+        # them is how a drop the model found nothing in gets checked at all.
+        logging.info(
+            f"{drop_id}: no ML boxes on the selected frames; uploading them for "
+            "the expert to check for missed fish."
         )
-        return None
 
     # Step 1: Upload frames to S3
     file_names = upload_frames_to_s3(frames_df, s3_prefix)
@@ -753,11 +755,11 @@ def upload_frames_to_biigle(
 
 def upload_frames_to_expert_survey_volume(
     drop_id: str, frames_df: pd.DataFrame
-) -> Optional[dict]:
+) -> dict:
     """Expert-review upload pooled into ONE Biigle volume per survey.
 
-    Same contract as `upload_frames_to_biigle` (None when the COCO holds no
-    annotations, else a dict with 'id'), but every drop of a survey lands in
+    Same contract as `upload_frames_to_biigle` (a dict with 'id'; frames with
+    no ML boxes are uploaded too), but every drop of a survey lands in
     a shared volume named for the survey, so the expert reviews a survey in
     one place instead of jumping volume to volume.
 
@@ -777,11 +779,12 @@ def upload_frames_to_expert_survey_volume(
     with open(coco_json_path) as f:
         coco = json.load(f)
     if not coco.get("annotations"):
-        logging.error(
-            f"COCO annotations for {drop_id} have 0 annotations, "
-            "no ML detections to review. Skipping Biigle upload."
+        # Still uploaded: the frames are blind ones, and an expert looking at
+        # them is how a drop the model found nothing in gets checked at all.
+        logging.info(
+            f"{drop_id}: no ML boxes on the selected frames; uploading them for "
+            "the expert to check for missed fish."
         )
-        return None
 
     s3_prefix = f"{config.s3_deployment_data_dir}/{survey_id}/"
     file_names = upload_frames_to_s3(

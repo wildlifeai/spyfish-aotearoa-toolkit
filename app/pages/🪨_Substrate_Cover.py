@@ -51,7 +51,7 @@ volume_id_str = st.text_input(
 with st.form("substrate_form"):
     email = st.text_input(
         "Biigle Email",
-        value=config.email or "",
+        value="",
         placeholder="you@example.com",
         help="The email you use to sign in to Biigle.",
     ).strip()
@@ -61,7 +61,7 @@ with st.form("substrate_form"):
         placeholder="Paste your token…",
         help=(
             "Find your token at https://biigle.de/settings/tokens.  \n"
-            "Treat this like a password. You can also set BIIGLE_API_TOKEN in your .env file."
+            "Treat this like a password."
         ),
     ).strip()
     submitted = st.form_submit_button("Measure substrate cover", type="primary")

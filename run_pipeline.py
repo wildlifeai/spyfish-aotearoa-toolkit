@@ -21,6 +21,12 @@ Admin / maintenance (always explicit — never run by default):
     --legacy-zooniverse  Historical backfill: legacy Zooniverse classifications
     --db-refresh         Reconcile DB status with on-disk + API state
 
+Zooniverse validation (opt-in for now, public uploads; drops chosen by priority):
+
+    --zooniverse-frames  Picked frames, every ML box drawn → vframes_{drop} (recall)
+    --zooniverse-crops   One crop per ML box in those frames → crops_{drop} (precision)
+                         Add --dry-run to render and stop, nothing uploaded.
+
 Typical cron pattern:
     python run_pipeline.py --ingest   # load new metadata first
     python run_pipeline.py            # then process the funnel
@@ -43,7 +49,13 @@ from spyfish.biigle.upload_frames import (
     upload_frames_to_biigle,
     upload_frames_to_expert_survey_volume,
 )
-from spyfish.config.base import CitSciStatus, ExpertStatus, MlStatus
+from spyfish.config.base import (
+    CitSciStatus,
+    ExpertStatus,
+    MlStatus,
+    ZooCropsStatus,
+    ZooFramesStatus,
+)
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.extract_clips import extract_clips_from_selections
@@ -64,6 +76,10 @@ from spyfish.storage.db_sync import sync_pipeline_results
 from spyfish.zooniverse.legacy_extract import run_legacy_zooniverse_backfill
 from spyfish.zooniverse.select_zooniverse_clips import process_zooniverse_clips
 from spyfish.zooniverse.upload import upload_clips_to_zooniverse
+from spyfish.zooniverse.validation_frames import (
+    run_validation_crops_drop,
+    run_validation_frames_drop,
+)
 
 # ---------------------------------------------------------------------------
 # Global stage functions — run once, manage their own iteration internally
@@ -222,31 +238,43 @@ def _run_biigle_upload_drop(drop_id: str, survey_volume: bool = False) -> str | 
         and deployment.get("citsci_status") == CitSciStatus.COMPLETE
     )
 
-    # ValueError → "input is empty by design" (volunteers said NOTHINGHERE,
-    #              or ML found nothing). Nothing for the expert to review →
-    #              advance to expert_skipped so the drop exits the queue.
-    # FileNotFoundError → artifact missing despite the upstream status saying
-    #              it should exist. That's a state inconsistency, not a
-    #              "nothing to review" case → re-raise and let StageRunner
-    #              mark expert_error so it's visible.
-    try:
-        if use_zooniverse:
-            logging.info(
-                f"{drop_id}: citsci_complete — selecting frames from Zooniverse volunteer consensus."
-            )
+    # Every drop that reaches this stage gets frames: an expert looking at the
+    # blind ones is the only check on a drop where nobody (model or
+    # volunteers) saw anything. So there is no skip here any more:
+    #   - the model saw nothing → select_frames returns blind frames only;
+    #   - volunteers saw nothing (empty Zooniverse MaxN) → ML selection, see TODO;
+    #   - no sampling window, or no raw CSV for the ML path → not ready yet:
+    #     return None so the drop stays expert_pending and is retried.
+    if deployment is None or None in (
+        deployment.get("sampling_start"),
+        deployment.get("sampling_end"),
+    ):
+        logging.warning(f"{drop_id}: no sampling window yet; leaving expert_pending.")
+        return None
+    if use_zooniverse:
+        logging.info(
+            f"{drop_id}: citsci_complete — selecting frames from Zooniverse volunteer consensus."
+        )
+        try:
             select_frames_from_zooniverse(
                 str(config.get_zooniverse_maxn_csv_path(drop_id)),
                 str(biigle_selections_path),
                 drop_id,
                 ml_raw_csv_path=ml_raw_csv,
             )
-        else:
-            select_frames(raw_csv, str(biigle_selections_path), drop_id)
-    except ValueError as e:
-        logging.info(
-            f"{drop_id}: no detections to review ({e}) — marking expert_skipped."
-        )
-        return ExpertStatus.SKIPPED
+        except ValueError as e:
+            # TODO: decide what an all-"nothing here" citsci drop should send the
+            # expert, once there is citsci data to look at. ML peaks + blind
+            # frames for now; blind only, or a citsci-specific check (clips the
+            # volunteers flagged as unclear), may turn out to be the better
+            # second opinion. See claude_docs/todo.md.
+            logging.info(f"{drop_id}: {e} Falling back to the ML selection.")
+            use_zooniverse = False
+    if not use_zooniverse:
+        if not Path(raw_csv).exists():
+            logging.warning(f"{drop_id}: no ML raw CSV yet; leaving expert_pending.")
+            return None
+        select_frames(raw_csv, str(biigle_selections_path), drop_id)
 
     # Zooniverse-selected timestamps don't align with ML raw CSV detections,
     # so on that path we skip the COCO write here and let the rerun-inference
@@ -268,15 +296,6 @@ def _run_biigle_upload_drop(drop_id: str, survey_volume: bool = False) -> str | 
         volume_info = upload_frames_to_expert_survey_volume(drop_id, frames_df)
     else:
         volume_info = upload_frames_to_biigle(drop_id=drop_id, frames_df=frames_df)
-    if volume_info is None:
-        # upload_frames_to_biigle returns None when the COCO has zero
-        # annotations — no boxes for experts to correct. Skip cleanly
-        # rather than leave the drop stuck at expert_pending.
-        logging.info(
-            f"{drop_id}: BIIGLE upload skipped (no annotations in COCO) — "
-            "marking expert_skipped."
-        )
-        return ExpertStatus.SKIPPED
     logging.info(f"Biigle volume created for {drop_id}: id={volume_info.get('id')}")
     return ExpertStatus.UPLOADED
 
@@ -377,6 +396,27 @@ STAGES: list = [
         prerequisites=_biigle_prerequisites,
     ),
     GlobalStage("biigle-sync", "Biigle annotation sync", _run_biigle_sync),
+    # ── Zooniverse validation — opt-in until the pipeline runs routinely ────
+    # Public uploads, so never part of a plain run (see claude_docs/todo.md).
+    # ERROR drops are re-selected: the upload is idempotent per subject set.
+    DropStage(
+        "zooniverse-frames",
+        "Zooniverse validation frames (every ML box drawn, missed-fish check)",
+        run_validation_frames_drop,
+        section=ZooFramesStatus.COLUMN,
+        input_statuses=[ZooFramesStatus.PENDING, ZooFramesStatus.ERROR],
+        prerequisites={MlStatus.COLUMN: MlStatus.COMPLETE},
+        run_in_all=False,
+    ),
+    DropStage(
+        "zooniverse-crops",
+        "Zooniverse validation crops (one per ML box, species check)",
+        run_validation_crops_drop,
+        section=ZooCropsStatus.COLUMN,
+        input_statuses=[ZooCropsStatus.PENDING, ZooCropsStatus.ERROR],
+        prerequisites={MlStatus.COLUMN: MlStatus.COMPLETE},
+        run_in_all=False,
+    ),
     GlobalStage(
         "retrain",
         "Model retraining (run --biigle-sync first)",
@@ -414,9 +454,12 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="On --retrain --data-prep, run the fast part (flatten + maps + "
-        "split summary) and stop before the slow assembly. Produces the maps "
-        "scripts/wip/suggest_val_drops.py needs to plan the val split.",
+        help="Do the safe part and stop before the slow or permanent one. "
+        "On --retrain --data-prep: the fast part (flatten + maps + split "
+        "summary), stopping before the slow assembly; produces the maps "
+        "scripts/wip/suggest_val_drops.py needs to plan the val split. "
+        "On --zooniverse-frames / --zooniverse-crops: select and render, "
+        "write the manifest, then stop. Nothing uploaded, status unchanged.",
     )
     parser.add_argument(
         "--force",
@@ -435,7 +478,8 @@ def main() -> None:
         "run inference on every ml_ready drop in this survey (bypasses "
         "limit_processing; drops still awaiting video confirmation are "
         "reported, run --check-arrivals first to advance them). On drop "
-        "stages (--zooniverse-clips, --biigle-upload): only this survey's "
+        "stages (--zooniverse-clips, --zooniverse-frames, --zooniverse-crops, "
+        "--biigle-upload): only this survey's "
         "eligible drops are processed.",
     )
     parser.add_argument(
@@ -475,6 +519,8 @@ def main() -> None:
                 s,
                 fn=functools.partial(_run_biigle_upload_drop, survey_volume=True),
             )
+        if args.dry_run and s.flag in ("zooniverse-frames", "zooniverse-crops"):
+            return replace(s, fn=functools.partial(s.fn, dry_run=True))
         if s.flag == "zooniverse-sync":
             return replace(
                 s, fn=functools.partial(_run_zooniverse_sync, force=args.force)

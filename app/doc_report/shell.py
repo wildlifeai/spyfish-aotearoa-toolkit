@@ -12,10 +12,16 @@ looks like a view reporting nothing.
 import sqlite3
 from dataclasses import dataclass
 
+import pandas as pd
 import plotly.express as px
 import streamlit as st
-from theme import protection_sort_key
-from utils import sync_db_if_needed
+from theme import (
+    HEADER_BG_FALLBACK,
+    HEADER_SHADOW,
+    SINGLE_SERIES,
+    protection_sort_key,
+)
+from utils import ensure_databases, stop_missing_database
 
 from . import (
     annotations,
@@ -120,11 +126,13 @@ NOT_BUILT = {
 # Query-param names are short and singular because they are typed and read by
 # people: `?reserve=X&reserve=Y&years=2018-2024`.
 #
-# No shared species filter for now: the MPA populations panel carries its own
-# species picker, which matters more, and two species controls fighting each
-# other was worse than one. The plumbing for it (a registry entry here, its
-# options in `build_context`, `ctx["species"]`, the panel passthrough) is
-# ready for the day it comes back.
+# The species filter is shared, in the sidebar with everything else. It
+# narrows the ANNOTATION rows only (`report_data.build_context` keeps the
+# deployment and effort frames whole, with `annotations_all_species` as the
+# denominator frame), so species-level charts follow it while effort counts
+# do not shrink. Views with a structurally single-species control (the MPA
+# populations map, Species search) keep that control, but its options follow
+# this filter.
 @dataclass(frozen=True)
 class FilterSpec:
     state_key: str
@@ -144,6 +152,7 @@ FILTERS = {
     "protections": FilterSpec(
         "report_protections", "_w_protections", "protection", "Protection status"
     ),
+    "species": FilterSpec("report_species", "_w_species", "species", "Species"),
     "source": FilterSpec("report_source", "_w_source", "source", "Source", "select"),
 }
 
@@ -158,6 +167,12 @@ def _reset_filters() -> None:
     """Drop every filter key so the next run seeds them from the data again."""
     for key in FILTER_KEYS:
         st.session_state.pop(key, None)
+    # The species filter renders as several widgets (indicator checkboxes +
+    # the "Other species" multiselect), all keyed under this prefix.
+    for key in [k for k in st.session_state if str(k).startswith("_w_species")]:
+        st.session_state.pop(key, None)
+    st.session_state.pop("_w_exclude_bad", None)
+    st.session_state.pop("report_exclude_bad", None)
     for spec in FILTERS.values():
         if spec.qp in st.query_params:
             del st.query_params[spec.qp]
@@ -172,7 +187,7 @@ def _adopt_url_filters() -> None:
 
     An absent param is no opinion, not a reset. Streamlit strips the query
     string every time the nav switches page, so an empty URL must never clear
-    a live selection — that is also why adoption cannot simply run every time.
+    a live selection, that is also why adoption cannot simply run every time.
     """
     if st.session_state.get("_url_filters_adopted"):
         return
@@ -245,11 +260,26 @@ def _prune_multi(spec: FilterSpec, options: list) -> None:
     Option lists follow the other filters ("hide what does not exist"), so a
     value picked earlier can drop out of the list; left in the widget key it
     would make the multiselect raise. Pruning before the widget is built is
-    safe — assigning to a widget key only raises after its widget exists in
+    safe, assigning to a widget key only raises after its widget exists in
     the current run.
     """
-    current = st.session_state.get(spec.widget_key, st.session_state[spec.state_key])
-    st.session_state[spec.widget_key] = [v for v in current if v in options]
+    if spec.widget_key in st.session_state:
+        # Already seeded this session: only rewrite when an option actually
+        # dropped out. Reassigning a widget's own key on EVERY run is what made
+        # the multiselect feel laggy — it forces a frontend↔backend resync each
+        # rerun, so a click landing during that window was swallowed and the
+        # value took a second click to stick. Leave it untouched when nothing
+        # needs pruning.
+        current = list(st.session_state[spec.widget_key])
+        pruned = [v for v in current if v in options]
+        if pruned != current:
+            st.session_state[spec.widget_key] = pruned
+    else:
+        # First render this session: seed from the persisted state key (which
+        # survives page switches, when the widget key does not).
+        st.session_state[spec.widget_key] = [
+            v for v in st.session_state[spec.state_key] if v in options
+        ]
 
 
 def _multi_filter(spec: FilterSpec, options: list, **kwargs) -> list:
@@ -272,28 +302,12 @@ def build_context() -> dict:
     Two views filtering separately would disagree about how many deployments
     exist, with both totals on screen at once.
     """
-    # Sync BEFORE any reader runs, so a fresh deploy pulls the databases from
-    # S3 first. The readers open SQLite read-only, so if the databases are
-    # still absent they raise rather than creating empty files, an empty
-    # file's fresh mtime would make db_sync skip the S3 download forever.
-    if not sync_db_if_needed():
-        # Do not cache an S3 failure for the TTL, clear so the next run
-        # retries, and say what happened instead of silently showing stale data.
-        sync_db_if_needed.clear()
-        st.warning(
-            "Could not check S3 for a newer database, showing whatever local "
-            "data exists. Check AWS credentials in `.env` if this persists."
-        )
+    ensure_databases()
     try:
         deployments = report_data.load_deployments()
         annotations = report_data.load_annotations()
     except sqlite3.OperationalError:
-        st.error(
-            "No local database found, and it could not be downloaded from S3. "
-            "Check the AWS credentials in `.env`, then click **Refresh Cache** "
-            "in the sidebar, or run the pipeline once on this machine."
-        )
-        st.stop()
+        stop_missing_database()
 
     _sidebar_css()
 
@@ -302,7 +316,17 @@ def build_context() -> dict:
     # and switching page means exactly that, so reading the widget key back
     # would reset every filter on every navigation. These keys are never
     # attached to a widget, so nothing clears them.
+    # Legacy-workbook annotations can reference drops with no deployment or
+    # survey record in SharePoint. Off by default: the report then shows only
+    # registered deployments; switching it on widens the year bounds to the
+    # annotation years (legacy surveys reach back to 1998 — Poor Knights).
+    st.session_state.setdefault("report_include_historical", False)
+    include_historical = st.session_state.get(
+        "_w_hist", st.session_state["report_include_historical"]
+    )
     dated = deployments["survey_year"].dropna()
+    if include_historical:
+        dated = pd.concat([dated, annotations["survey_year"].dropna()])
     bounds = (int(dated.min()), int(dated.max())) if not dated.empty else None
     st.session_state.setdefault("report_years", bounds)
     for spec in _MULTI.values():
@@ -328,6 +352,25 @@ def build_context() -> dict:
             max(bounds[0], min(stored[0], bounds[1])),
             max(bounds[0], min(stored[1], bounds[1])),
         )
+    # The bounds can move AFTER the slider was seeded: ticking "Include drops
+    # not in SharePoint" adds the legacy annotation years (back to 1998).
+    # Streamlit then moves the slider's rails but not its handles, so the
+    # widget key still held the old selection and the newly admitted years
+    # stayed filtered out until someone dragged. A handle that was resting
+    # on the old rail follows the rail; a handle the reader had moved stays
+    # where they put it, clamped into the new range.
+    prev_bounds = st.session_state.get("report_year_bounds")
+    if (
+        bounds
+        and prev_bounds
+        and tuple(prev_bounds) != tuple(bounds)
+        and "_w_years" in st.session_state
+    ):
+        lo, hi = st.session_state["_w_years"]
+        lo = bounds[0] if lo == prev_bounds[0] else max(bounds[0], min(lo, bounds[1]))
+        hi = bounds[1] if hi == prev_bounds[1] else max(bounds[0], min(hi, bounds[1]))
+        st.session_state["_w_years"] = (lo, hi)
+    st.session_state["report_year_bounds"] = bounds
 
     # Option lists follow the other filters, so a picker only offers values
     # that exist under the current selection ("hide what does not exist").
@@ -370,21 +413,8 @@ def build_context() -> dict:
             "Filters apply to every Reporting and Operations view and stick "
             "between views."
         )
-        reserves = _multi_filter(
-            FILTERS["reserves"],
-            reserve_options,
-            help="Marine protected area, from the site's "
-            "`link_to_marine_reserve`. A site between two areas is "
-            "counted under both.",
-            placeholder="All reserves",
-        )
-        if reserves:
-            dep_scope = dep_scope[
-                report_data.matches_reserves(
-                    dep_scope["link_to_marine_reserve"], reserves
-                )
-            ]
 
+        # Survey year first: it is the filter most readers reach for.
         year_range = st.session_state["report_years"]
         if bounds and bounds[0] < bounds[1]:
             year_range = st.slider(
@@ -406,11 +436,26 @@ def build_context() -> dict:
             st.caption(f"Survey year: {only}")
         st.session_state["report_years"] = year_range
 
+        reserves = _multi_filter(
+            FILTERS["reserves"],
+            reserve_options,
+            help="Marine protected area, from the site's "
+            "`link_to_marine_reserve`. A site between two areas is "
+            "counted under both.",
+            placeholder="All MPAs",
+        )
+        if reserves:
+            dep_scope = dep_scope[
+                report_data.matches_reserves(
+                    dep_scope["link_to_marine_reserve"], reserves
+                )
+            ]
+
         # A plain container, not a nested expander (Streamlit forbids those):
         # everything sits in the one Filters expander.
         with st.container():
             # The annotations in scope under the other filters, for the
-            # source picker's coverage counts below.
+            # source picker's coverage counts and the species options below.
             ann_scope = in_years(annotations)
             if reserves:
                 ann_scope = ann_scope[
@@ -425,11 +470,6 @@ def build_context() -> dict:
             if stored_prot:
                 ann_scope = ann_scope[ann_scope["protection_status"].isin(stored_prot)]
 
-            regions = _multi_filter(
-                FILTERS["regions"],
-                sorted(r for r in dep_scope["region"].dropna().unique() if r),
-                placeholder="All regions",
-            )
             protections = _multi_filter(
                 FILTERS["protections"],
                 sorted(
@@ -438,6 +478,41 @@ def build_context() -> dict:
                 ),
                 placeholder="All statuses",
             )
+            regions = _multi_filter(
+                FILTERS["regions"],
+                sorted(r for r in dep_scope["region"].dropna().unique() if r),
+                placeholder="All regions",
+            )
+
+            # Next to Source because the two answer the same kind of question
+            # (what data feeds the numbers), not where the data is from.
+            if "_w_hist" not in st.session_state:
+                st.session_state["_w_hist"] = st.session_state[
+                    "report_include_historical"
+                ]
+            exclude_bad = st.checkbox(
+                "Exclude bad deployments",
+                key="_w_exclude_bad",
+                help="Deployments flagged `IsBadDeployment` in PowerApps "
+                "(camera over, bait gone, visibility hopeless). Off by "
+                "default because the flag is not reliable: 41 flagged "
+                "deployments carry about 3,000 annotation rows, most of "
+                "them full expert reviews, so somebody watched that "
+                "footage and got data out of it. Tick to leave them out of "
+                "every species statistic; they stay in the coverage and "
+                "pipeline counts either way.",
+            )
+            st.session_state["report_exclude_bad"] = exclude_bad
+            include_historical = st.checkbox(
+                "Include drops not in SharePoint",
+                key="_w_hist",
+                help="Annotations whose DropID has no deployment or survey "
+                "record in SharePoint (mostly legacy Excel imports). Ticking "
+                "this counts them as deployments too, labelled 'no "
+                "SharePoint record' in status splits, and extends the year "
+                "range back to the earliest such survey.",
+            )
+            st.session_state["report_include_historical"] = include_historical
 
             # Deployment counts in the labels, as the Experiments page does: an
             # empty chart is otherwise a mystery, when the answer is simply
@@ -480,6 +555,58 @@ def build_context() -> dict:
             )
             st.session_state["report_source"] = source
 
+            # ── Species, at the bottom: the three indicator species as
+            # one-click checkboxes, everything else behind a multiselect.
+            # The canonical selection lives in `report_species` (checked
+            # indicators + multiselect picks), so URL mirroring, the active
+            # count and `build_context` see one plain list.
+            # Real species only in the options: the generic detections
+            # (fish, bait) and the unidentified bucket are not species
+            # anyone would filter TO.
+            species_options = sorted(
+                report_data.real_species(ann_scope)["display_name"].dropna().unique()
+            )
+            from spyfish.config.wrapper import config as _config
+
+            indicator_names = [
+                d
+                for sci in _config.indicator_species
+                for d in species_options
+                if sci in d
+            ]
+            stored_species = st.session_state["report_species"]
+            st.markdown("**Species**")
+            st.caption(
+                "Narrows the species-level charts on every view; deployment "
+                "and effort counts stay whole. Nothing ticked = all species, "
+                "with snapper as the single-species default."
+            )
+            picked_indicators = []
+            for i, name in enumerate(indicator_names):
+                key = f"_w_species_ind_{i}"
+                if key not in st.session_state:
+                    st.session_state[key] = name in stored_species
+                # Short label ("Snapper"), full name in the help: three
+                # checkboxes of binomials would eat the sidebar width.
+                if st.checkbox(name.split(" (")[0], key=key, help=name):
+                    picked_indicators.append(name)
+            other_options = [o for o in species_options if o not in indicator_names]
+            current_other = st.session_state.get(
+                "_w_species_other",
+                [s for s in stored_species if s not in indicator_names],
+            )
+            st.session_state["_w_species_other"] = [
+                v for v in current_other if v in other_options
+            ]
+            other_picked = st.multiselect(
+                "Other species",
+                other_options,
+                key="_w_species_other",
+                placeholder="All species",
+            )
+            species = picked_indicators + other_picked
+            st.session_state["report_species"] = species
+
             # Deleting the keys rather than assigning defaults to them:
             # assigning to a widget key after its widget has been created in
             # this run raises, and `build_context` re-seeds whatever is missing
@@ -497,6 +624,7 @@ def build_context() -> dict:
         "reserves": reserves,
         "regions": regions,
         "protections": protections,
+        "species": species,
         "source": source,
     }
     _mirror_filters_to_url(selected, bounds)
@@ -511,8 +639,11 @@ def build_context() -> dict:
         reserves,
         ingested_only=False,
         source=source,
+        species=species,
         regions=regions,
         protections=protections,
+        include_historical=include_historical,
+        exclude_bad_deployments=exclude_bad,
     )
 
 
@@ -534,9 +665,9 @@ def _sticky_header_css() -> None:
     default and the charts would scroll visibly underneath.
     """
     st.markdown(
-        """
+        f"""
         <style>
-          div[data-testid="stLayoutWrapper"]:has(> .st-key-report_header) {
+          div[data-testid="stLayoutWrapper"]:has(> .st-key-report_header) {{
             position: sticky;
             /* Streamlit's own toolbar is 60px tall and sits OVER the page, so
                pinning at 0 parks the header underneath it and only a sliver
@@ -544,27 +675,27 @@ def _sticky_header_css() -> None:
                3.75rem is that same 60px for older versions. */
             top: var(--header-height, 3.75rem);
             z-index: 100;
-            background: var(--background-color, #FFFFFF);
+            background: var(--background-color, {HEADER_BG_FALLBACK});
             padding-top: .25rem;
-            box-shadow: 0 8px 10px -10px rgba(20, 35, 60, .5);
-          }
+            box-shadow: 0 8px 10px -10px {HEADER_SHADOW};
+          }}
           /* Streamlit's default gap would show the page through the header.
              The band holds up to three rows, shared filters, a view's own
              filters, the chip strip, so they are pulled tight against each
              other, and the bottom padding keeps the last of them off the
              header's own edge. */
-          .st-key-report_header {
+          .st-key-report_header {{
             background: inherit;
             gap: .1rem;
-          }
+          }}
           /* Clear air under the last row of the band. On the WRAPPER, not on
              the container inside it: padding on the inner block sat inside the
              sticky box without lengthening what the page flows around, so on a
-             view with no chips — Report home — the first line of text was laid
+             view with no chips, Report home, the first line of text was laid
              out 12px under the header and disappeared behind it. */
-          div[data-testid="stLayoutWrapper"]:has(> .st-key-report_header) {
+          div[data-testid="stLayoutWrapper"]:has(> .st-key-report_header) {{
             padding-bottom: 1.4rem;
-          }
+          }}
           /* The header-measuring iframe (`layout.measure_header`) is
              zero-height but still a block, so it would take a full block gap
              out of every page for nothing. Out of flow rather than hidden: a
@@ -572,11 +703,11 @@ def _sticky_header_css() -> None:
              what publishes the height the anchors depend on. Here rather than
              in the chip stylesheet, because every view measures, and only some
              have chips. */
-          [data-testid="stElementContainer"]:has(> [data-testid="stIFrame"]) {
+          [data-testid="stElementContainer"]:has(> [data-testid="stIFrame"]) {{
             position: absolute;
             height: 0;
             visibility: hidden;
-          }
+          }}
 
           /* ── Page density ────────────────────────────────────────────────
              Streamlit's defaults are set for a page of prose: 96px of padding
@@ -585,7 +716,7 @@ def _sticky_header_css() -> None:
              and those defaults pushed the second chart of every view below the
              fold. The header is sticky, so nothing is lost by starting the
              page closer to the top. */
-          [data-testid="stMainBlockContainer"] {
+          [data-testid="stMainBlockContainer"] {{
             /* Exactly the sticky offset, and not a pixel less. A sticky element
                whose natural position is ABOVE its `top` is pushed down to it,
                and the push is visual only: the page below keeps flowing from
@@ -595,20 +726,20 @@ def _sticky_header_css() -> None:
                so nothing is ever underneath it. */
             padding-top: var(--header-height, 3.75rem);
             padding-bottom: 2rem;
-          }
-          [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] {
+          }}
+          [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] {{
             gap: .5rem;
-          }
+          }}
           /* Dividers separate sections; at Streamlit's default margins they
              cost more height than the section headings they sit above. */
-          [data-testid="stMainBlockContainer"] hr {
+          [data-testid="stMainBlockContainer"] hr {{
             margin: .35rem 0;
-          }
+          }}
           [data-testid="stMainBlockContainer"]
-            [data-testid="stHeadingWithActionElements"] {
+            [data-testid="stHeadingWithActionElements"] {{
             padding-top: .2rem;
             padding-bottom: 0;
-          }
+          }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -693,11 +824,14 @@ def render_home(ctx: dict) -> None:
     """
     st.subheader("How to use it")
     st.markdown(
-        "BUV survey results from the marine reserves, for MPA reporting. "
+        "BUV survey results from the marine protected areas, for MPA reporting. "
         "The sidebar filters (year, MPA and more) apply to every view and "
         "stick between views. Each section below covers one topic; the "
         "chips at the top of a view link to its parts. Pipeline state is in "
-        "the Operations section."
+        "the Operations section. Counts throughout are **MaxN**, the most "
+        "individuals of a species visible at the same moment in the video "
+        "(the peak count): the standard measure for baited video, and it "
+        "never double-counts a fish that leaves and returns."
     )
     st.caption(
         "Any feedback, issues, or something you want to see on this page? "
@@ -729,6 +863,11 @@ def render_home(ctx: dict) -> None:
 
     dep = ctx["deployments"]
     ann = ctx["annotations"]
+    # KPIs that describe the whole community (species counts, richness) read
+    # the species-UNfiltered frame: ticking snapper in the sidebar must not
+    # turn "Species recorded" into 1. The charts below keep `ann`, which is
+    # the filter doing its job.
+    ann_all = ctx["annotations_all_species"]
     dated = dep[dep["survey_year"].notna()]
 
     reserves = report_data.split_reserves(dep["link_to_marine_reserve"])
@@ -740,35 +879,62 @@ def render_home(ctx: dict) -> None:
     # protected.
     from ecology_data import PROTECTED, UNPROTECTED, protection_group
 
-    protection_means = {}
-    protection_counts = {}
+    protection_effect: dict = {}
+    per_dep = None
+    per_species_all = None
     if not ann.empty:
         per_species = report_data.species_maxn(ann)
-        # survey_year and site_id ride along for the base charts further down,
-        # which reuse this frame.
+        # survey_year, site_id and reserve_code ride along for the base charts
+        # further down, which reuse this frame.
         meta = ann[
-            ["drop_id", "protection_status", "survey_year", "site_id"]
+            ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
         ].drop_duplicates("drop_id")
         per_species = per_species.merge(meta, on="drop_id", how="left")
         per_species["Group"] = protection_group(per_species["protection_status"])
+    if not ann_all.empty:
         # Richness, not summed MaxN: adding a snapper to a school of sweep
         # gives a number with no meaning (the MPA view says as much), so the
-        # headline compares species per deployment instead. `real_species`
-        # drops the generic and unidentified classes — a deployment carrying
-        # only those says nothing about richness and leaves the mean — while
-        # absence records (null species) keep theirs in at zero, since
-        # `nunique` ignores NaN. Protected against unprotected only; partial
-        # regimes are their own group and belong in neither mean.
+        # headline compares species per deployment instead. From the
+        # species-UNfiltered frame, or the KPI collapses to the selection.
+        # `real_species` drops the generic and unidentified classes — a
+        # deployment carrying only those says nothing about richness and
+        # leaves the mean — while absence records (null species) keep theirs
+        # in at zero, since `nunique` ignores NaN. Protected against
+        # unprotected only; partial regimes are their own group and belong
+        # in neither mean.
+        per_species_all = report_data.species_maxn(ann_all)
+        # survey_year and site_id ride along: the charts further down use
+        # this frame for their per-year deployment denominators.
+        # reserve_code too, so the headline difference can be measured
+        # WITHIN each MPA instead of pooling places that are not sampled
+        # alike (see `report_data.stratified_diff_ci`).
+        meta_all = ann_all[
+            ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
+        ].drop_duplicates("drop_id")
+        per_species_all = per_species_all.merge(meta_all, on="drop_id", how="left")
+        per_species_all["Group"] = protection_group(
+            per_species_all["protection_status"]
+        )
         per_dep = (
-            report_data.real_species(per_species)
+            report_data.real_species(per_species_all)
             .loc[lambda f: f["Group"].isin([PROTECTED, UNPROTECTED])]
-            .groupby(["drop_id", "Group"])["scientific_name"]
+            .groupby(["drop_id", "Group", "reserve_code"], dropna=False)[
+                "scientific_name"
+            ]
             .nunique()
             .reset_index(name="richness")
         )
-        grouped = per_dep.groupby("Group")["richness"]
-        protection_means = grouped.mean().round(1).to_dict()
-        protection_counts = grouped.count().to_dict()
+        # The front page states a difference, so it states whether that
+        # difference is settled. Pooled means put a bare "3.6 against 3.9" on
+        # the landing page, which reads as a finding and was not one.
+        protection_effect = report_data.stratified_diff_ci(
+            per_dep,
+            value_col="richness",
+            group_col="Group",
+            stratum_col="reserve_code",
+            inside=PROTECTED,
+            outside=UNPROTECTED,
+        )
 
     st.subheader("Overview")
     # Scope first, then results. Widest container leads: MPAs contain sites,
@@ -787,8 +953,9 @@ def render_home(ctx: dict) -> None:
     kpis = st.columns(4)
     kpis[0].metric(
         "Species recorded",
-        f"{ann['scientific_name'].nunique():,}",
-        help="Distinct species names across every annotated deployment.",
+        f"{ann_all['scientific_name'].nunique():,}",
+        help="Distinct species names across every annotated deployment. "
+        "Not narrowed by the sidebar Species filter.",
     )
     # The funnel's own headline: how many deployments carry the annotation the
     # reporting rests on. Replaces a span of years, which the per-year charts
@@ -799,21 +966,43 @@ def render_home(ctx: dict) -> None:
         f"{expert_drops:,}",
         help="Deployments carrying legacy or BIIGLE expert annotations. Expert "
         "wins wherever sources disagree, so this is the number the "
-        "reporting rests on.",
+        "reporting uses.",
     )
-    for slot, group in ((2, "Protected"), (3, "Unprotected")):
-        value = protection_means.get(group)
-        kpis[slot].metric(
-            f"Species/dep {group.lower()}",
-            "—" if value is None else f"{value:.1f}",
-            help=f"Mean distinct species recorded per annotated deployment "
-            f"{'inside' if group == 'Protected' else 'outside'} an MPA, "
-            f"across {protection_counts.get(group, 0):,} deployments. "
-            f"Generic detections (fish, bait) and the unidentified bucket "
-            f"are not counted as species; a reviewed deployment with "
-            f"nothing seen counts as zero. Worth following up, not "
-            f"quoting: deployments are not evenly spread across sites, "
-            f"years or effort.",
+    inside_mean = protection_effect.get("mean_inside", float("nan"))
+    kpis[2].metric(
+        "Species/dep inside MPA",
+        "-" if inside_mean != inside_mean else f"{inside_mean:.1f}",
+        help=f"Mean distinct species per annotated deployment inside an MPA, "
+        f"across {protection_effect.get('n_inside', 0):,} deployments in "
+        f"{protection_effect.get('n_strata', 0)} MPAs that were surveyed on "
+        f"both sides. Generic detections (fish, bait) and the unidentified "
+        f"bucket are not counted as species; a reviewed deployment with "
+        f"nothing seen counts as zero.",
+    )
+    diff = protection_effect.get("diff", float("nan"))
+    if diff != diff:
+        kpis[3].metric(
+            "vs outside, same MPA",
+            "-",
+            help="Needs at least one MPA surveyed both inside and outside.",
+        )
+    else:
+        lo, hi = protection_effect["lo"], protection_effect["hi"]
+        settled = lo > 0 or hi < 0
+        kpis[3].metric(
+            "vs outside, same MPA",
+            f"{diff:+.2f}",
+            delta=f"95% range {lo:+.2f} to {hi:+.2f}",
+            # Greyed while the range spans zero, so a screenshot of the
+            # landing page cannot present an unsettled gap as a result.
+            delta_color="normal" if settled else "off",
+            help="Species per deployment inside minus outside, measured "
+            "within each MPA and then combined, so a difference between "
+            "PLACES cannot arrive looking like a difference from "
+            "protection. The range is where the difference lands when "
+            "deployments are resampled 2,000 times; spanning zero means "
+            "the direction is not settled. Full version on the Species "
+            "view, per indicator species.",
         )
 
     st.write("")
@@ -838,7 +1027,7 @@ def render_home(ctx: dict) -> None:
         st.markdown("**Surveys per year**")
         fig = px.bar(per_year, x="Year", y="Surveys", text="Surveys")
         fig.update_traces(
-            marker_color="#1E6FB4", textposition="outside", cliponaxis=False
+            marker_color=SINGLE_SERIES, textposition="outside", cliponaxis=False
         )
         style(fig, height=190)
         fig.update_xaxes(title=None)
@@ -863,18 +1052,31 @@ def render_home(ctx: dict) -> None:
         from .charts.mpa import render_mpa_populations
         from .charts.species import (
             render_reserve_effect,
-            render_species_by_site,
             render_species_over_time,
         )
         from .site_data import filtered_site_frames, render_map_gate
 
         common_names = load_common_names()
 
-        # 1. Species over the years. `with_sites=False` holds back its
-        # companion occurrence heatmap so the map can sit between them.
+        # 1. Species over the years. `with_sites=False` keeps the two
+        # occurrence heatmaps off the front page entirely; they live on the
+        # Species view the link below points to.
         st.divider()
-        picked, all_species_mode = render_species_over_time(
-            per_species, common_names, with_sites=False
+        render_species_over_time(
+            per_species,
+            common_names,
+            with_sites=False,
+            species_filter=ctx.get("species"),
+            per_species_all=per_species_all,
+        )
+        # The line-style convention, said once on the landing page: the
+        # trend charts here and on the full views all draw it the same way
+        # (`charting.group_dashes`), but nothing on the home page explained
+        # what the dotted lines are.
+        st.caption(
+            "Line styles on these charts: **solid** = inside an MPA "
+            "(protected), **dotted** = unprotected, **dashed** = partial or "
+            "unclear protection."
         )
         if species_page is not None:
             st.page_link(
@@ -907,26 +1109,18 @@ def render_home(ctx: dict) -> None:
         if mpa_page is not None:
             st.page_link(
                 mpa_page,
-                label="MPA view: this panel in context, with the per-reserve "
+                label="MPA view: this panel in context, with the per-MPA "
                 "tables, diversity and trends around it",
             )
 
-        # 3. Where each species is seen, and how much.
-        if picked is not None:
-            st.divider()
-            render_species_by_site(picked, per_species, all_species_mode)
-            if species_page is not None:
-                st.page_link(
-                    species_page,
-                    label="On the Species view this pairs with the species "
-                    "picker above it",
-                )
-
-        # 4. Protection, per species: the slope chart rather than the box
-        # plots — each species' mean MaxN outside connected to its mean
-        # inside, so the direction of every line is the effect.
+        # 3. Protection, per species: the forest plot rather than the box
+        # plots — each species' inside-minus-outside difference with its 95%
+        # range, so the front page shows which effects the data settles
+        # rather than which bar is longest. `per_dep` carries the deployment
+        # universe the zero fill needs; `per_species_all` keeps the chart
+        # from collapsing to one dot under a sidebar species filter.
         st.divider()
-        render_reserve_effect(per_species, common_names)
+        render_reserve_effect(per_species_all, common_names, per_dep)
         if species_page is not None:
             st.page_link(
                 species_page,
@@ -1008,9 +1202,10 @@ built says so rather than rendering an empty chart.
 
 **The filters in the sidebar apply to every {section} view**, and stay put as
 you move between them. Survey year and MPA narrow which deployments are
-counted; Region and Protection status narrow further, and Source picks which
-annotation source the species numbers come from. The ↺ button returns them
-all to their defaults.
+counted; Region and Protection status narrow further; Species narrows the
+species-level charts (deployment and effort counts stay whole); and Source
+picks which annotation source the species numbers come from. The ↺ button
+returns them all to their defaults.
 
 **Coverage in this database**: {len(dep):,} deployments across
 {dep['survey_id'].nunique()} surveys,
@@ -1034,17 +1229,16 @@ ingest is absent here by design.
   of areas.
 * **Is "MPA" the right label** for every value in that column? Most are marine
   protected areas, but not all, so **"marine area"** may be the safer heading.
-* **What counts as "complete", the status column or the annotation count?**
-  These views read `ml_annotations > 0` / `citsci_annotations > 0` /
-  `expert_annotations > 0`. The pipeline's own answer is the status column
-  (`ml_status = 'ml_complete'`), and the two disagree: a deployment can be
-  genuinely complete with **zero** annotations, because the model ran and found
-  no fish. On the current database that is 2 ML and 1 expert deployment counted
-  here as unfinished when they are not. **To check with Kalindi**: switch these
-  views to the status columns, or keep the annotation-count definition and show
-  "complete, no detections" as its own category so an empty run is visible
-  rather than folded in with the backlog. The archived Programme Health page is
-  the only one reading the status columns, so it is the comparison.
+* **"Complete" is answered three ways, on purpose** (see the completion
+  helpers in `doc_report/data.py`). The funnel and the survey progress bands
+  read the annotation **counts**: has each source actually produced rows. The
+  needs-action export and the deployment browser read the **status columns**:
+  is there anything left to do (expert or reporting complete, or every
+  section explicitly skipped). Abundance denominators use a third, "was it
+  looked at" (`ecology_data.analysed_by_status`), unioned with "has rows" so a
+  reviewed-empty deployment still counts as effort. A deployment the model
+  ran on and found nothing is therefore complete by status and absent from
+  the count-based funnel, which is the intended reading of each.
 * **Test surveys are not marked.** `KSF` is a test MPA, and its deployments
   currently count towards every total on this page. They need a flag so they can
   be excluded from reporting while staying available for pipeline testing.

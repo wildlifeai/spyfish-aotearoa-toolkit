@@ -99,6 +99,11 @@ class ExtractionConfig(BaseConfig):
     # ── FFmpeg encoding settings ─────────────────────────────────────────
 
     @property
+    def slate_detection(self) -> dict:
+        """Thresholds for finding the handwritten metadata slate at the video start."""
+        return get_required(self._extraction, "slate_detection", "extraction")
+
+    @property
     def ffmpeg_config(self) -> dict:
         return get_required(self._yaml_config, "ffmpeg", "")
 

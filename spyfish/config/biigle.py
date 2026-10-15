@@ -37,6 +37,11 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_projects, "done", "biigle.projects"))
 
     @property
+    def biigle_training_project_id(self) -> int:
+        """Survey training-frame volumes (download-training-volume reads from here)."""
+        return int(get_required(self.biigle_projects, "training", "biigle.projects"))
+
+    @property
     def disk_id(self) -> int:
         return int(get_required(self.biigle_section, "disk_id", "biigle"))
 

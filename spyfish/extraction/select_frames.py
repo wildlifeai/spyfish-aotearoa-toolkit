@@ -16,6 +16,7 @@ Two entry points:
 
 import bisect
 import logging
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +57,14 @@ def spread_timestamps(
         raise ValueError(f"power must be > 0, got {power}")
     span = end - start
     return [start + span * (1.0 - ((n - i) / n) ** power) for i in range(1, n + 1)]
+
+
+def _within(sorted_times: list[float], t: float, tol: float) -> bool:
+    """True if any time in the sorted list is closer than `tol` to `t` (O(log n))."""
+    i = bisect.bisect_left(sorted_times, t)
+    return (i > 0 and t - sorted_times[i - 1] < tol) or (
+        i < len(sorted_times) and sorted_times[i] - t < tol
+    )
 
 
 def per_frame_species_counts(raw_csv: str, min_confidence: float) -> pd.DataFrame:
@@ -424,6 +433,38 @@ def _select_frames_with_strategy(
                         covered.add(i)
                         break
 
+    # Random detection frames: a fair sample of ORDINARY boxes. Every bucket
+    # above is biased on purpose (busiest moments, least confident, size
+    # extremes), so none can say how often a typical box is right. These are
+    # drawn uniformly from moments that have at least one box, any species, any
+    # confidence. Blind frames are the recall counterpart: random moments that
+    # may well hold nothing. Seeded by the DropID so a re-run picks the same
+    # frames. Spacing applies only among these picks; against the other
+    # buckets only the same-frame tolerance does, or a dense drop would leave
+    # the random draw nothing but the quiet stretches, which is a bias too.
+    n_random = strategy_params["random_detection_export"] * effort
+    if n_random and not frame_df.empty:
+        # One row per moment, the busiest class standing in for it (the frame
+        # itself carries every box, whatever row represents it), then shuffled.
+        candidates = (
+            frame_df.sort_values(
+                config.csv_max_interval_column, ascending=False, kind="stable"
+            )
+            .drop_duplicates(subset=[time_col])
+            .sample(frac=1.0, random_state=zlib.crc32(drop_id.encode()))
+        )
+        random_times: list[float] = []
+        for _, cand in candidates.iterrows():
+            if len(random_times) >= n_random:
+                break
+            t = float(cand[time_col])
+            if _within(selected_times_sorted, t, same_frame) or _within(
+                random_times, t, spacing
+            ):
+                continue
+            _add(cand, "Random detection")
+            bisect.insort(random_times, t)
+
     added_start = 0
     for _, row in _sample(
         frame_df[frame_df[time_col] < sampling_start + video_start_threshold],
@@ -541,6 +582,7 @@ def _run_selection(
     output_selections_path: str,
     source_label: str,
     allow_fallback_window: bool = False,
+    effort_multiplier: int | None = None,
 ) -> pd.DataFrame:
     """Apply strategy, write selections CSV, return result.
 
@@ -555,7 +597,18 @@ def _run_selection(
     weaker review, and expert time is too scarce to spend on one. True (the
     training path) falls back to the expected deployment duration, since those
     frames become training labels rather than a reported abundance figure.
+
+    `effort_multiplier` replaces `frame_strategy.effort_multiplier` for this
+    call only (Zooniverse validation asks for more frames than expert review).
+    Every quota still comes from `frame_strategy`; None keeps the configured
+    value, so BIIGLE and training selections are unchanged.
     """
+    # A copy, never the config dict itself: mutating it would leak the
+    # validation effort into every later BIIGLE selection in the same process.
+    strategy = dict(config.frame_strategy)
+    if effort_multiplier is not None:
+        strategy["effort_multiplier"] = effort_multiplier
+
     deployment = DatabaseManager().get_deployment(drop_id)
     if not deployment or deployment.get("sampling_start") is None:
         raise ValueError(f"Missing sampling_start for {drop_id}, cannot select frames.")
@@ -565,7 +618,7 @@ def _run_selection(
         frame_df=frame_df,
         drop_id=drop_id,
         sampling_start=sampling_start,
-        strategy_params=config.frame_strategy,
+        strategy_params=strategy,
         video_start_threshold=config.video_start_threshold,
         frame_cap=config.clip_cap,
     )
@@ -578,7 +631,6 @@ def _run_selection(
     # Treating blind frames as pure filler meant a drop dense with detections got
     # none, backwards, since that is exactly where checking what the model
     # missed matters most.
-    strategy = config.frame_strategy
     shortfall = max(
         strategy["blind_export"] * strategy["effort_multiplier"],
         config.min_frames_per_drop - len(selections_df),
@@ -616,7 +668,14 @@ def _run_selection(
         )
         n_blind = len(blind_df)
         if n_blind:
-            selections_df = pd.concat([selections_df, blind_df], ignore_index=True)
+            # Blind rows have no species or confidence, so those columns are
+            # all-NA; concat then re-fills them from the other side's dtype.
+            # Dropping them first says that explicitly, which is what pandas
+            # will require once its silent version of this is removed.
+            if len(selections_df):
+                blind_df = blind_df.dropna(axis=1, how="all")
+            parts = [d for d in (selections_df, blind_df) if len(d)]
+            selections_df = pd.concat(parts, ignore_index=True)
             selections_df = selections_df.sort_values(
                 config.csv_clip_max_time_column
             ).reset_index(drop=True)
@@ -786,6 +845,7 @@ def select_frames(
     output_selections_path: str,
     drop_id: str,
     allow_fallback_window: bool = False,
+    effort_multiplier: int | None = None,
 ) -> pd.DataFrame:
     """
     Select frames from the raw ML CSV using the export strategy.
@@ -803,6 +863,8 @@ def select_frames(
             the training-frame extractor only — the expert-review path must
             fail, because a review without blind frames cannot reveal a fish
             the model missed and nothing downstream would show that.
+        effort_multiplier: Overrides `frame_strategy.effort_multiplier` for
+            this call only (see `_run_selection`). None = configured value.
 
     Returns:
         DataFrame of selected frame moments.
@@ -815,14 +877,13 @@ def select_frames(
     # for the unidentified-size bucket. Only the raw ML CSV has `w`/`h`,
     # volunteer MaxN CSVs carry counts, not boxes, so the geometry columns
     # are absent on the citsci path and those buckets contribute nothing there.
+    # A drop with no detections is NOT an empty selection: the detection
+    # buckets add nothing and the blind frames still go out. Those are the
+    # only way anyone (expert, volunteer, training) sees what the model missed
+    # on a drop where it found nothing at all.
     counts = per_frame_species_counts(raw_csv_path, config.confidence_threshold)
     if counts.empty:
-        if pd.read_csv(raw_csv_path).empty:
-            raise ValueError(
-                f"Empty raw CSV for {drop_id}, no detections available for "
-                "frame selection."
-            )
-        raise ValueError(f"No detections above confidence threshold for {drop_id}.")
+        logging.info(f"{drop_id}: no detections; blind frames only.")
 
     frame_df = counts.rename(
         columns={
@@ -842,6 +903,7 @@ def select_frames(
         output_selections_path,
         "ML raw CSV",
         allow_fallback_window=allow_fallback_window,
+        effort_multiplier=effort_multiplier,
     )
 
 

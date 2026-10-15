@@ -29,7 +29,7 @@ from .charts.mpa import (  # noqa: E402
     render_by_mpa,
     render_community_composition,
     render_depth,
-    render_diversity,
+    render_habitat,
     render_inside_share,
     render_mpa_populations,
     render_reserve_trends,
@@ -51,10 +51,10 @@ def render(ctx: dict) -> None:
             "MPA populations",
             "Site map",
             "Inside vs outside",
-            "Diversity",
             "Composition",
             "Trends",
             "Depth",
+            "Habitat",
         ]
     )
 
@@ -101,20 +101,38 @@ def render(ctx: dict) -> None:
     ann = ctx["annotations"]
     if ann.empty:
         return
+    # The Diversity bar-chart section was removed on review (2026-10-02);
+    # species richness stays available as a mode on the site map.
+    #
+    # Two frames: `exp` follows every sidebar filter including Species;
+    # `exp_all` is the species-UNfiltered twin. Whole-community charts
+    # (sampling balance, composition, the richness trend) read `exp_all`,
+    # because "how balanced is the sampling" and "how many species" must
+    # not change when snapper is ticked in the sidebar.
     exp = experiments_frame(ann)
+    exp_all = experiments_frame(ctx["annotations_all_species"])
     for chart in (
         render_inside_share,
-        render_diversity,
         render_community_composition,
-        render_reserve_trends,
     ):
         st.divider()
-        chart(exp)
+        chart(exp_all)
+    st.divider()
+    # Trends takes both: the sidebar species selection drives its
+    # per-species metric, the unfiltered frame drives richness.
+    render_reserve_trends(exp, species_filter=ctx.get("species"), df_all=exp_all)
 
     # Deployment depth: surveyed depths per MPA, species against them. Reads
     # the deployments (for depth) and the source-filtered annotations, not
     # the site frames, so it works whether or not the map is unlocked.
     render_depth(dep, ann)
+
+    # Habitat is the other half of the depth story, so it sits right under
+    # it. First version, reading the NZMHCS columns ingest now normalises
+    # into the deployments table; the expert CMECS substrate review could
+    # join it later for the deployments that have one.
+    st.divider()
+    render_habitat(dep, ann, ann_all=ctx["annotations_all_species"])
 
 
 def load_context(ctx: dict | None = None) -> dict:

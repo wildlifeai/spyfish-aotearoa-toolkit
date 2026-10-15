@@ -14,6 +14,11 @@ Three kinds of colour live here, and they are not interchangeable:
 * **Ordered** (`PROTECTION_COLORS`), protection strength is ordinal, so it gets
   a graded scale rather than arbitrary hues.
 
+Below those sit the per-chart role palettes (one dict per chart's categories),
+the unencoded chart furniture (reference, guide and fit lines, grids) and the
+interface chrome written into inline HTML/CSS. Name every new colour by its
+role, never by its hue.
+
 Streamlit here runs in its default light theme (there is no `[theme]` block in
 `.streamlit/config.toml`), so the light values are what actually ship. The dark
 variants are kept validated alongside them so that switching the app theme later
@@ -39,12 +44,6 @@ SOURCE_COLORS = {
     "expert": "#0072B2",
     "citsci": "#E69F00",
     "ml": "#009E73",
-}
-
-SOURCE_COLORS_DARK = {
-    "expert": "#3585C0",
-    "citsci": "#B37B00",
-    "ml": "#009468",
 }
 
 # ── Species (categorical) ────────────────────────────────────────────────────
@@ -74,7 +73,7 @@ def species_color_map(names) -> dict:
 
     PASS THE FULL SET OF SPECIES AVAILABLE, NOT THE CURRENT SELECTION. Colours
     are assigned by position in the sorted list, so a map built from a filtered
-    subset shifts every colour up whenever a species is removed — the survivors
+    subset shifts every colour up whenever a species is removed, the survivors
     get repainted and two views of the same data disagree about what colour a
     species is. Building from the complete list makes the mapping independent of
     what happens to be selected; Plotly ignores keys for absent series, so the
@@ -96,6 +95,10 @@ INGEST_STATUS_COLORS = {
     "metadata_error": "#EF5350",
     "validation_error": "#EF5350",
     "removed": NEUTRAL,
+    # `ecology_data.NO_SHAREPOINT_RECORD`: legacy-only drops synthesised from
+    # annotations. Muted violet, so it reads as "a different kind of row",
+    # not as another shade of failure.
+    "no SharePoint record": "#9575CD",
 }
 
 VIDEO_PRESENCE_COLORS = {
@@ -104,6 +107,39 @@ VIDEO_PRESENCE_COLORS = {
     "absent": "#EF5350",
     "no_video_bad_dep": NEUTRAL,
 }
+
+# ── Unencoded marks ──────────────────────────────────────────────────────────
+#
+# A bar chart with a single series has no category to encode, and a threshold
+# line is a reference, not data. One colour each, so they match across views.
+SINGLE_SERIES = "#1E6FB4"
+THRESHOLD_LINE = "#EF5350"
+
+# Lines computed from the data rather than drawn from it, and the faint guides
+# that sit behind a chart. None of them is a category, so none may borrow a
+# categorical or status hue. Same-value pairs below are kept as separate names
+# on purpose: they mean different things and may diverge.
+#
+# MODEL_LINE: a fitted or summarised line over the points (regression fit, the
+# mean species-accumulation curve). ANCHOR_LINE: the dark neutral summary that
+# the other marks are read against (the all-species line, the pooled estimate).
+MODEL_LINE = "#1976D2"
+ANCHOR_LINE = "#2B3A55"
+# The 95% range of a pooled estimate, drawn as a translucent band.
+INTERVAL_FILL = "#8794A8"
+# Dashed comparison lines: the 1:1 line on a calibration scatter and the
+# quadrant splits on the strategy chart.
+REFERENCE_LINE = "#888888"
+# Dotted "no difference" / target guides (x = 0, y = 95%), and the fainter
+# minute ticks on the timing chart.
+GUIDE_LINE = "#AAAAAA"
+MINOR_GUIDE_LINE = "#DDDDDD"
+# The expert = ML diagonal on the Operations annotations scatter, and its label.
+AGREEMENT_LINE = "#B9C4D6"
+AGREEMENT_LABEL = "#8794A8"
+# White on a filled bar segment, and the hairline round scatter markers.
+TEXT_ON_FILL = "white"
+MARKER_OUTLINE = "white"
 
 # ── Protection status (ordered) ──────────────────────────────────────────────
 #
@@ -150,8 +186,8 @@ _UNKNOWN_PROTECTION_SEEN: set = set()
 def _note_unknown_protection(status) -> None:
     """Report a protection status this module has no colour or position for.
 
-    The fall-backs are deliberate — grey and last, so an unclassified status
-    looks unclassified — but silence makes them indistinguishable from a
+    The fall-backs are deliberate, grey and last, so an unclassified status
+    looks unclassified, but silence makes them indistinguishable from a
     correctly-styled category. The usual cause is a value added to
     `known_protection_statuses` in config.yaml without the matching entry here.
     """
@@ -223,20 +259,142 @@ def biodiversity_band(score) -> tuple:
     return "No data", BIODIVERSITY_NO_DATA
 
 
+# ── Sequential scales (ordered) ──────────────────────────────────────────────
+#
+# Light-to-dark ramps for the species-by-site heatmaps. Frequency ends on the
+# strongest-protection blue and abundance on the "Excellent" green by value
+# only: they are magnitude scales, not protection or condition, so they are
+# named for what they measure and must not be read through those palettes.
+DETECTION_FREQUENCY_SCALE = ["#EAF2FB", "#0B3D6B"]
+ABUNDANCE_SCALE = ["#EAF3EC", "#1B7F4B"]
+
+
+# ── View palettes (one dict per chart role) ──────────────────────────────────
+#
+# Each dict below belongs to one chart's categories. Where a value repeats a
+# status or source token AND means the same thing, it references that token;
+# where the hex merely coincides (e.g. "#D9603B" is the biodiversity "Poor",
+# the bad-deployment red and the large-gap dot), it stays a literal under its
+# own role, so changing one never silently repaints another.
+
+# Species detection rate, by how widely a species is seen.
+RARITY_COLORS = {
+    "common (≥20%)": "#2E7D32",
+    "intermediate (5–20%)": "#FBC02D",
+    "rare (<5%)": "#C62828",
+}
+
+# Frequency-vs-abundance quadrants. Keys are the lower-case strategy values the
+# chart colours by; the quadrant labels look themselves up here too.
+STRATEGY_COLORS = {
+    "core": "#2E7D32",
+    "transient": "#FF9800",
+    "patchy": "#1976D2",
+    "incidental": "#9E9E9E",
+}
+
+# Settled-direction palette for the effect charts: a species whose interval
+# clears zero gets a side's colour, one whose interval spans zero stays grey
+# however big its point estimate. Colour therefore means "the data settles the
+# direction", not "the bar is long". "Higher inside" is the Protected group
+# colour (`charting.group_colors`); "Higher outside" is deliberately its own
+# red, not the Unprotected orange.
+EFFECT_COLOURS = {
+    "Higher inside": PROTECTION_COLORS["Type I MPA (Marine Reserve)"],
+    "Higher outside": "#C1553B",
+    "Not settled": "#9AA5B4",
+}
+
+# Arrival vs time-of-MaxN, the two timings on the Annotations timing chart.
+ARRIVAL_PEAK_COLORS = {
+    "Arrival": "#1976D2",
+    "MaxN time": "#FF7043",
+}
+
+# Size of an expert/ML disagreement in the "where agreement breaks down" list.
+GAP_SEVERITY_COLORS = {
+    "large": "#D9603B",
+    "moderate": "#E8A33D",
+}
+
+# Pipeline funnel tiers ahead of annotation; the annotation tiers take their
+# source's colour.
+PIPELINE_FUNNEL_COLORS = {
+    "All deployments": "#90A4AE",
+    "Not a bad deployment": "#D9603B",
+    "Passed ingest": "#E8A33D",
+    "Footage exists": "#42A5F5",
+    "ML annotated": SOURCE_COLORS["ml"],
+    "CitSci annotated": SOURCE_COLORS["citsci"],
+    "Expert annotated": SOURCE_COLORS["expert"],
+}
+
+# Footage funnel on the Operations Deployments view. "Footage exists" is the
+# video-present status colour; "#42A5F5" here marks the expected tier, which is
+# not the same tier as the pipeline funnel's "Footage exists".
+MEDIA_FUNNEL_COLORS = {
+    "All deployments": "#90A4AE",
+    "Footage expected": "#42A5F5",
+    "Footage exists": VIDEO_PRESENCE_COLORS["present"],
+}
+
+# Usable vs bad deployments per year.
+USABLE_SPLIT_COLORS = {"ok": "#2E8B57", "bad": "#D9603B"}
+
+# Footage state, with archived split by whether annotations already exist.
+# Keyed by the display labels the media view draws.
+DETAIL_COLOURS = {
+    "Present": VIDEO_PRESENCE_COLORS["present"],
+    "Archived, annotated": "#7FB77E",
+    "Archived, not annotated": VIDEO_PRESENCE_COLORS["archived"],
+    "Absent": VIDEO_PRESENCE_COLORS["absent"],
+    "No footage expected": NEUTRAL,
+    "Unknown": "#BDBDBD",
+}
+
+# The four states of a deployment that has footage, furthest from done first.
+# "Annotated, standard storage" is annotation-done blue that happens to share
+# the expert source hex; it is not an expert-only state.
+FOOTAGE_STATE_COLORS = {
+    "Not annotated, archived": "#D9603B",
+    "Not annotated, standard storage": "#FF9800",
+    "Annotated, standard storage": "#0072B2",
+    "Annotated, archived": DETAIL_COLOURS["Archived, annotated"],
+}
+
+# Annotation-depth bands per survey: source colours for work done, then the
+# outstanding states. Keyed by the labels in `charts/surveys.BAND_LABELS`.
+BAND_COLOURS = {
+    "Expert": SOURCE_COLORS["expert"],
+    "CitSci": SOURCE_COLORS["citsci"],
+    "ML only": SOURCE_COLORS["ml"],
+    "Not annotated yet": "#E0E0E0",
+    "Bad deployment": "#8C2F1F",
+    "Ingest issue": "#E08E7B",
+}
+
+
 # ── Plotly layout defaults ───────────────────────────────────────────────────
 #
 # Recessive grid and axes, no chart-junk background. Spread into a figure with
 # `fig.update_layout(**PLOT_LAYOUT)` so every page gets the same furniture.
+TRANSPARENT = "rgba(0,0,0,0)"
+GRID_COLOR = "rgba(128,128,128,0.2)"
+# A few charts draw on white instead, with a light solid grid and zero line.
+PLOT_BG_WHITE = "white"
+GRID_ON_WHITE = "#EEEEEE"
+ZERO_LINE_ON_WHITE = "#CCCCCC"
+
 PLOT_LAYOUT = {
     # No font here. Chart text is set once, in `apply_plotly_defaults` below,
     # as the Plotly default template, that reaches every figure in the app,
     # including the modules that never import this file. Setting a size here
     # too would override the template and put the sizes back out of step.
     "margin": {"l": 0, "r": 0, "t": 10, "b": 0},
-    "plot_bgcolor": "rgba(0,0,0,0)",
-    "paper_bgcolor": "rgba(0,0,0,0)",
+    "plot_bgcolor": TRANSPARENT,
+    "paper_bgcolor": TRANSPARENT,
     "xaxis": {"showgrid": False},
-    "yaxis": {"gridcolor": "rgba(128,128,128,0.2)"},
+    "yaxis": {"gridcolor": GRID_COLOR},
 }
 
 
@@ -277,3 +435,22 @@ def apply_plotly_defaults() -> None:
 # Streamlit's own text is left at its defaults: the complaint was chart labels,
 # not the interface, and bumping captions and metrics made the page heavy.
 UI_TEXT_CSS = ""
+
+
+# ── Interface chrome (inline HTML/CSS) ───────────────────────────────────────
+#
+# Colours written into st.markdown HTML and injected CSS rather than a chart.
+# Text is a three-step neutral ramp, strongest first.
+TEXT_PRIMARY = "#2B3A55"
+TEXT_SECONDARY = "#7A879C"
+TEXT_TERTIARY = "#94A0B4"
+ROW_DIVIDER = "#F0F3F8"
+# Section chips in the sticky header: translucent grey so they work on either
+# Streamlit theme.
+CHIP_BORDER = "rgba(128,128,128,.35)"
+CHIP_BORDER_HOVER = "rgba(128,128,128,.75)"
+CHIP_BG_HOVER = "rgba(128,128,128,.12)"
+# Sticky header: the fallback when Streamlit's --background-color is missing,
+# and the soft shadow under it.
+HEADER_BG_FALLBACK = "#FFFFFF"
+HEADER_SHADOW = "rgba(20, 35, 60, .5)"

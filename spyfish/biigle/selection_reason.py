@@ -32,7 +32,8 @@ from spyfish.config.wrapper import config
 # always live in the tail, never the head.
 #
 # Every producer in select_frames.py is covered:
-#   _run_selection        → MaxN / Uncertain / Fish size band / Video Start
+#   _run_selection        → MaxN / Uncertain / Fish size band / Random detection
+#                           / Video Start
 #   _blind_selections     → Blind (False Negative Check)
 #   _ml_peak_selections   → ML peak (conf>=..., count=...)
 #
@@ -49,7 +50,9 @@ _REASON_RULES: tuple[tuple[str, str], ...] = (
     ("uncertain_id", r"(Uncertain|Confusing)\b"),
     ("ml_peak", r"ML peak\b"),
     ("fish_variety", r"Fish size band\b"),
-    ("spot_check", r"(Blind|(Global )?Empty)\b"),
+    # Random detection: a fair sample of ordinary boxes, the precision twin of
+    # Blind's recall sample. Both are "picked without a reason", hence one label.
+    ("spot_check", r"(Blind|Random detection|(Global )?Empty)\b"),
     ("video_start", r"(Global )?Video Start\b"),
 )
 

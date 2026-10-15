@@ -1,5 +1,3 @@
-from .charting import style
-
 """The metadata error review: validation errors from the pipeline database.
 
 This was the standalone Error Review page (``pages/🔍_Error_Review.py``) until
@@ -8,12 +6,17 @@ Operations → Metadata view (``metadata.py``). Moving it here replaced the
 load-the-emoji-file-by-path machinery with a normal import.
 """
 
+import logging
+import sqlite3
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from utils import CACHE_TTL_SECONDS, sync_db_if_needed
+from utils import CACHE_TTL_SECONDS
 
 from spyfish.database.manager import DatabaseManager
+
+from .charting import style
 
 # Every `ColumnName` that means "the sampling window". The validator writes
 # `sampling_window`; the two older names stay because rows already in the
@@ -24,15 +27,14 @@ SAMPLING_COLUMNS = ["sampling_window", "SamplingStart", "SamplingEnd"]
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_error_data():
-    """Load validation errors from native SQLite DB, syncing from S3 if needed."""
-    try:
-        sync_db_if_needed()
-        db = DatabaseManager()
-        errors = db.get_all_validation_errors()
-        return pd.DataFrame(errors)
-    except Exception as e:
-        st.error(f"Error loading validation errors: {e}")
-        return pd.DataFrame()
+    """Load validation errors from the pipeline database, read-only.
+
+    The shell syncs from S3 before any view renders. Errors are left to
+    raise: st.cache_data does not cache exceptions, whereas returning an empty
+    frame here would be cached and shown as "no errors" for the whole TTL.
+    """
+    db = DatabaseManager(read_only=True)
+    return pd.DataFrame(db.get_all_validation_errors())
 
 
 # --- Display functions ---
@@ -159,7 +161,15 @@ def display_error_table(errors_df: pd.DataFrame):
 
 def render_body():
     """The whole review, below whatever title/filters the caller owns."""
-    raw_errors_df = load_error_data()
+    try:
+        raw_errors_df = load_error_data()
+    except sqlite3.OperationalError as e:
+        logging.info(f"Error review could not read the pipeline database: {e}")
+        st.error(
+            "Could not read the pipeline database, so validation errors cannot "
+            "be shown. Click **Refresh Cache** in the sidebar to retry."
+        )
+        return
 
     if raw_errors_df.empty:
         st.success("🎉 No validation errors found in the data!")

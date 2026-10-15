@@ -9,6 +9,7 @@ Usage examples:
   # Override a section status (bypasses transition checks, admin use only)
   python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03 --ml-status ml_ready
   python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03 --citsci-status citsci_skipped
+  python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03 --zoo-crops-status zoo_crops_pending
 
   # Combine multiple overrides
   python -m spyfish.database.set_status KSF_20240124_BUV_KSF_085_03 \\
@@ -56,6 +57,12 @@ def main():
     parser.add_argument(
         "--reporting-status", choices=_SECTION_VALUES["reporting_status"]
     )
+    parser.add_argument(
+        "--zoo-frames-status", choices=_SECTION_VALUES["zoo_frames_status"]
+    )
+    parser.add_argument(
+        "--zoo-crops-status", choices=_SECTION_VALUES["zoo_crops_status"]
+    )
 
     # Metadata overrides
     parser.add_argument("--sampling-start", type=int, default=None)
@@ -89,6 +96,8 @@ def main():
             ("citsci_status", args.citsci_status),
             ("expert_status", args.expert_status),
             ("reporting_status", args.reporting_status),
+            ("zoo_frames_status", args.zoo_frames_status),
+            ("zoo_crops_status", args.zoo_crops_status),
         ]
         if val is not None
     }

@@ -30,6 +30,37 @@ def sync_db_if_needed() -> bool:
     return bool(ok_pipeline and ok_annotations)
 
 
+def ensure_databases() -> None:
+    """Sync both databases from S3 before any reader runs, warning on failure.
+
+    Call at the top of anything that reads the databases. The entrypoint
+    deliberately does not, so the support page still loads when S3 or config
+    is broken; the report shell and standalone pages each call this instead.
+    Readers open SQLite read-only, so if the databases are still absent they
+    raise rather than creating empty files, an empty file's fresh mtime would
+    make db_sync skip the S3 download forever. Catch that with
+    `stop_missing_database`.
+    """
+    if not sync_db_if_needed():
+        # Do not cache an S3 failure for the TTL, clear so the next run
+        # retries, and say what happened instead of silently showing stale data.
+        sync_db_if_needed.clear()
+        st.warning(
+            "Could not check S3 for a newer database, showing whatever local "
+            "data exists. Check AWS credentials in `.env` if this persists."
+        )
+
+
+def stop_missing_database() -> None:
+    """The message for `sqlite3.OperationalError` from a reader, then stop."""
+    st.error(
+        "No local database found, and it could not be downloaded from S3. "
+        "Check the AWS credentials in `.env`, then click **Refresh Cache** "
+        "in the sidebar, or run the pipeline once on this machine."
+    )
+    st.stop()
+
+
 # The sidebar refresh button lives in `cache_controls`, which imports nothing
 # but Streamlit, so the entrypoint can render it on every page without putting
 # this module's S3 and config imports on the load path of the whole app.
@@ -40,11 +71,11 @@ from cache_controls import render_sidebar_refresh  # noqa: E402,F401
 def render_contact_note():
     """Sidebar fallback contact note, shown on every page.
 
-    Single source of truth for the "something broke, tell Kalindi" message — keep
+    Single source of truth for the "something broke, tell Kalindi" message, keep
     the wording here so it only changes in one place. Best-effort: it renders only
     if the page got far enough to call it. The guaranteed fallback when a page
     fails to load at all is the dependency-free
-    ``pages/0_🆘_Error_-_Inform_Kalindi.py`` page.
+    ``pages/0_🆘_Support.py`` page, at ``/support``.
     """
     st.sidebar.error(
         "⚠️ **If this tool doesn't work**, contact Kalindi immediately on "

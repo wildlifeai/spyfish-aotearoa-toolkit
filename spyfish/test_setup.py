@@ -5,7 +5,7 @@ import sys
 
 import pandas as pd
 
-from spyfish.config.base import SECTION_VALUES
+from spyfish.config.base import SECTION_VALUES, VideoPresence
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.db_sync import upload_db
@@ -14,6 +14,13 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Derived from the status registry so a new section is picked up automatically.
 _SECTION_COLUMNS = set(SECTION_VALUES)
+# video_presence is not a pipeline section (no state machine) but the ML runner
+# refuses `archived` drops outright, so a targets CSV that sets ml_ready on a
+# restored-from-DEEP_ARCHIVE drop also has to say the video is readable.
+_VIDEO_PRESENCE_COLUMN = "video_presence"
+_VIDEO_PRESENCE_VALUES = {
+    v for k, v in vars(VideoPresence).items() if k.isupper() and isinstance(v, str)
+}
 
 
 def process_csv_targets(csv_path: str, push_s3: bool = False):
@@ -22,9 +29,9 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
     and updates the local database accordingly.
 
     Expected CSV format (all columns except DropID are optional):
-        DropID,ml_status,priority,biigle_volume_id
-        KSF_20240124_BUV_KSF_085_01,ml_ready,10,12345
-        KSF_20240124_BUV_KSF_085_02,,5,
+        DropID,ml_status,priority,biigle_volume_id,video_presence
+        KSF_20240124_BUV_KSF_085_01,ml_ready,10,12345,present
+        KSF_20240124_BUV_KSF_085_02,,5,,
 
     Row order implies priority, first row has highest priority. If a 'priority'
     column is present it takes precedence; otherwise row order is used.
@@ -48,6 +55,7 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
     section_cols = [c for c in df.columns if c in _SECTION_COLUMNS]
     has_priority_col = "priority" in df.columns
     has_volume_col = "biigle_volume_id" in df.columns
+    has_presence_col = _VIDEO_PRESENCE_COLUMN in df.columns
 
     updates = []
     invalid_values = 0
@@ -60,6 +68,7 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
             "sections": {},
             "priority": None,
             "biigle_volume_id": None,
+            "video_presence": None,
         }
         for col in section_cols:
             val = row.get(col)
@@ -82,6 +91,16 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
             entry["priority"] = int(row["priority"])
         if has_volume_col and pd.notna(row.get("biigle_volume_id")):
             entry["biigle_volume_id"] = str(row["biigle_volume_id"]).strip()
+        if has_presence_col and pd.notna(row.get(_VIDEO_PRESENCE_COLUMN)):
+            value = str(row[_VIDEO_PRESENCE_COLUMN]).strip()
+            if value and value not in _VIDEO_PRESENCE_VALUES:
+                logging.error(
+                    f"{drop_id}: '{value}' is not a valid {_VIDEO_PRESENCE_COLUMN}, "
+                    f"expected one of {sorted(_VIDEO_PRESENCE_VALUES)}. Skipping this value."
+                )
+                invalid_values += 1
+            elif value:
+                entry["video_presence"] = value
         updates.append(entry)
 
     if not updates:
@@ -115,6 +134,8 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
             field_updates = {"priority": priority}
             if entry["biigle_volume_id"]:
                 field_updates["biigle_volume_id"] = entry["biigle_volume_id"]
+            if entry["video_presence"]:
+                field_updates[_VIDEO_PRESENCE_COLUMN] = entry["video_presence"]
             db.update_deployment_fields(drop_id, **field_updates)
 
             for section, value in entry["sections"].items():
@@ -126,6 +147,8 @@ def process_csv_targets(csv_path: str, push_s3: bool = False):
                 extras.append(f"sections={entry['sections']}")
             if entry["biigle_volume_id"]:
                 extras.append(f"biigle_volume_id={entry['biigle_volume_id']}")
+            if entry["video_presence"]:
+                extras.append(f"video_presence={entry['video_presence']}")
             logging.info(
                 f"Updated '{drop_id}', priority={priority}"
                 + ("" if not extras else ", " + ", ".join(extras))
@@ -158,7 +181,8 @@ def main():
     parser.add_argument(
         "csv_file",
         help=f"Path to the CSV file (must have '{config.drop_id_column}' column; "
-        f"optional: {sorted(_SECTION_COLUMNS)}, priority).",
+        f"optional: {sorted(_SECTION_COLUMNS)}, priority, biigle_volume_id, "
+        f"{_VIDEO_PRESENCE_COLUMN}).",
     )
     parser.add_argument(
         "--push-s3",

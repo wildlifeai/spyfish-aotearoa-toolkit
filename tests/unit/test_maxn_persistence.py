@@ -22,7 +22,7 @@ from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.ml.process_ml_annotations import _ingest_ml_annotations, process_maxn
 
 DROP = "KSF_20240124_BUV_KSF_085_01"
-MODEL = "species_test"
+MODEL = "species_test_20260101_000000"
 FPS = 30.0
 STRIDE = 10  # video frames between sampled frames
 

@@ -14,6 +14,7 @@ from spyfish.config.base import (
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
+from spyfish.extraction.slate import extract_slate_frame
 from spyfish.ml.process_ml_annotations import process_one_drop
 from spyfish.ml.run_inference import main as run_inference_main
 from spyfish.storage.s3_handler import S3Handler
@@ -124,12 +125,27 @@ class MLRunner:
         if df.empty:
             return []
 
+        # The batch is the TOP `limit` drops by priority, not "walk the queue
+        # until `limit` succeed". The old loop below kept going past a failed
+        # drop, so on 2026-10-14 a run meant for 9 targeted SLI drops walked
+        # all 800+ ml_ready drops trying to download each one; with a real
+        # bucket that is the whole backlog's egress bill for a 9-drop job. A
+        # drop that fails here is reported, not replaced.
+        if len(df) > self.limit:
+            logging.info(
+                f"{len(df)} drops at ml_ready; taking the top {self.limit} by "
+                f"priority (limit_processing)."
+            )
+            df = df.head(self.limit)
+
         logging.debug("Generating target paths and downloading media via aws s3...")
 
         actual_video_dir = self.video_storage_dir
         os.makedirs(actual_video_dir, exist_ok=True)
 
-        # Download in priority order, stopping once we have `self.limit` successes.
+        # Download in priority order. `limit` already bounds the frame above;
+        # the check here is kept so a survey run (limit = survey size) behaves
+        # the same way.
         valid_indices = []
         local_filepaths = []
         for idx, path in df["video_path"].items():
@@ -261,6 +277,21 @@ class MLRunner:
                         drop_annotations_dir, f"{drop_id}_{model_name}_raw.csv"
                     ),
                 }
+                # Slate first: the handwritten metadata board at the start of the
+                # video, while it is on local disk. The rig is on the bottom by
+                # sampling_start, so the board cannot be later than that. Its own
+                # try so a miss or a bug here never costs the ML run.
+                try:
+                    extract_slate_frame(
+                        drop_id,
+                        Path(row["VideoURL"]),
+                        max_seconds=row["sampling_start"],
+                    )
+                except Exception as e:
+                    logging.warning(
+                        f"{drop_id}: slate extraction failed, continuing: {e}"
+                    )
+
                 logging.info(f"  → Running ML inference: {drop_id}")
                 run_inference_main(inference_args)
 

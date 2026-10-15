@@ -96,7 +96,19 @@ def convert_int_num_columns_to_int(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def time_to_seconds(time_str: str) -> float:
-    """Converts a time string (HH:MM:SS or HH:MM:SS.mmm) to seconds."""
+    """Converts a time string (HH:MM:SS or HH:MM:SS.mmm) to seconds.
+
+    For timestamps the PIPELINE wrote — BIIGLE frame filenames, Zooniverse
+    clip offsets — and the round-trip partner of `seconds_to_time`.
+
+    NOT for legacy hand-entered TimeOfMax text: use
+    `spyfish.orchestrator.legacy_extract.legacy_time_of_max_seconds`, which
+    repairs the Excel MM:SS coercion in those workbooks. Two differences make
+    this function the wrong tool there: it has no notion of the coercion, and
+    it returns 0.0 for missing input, which would turn "time unknown" into
+    "seen in the first minute". `tests/unit/test_one_time_parser.py` keeps the
+    two from being merged by mistake.
+    """
     if pd.isna(time_str):
         return 0.0
     parts = str(time_str).split(":")

@@ -54,6 +54,22 @@ class PathsConfig(BaseConfig):
         )
 
     @property
+    def legacy_help_dir(self) -> Path:
+        """Knowledge files for the legacy workbook extraction (fix keys, maps).
+
+        Gitignored and synced to S3 under `legacy_help_s3_prefix`; a fresh
+        clone pulls them from the bucket rather than from the repo.
+        """
+        return self.project_root / get_required(
+            self.legacy_paths, "annotations_help", "paths.legacy"
+        )
+
+    @property
+    def legacy_help_s3_prefix(self) -> str:
+        """Repo-relative path of `legacy_help_dir`, reused as its S3 prefix."""
+        return self.legacy_help_dir.relative_to(self.project_root).as_posix()
+
+    @property
     def legacy_zooniverse_s3_prefix(self) -> str:
         """The legacy dir's repo-relative path, reused as its S3 prefix.
 
@@ -234,27 +250,42 @@ class PathsConfig(BaseConfig):
 
     @property
     def pipeline_model_path(self) -> Path:
-        """Find the local pipeline model weights (.pt) from pipeline_model_dir.
+        """The pipeline model weights (.pt) in pipeline_model_dir.
 
-        Prefers `species_*.pt` (most recently modified when several match, the
-        promotion naming convention); falls back to the first .pt file in the
-        directory for single-model setups that pre-date the naming convention.
-        The binary model variant was retired 2026-08-21 — the species model IS
-        the binary model with more informative labels (see design_doc.md,
-        "ML model strategy").
+        Only files named to the standard count (`validation_patterns.model_name`,
+        `{type}_{YYYYMMDD}[_{HHMMSS}]`), and the newest TRAINING STAMP wins, not
+        the newest mtime: a copy made today of an old model is still the old
+        model. A directory with no canonical file raises and names what it
+        found, because the stem becomes the model name on every ML annotation
+        and a wrong name there is far harder to undo than a rename now. The
+        binary model variant was retired 2026-08-21 — the species model IS the
+        binary model with more informative labels (see design_doc.md, "ML
+        model strategy").
         """
-        if self.pipeline_model_dir.exists():
-            candidates = sorted(
-                self.pipeline_model_dir.glob("species_*.pt"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
+        found = (
+            sorted(self.pipeline_model_dir.glob("*.pt"))
+            if self.pipeline_model_dir.exists()
+            else []
+        )
+        canonical = [
+            (self.model_name_stamp(p.stem), p)
+            for p in found
+            if self.model_name_stamp(p.stem) is not None
+        ]
+        if not canonical:
+            names = ", ".join(p.name for p in found) or "no .pt files"
+            raise FileNotFoundError(
+                f"No model named to the standard in {self.pipeline_model_dir} "
+                f"({names}). Weights must be named {{type}}_{{YYYYMMDD}}_{{HHMMSS}}.pt, "
+                "e.g. species_20260822_192536.pt; the stem is the model name "
+                "stored on every ML annotation, so rename the file."
             )
-            if candidates:
-                return candidates[0]
-        path = self._first_model_file(self.pipeline_model_dir)
-        if path is None:
-            raise FileNotFoundError(f"No model file found in {self.pipeline_model_dir}")
-        return path
+        if len(canonical) > 1:
+            logging.warning(
+                f"{self.pipeline_model_dir} holds {len(canonical)} model files; "
+                f"using the newest stamp. Keep one promoted model here."
+            )
+        return max(canonical)[1]
 
     @property
     def base_model_path(self) -> Path:
@@ -332,6 +363,15 @@ class PathsConfig(BaseConfig):
     def get_video_path(self, drop_id: str) -> Path:
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
 
+    # The handwritten metadata whiteboard rangers hold up before the drop, one
+    # JPEG per deployment, for cross-checking against SharePoint metadata.
+    slate_frame_suffix = "_slate.jpg"
+
+    def get_slate_frame_path(self, drop_id: str) -> Path:
+        return self.get_drop_dir(drop_id) / (
+            f"{self.validate_drop_id(drop_id)}{self.slate_frame_suffix}"
+        )
+
     def get_video_s3_key(self, drop_id: str) -> str:
         """Canonical S3 key for a drop's source video file.
 
@@ -374,13 +414,41 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}_biigle_frames_selection.csv"
         )
 
+    # Zooniverse validation (--zooniverse-frames / --zooniverse-crops). Clean
+    # frames go in the drop's shared frames/ folder like every other frame; the
+    # selection and manifests are CSVs in annotations/; only the upload copies
+    # (boxes drawn, crops) get their own folder, and those can be regenerated.
+    zooniverse_validation_selection_suffix = "_zooniverse_validation_selection.csv"
+    VALIDATION_KINDS = ("frames", "crops")
+
+    def get_validation_selection_path(self, drop_id: str) -> Path:
+        """Which frames are validation frames, and why. Shared by both stages."""
+        return self.get_drop_annotations_dir(drop_id) / (
+            f"{self.validate_drop_id(drop_id)}"
+            f"{self.zooniverse_validation_selection_suffix}"
+        )
+
+    def get_validation_upload_dir(self, drop_id: str) -> Path:
+        """Upload copies: frames with boxes drawn and crops, ``{drop}/zooniverse_validation/``."""
+        return self.get_drop_dir(drop_id) / "zooniverse_validation"
+
+    def get_validation_manifest_path(self, drop_id: str, kind: str) -> Path:
+        """One row per upload image (or not-cropped box) of `kind` ("frames" or "crops")."""
+        if kind not in self.VALIDATION_KINDS:
+            raise ValueError(
+                f"kind must be one of {self.VALIDATION_KINDS}, got {kind!r}"
+            )
+        return self.get_drop_annotations_dir(drop_id) / (
+            f"{self.validate_drop_id(drop_id)}_zooniverse_{kind}_manifest.csv"
+        )
+
     biigle_expert_raw_suffix = "_biigle_expert_raw.csv"
     # Every frame of the drop the expert was SHOWN, annotated or not. A Biigle
     # annotation report lists only frames that HAVE annotations, so on its own it
     # cannot distinguish "expert looked and saw nothing" from "never uploaded".
-    # Recording the universe at sync time is what lets biigle_to_yolo write an
+    # Recording the reviewed-frame list at sync time is what lets biigle_to_yolo write an
     # empty .txt (a YOLO background/negative) for the reviewed-but-empty frames.
-    biigle_expert_universe_suffix = "_biigle_expert_universe.csv"
+    biigle_expert_reviewed_frames_suffix = "_biigle_expert_reviewed_frames.csv"
     biigle_expert_maxn_suffix = "_biigle_expert_maxn.csv"
     # Training-frame volume export (download_training_volume_labels). Kept a
     # SEPARATE artifact from the expert MaxN-review export above: it's a
@@ -388,6 +456,11 @@ class PathsConfig(BaseConfig):
     # the expert filename (avoids clobbering the expert CSV and stops db_refresh
     # from mistaking a training download for completed expert review).
     biigle_training_raw_suffix = "_biigle_training_raw.csv"
+    # The training volume's counterpart of the expert reviewed-frames list:
+    # every frame of the drop in the training volume, annotated or not.
+    # biigle_to_yolo rebuilds labels/ from scratch, so the training volume's
+    # negatives survive a rebuild only if this list is on disk.
+    biigle_training_reviewed_frames_suffix = "_biigle_training_reviewed_frames.csv"
 
     def get_biigle_expert_raw_csv_path(self, drop_id: str) -> Path:
         return (
@@ -395,17 +468,24 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_raw_suffix}"
         )
 
-    def get_biigle_expert_universe_csv_path(self, drop_id: str) -> Path:
+    def get_biigle_expert_reviewed_frames_csv_path(self, drop_id: str) -> Path:
         """Frames of this drop present in its Biigle volume, annotated or not."""
         return (
             self.get_drop_annotations_dir(drop_id)
-            / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_universe_suffix}"
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_reviewed_frames_suffix}"
         )
 
     def get_biigle_training_raw_csv_path(self, drop_id: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
             / f"{self.validate_drop_id(drop_id)}{self.biigle_training_raw_suffix}"
+        )
+
+    def get_biigle_training_reviewed_frames_csv_path(self, drop_id: str) -> Path:
+        """Frames of this drop present in its training volume, annotated or not."""
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{self.biigle_training_reviewed_frames_suffix}"
         )
 
     def get_biigle_expert_maxn_csv_path(self, drop_id: str) -> Path:

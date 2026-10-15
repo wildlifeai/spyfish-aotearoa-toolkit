@@ -141,17 +141,6 @@ def prepare_from_annotations(
             )
             df = df[~drop_rows]
 
-    excluded_species = config.training_excluded_species
-    if excluded_species:
-        drop_rows = df["ScientificName"].isin(excluded_species)
-        if drop_rows.any():
-            logging.info(
-                f"Excluded {int(drop_rows.sum())} MaxN row(s) of "
-                f"{sorted(df.loc[drop_rows, 'ScientificName'].unique())} "
-                "per training.excluded_species."
-            )
-            df = df[~drop_rows]
-
     species_class_names = sorted(df["ScientificName"].unique().tolist())
     return df, species_class_names
 
@@ -326,7 +315,8 @@ def discover_extra_drops(
             id_to_name = registry.class_id_to_scientific()
             # _MANUAL_OVERRIDES guarantees the fish bucket exists in the global map.
             fish_cid = name_to_id["fish"]
-            df = pd.read_csv(raw_csvs[0])
+            # Both sources: biigle_to_yolo converts both into labels/.
+            df = pd.concat([pd.read_csv(p) for p in raw_csvs], ignore_index=True)
             for label in (
                 df.get("label_name", pd.Series()).dropna().astype(str).unique()
             ):
@@ -893,8 +883,9 @@ def _sample_background_frames(
     ``{drop_id: {stems}}`` to merge into the frame_filter; empty when disabled
     or there's nothing to add.
 
-    Only train drops are considered: the training-frame volumes that supply
-    most backgrounds are train-only, and val/test stay representative.
+    Only train drops are considered here. Val and test drops keep all their
+    backgrounds unthinned (see assemble_yolo_dataset): there they are measured,
+    not learned from.
     """
     if background_ratio <= 0 or n_positives_train <= 0:
         return {}
@@ -926,6 +917,7 @@ def select_frames_per_drop(
     rare_class_ids: Set[int],
     cap: int,
     rng: random.Random,
+    rare_exempt_drops: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]], Dict[str, int]]:
     """Choose which frames of each drop enter the dataset.
 
@@ -945,6 +937,14 @@ def select_frames_per_drop(
 
     Extras bypass the cap entirely: externally curated bulk imports where every
     annotated frame is high-signal.
+
+    ``rare_exempt_drops`` limits the rare exemption to those drops - in practice
+    the TRAIN split. The point of the exemption is more TRAINING frames for
+    scarce species; val needs balanced representation, not volume, and the
+    balancer already targets that. Applied to every split it inflated val from
+    640 to 997 images with frames drawn from deployments already in val (so
+    redundancy, not diversity) and cost snapper 493 training boxes to the split
+    shift (2026-08-25). None means every drop, preserving the old behaviour.
 
     Returns ``(frame_filter, background_by_drop, stats)``.
     """
@@ -967,11 +967,12 @@ def select_frames_per_drop(
         interesting: List[str] = []
         dominant_only: List[str] = []
         background: List[str] = []
+        exempt_here = rare_exempt_drops is None or drop_id in rare_exempt_drops
         for txt in drop_lbl_dir.glob("*.txt"):
             cls_ids = set(_iter_class_ids(txt))
             if not cls_ids:
                 background.append(txt.stem)
-            elif cls_ids & rare_class_ids:
+            elif exempt_here and cls_ids & rare_class_ids:
                 rare.append(txt.stem)
             elif cls_ids <= dominant_class_ids:
                 dominant_only.append(txt.stem)
@@ -1135,6 +1136,7 @@ def assemble_yolo_dataset(
         rare_class_ids=rare_class_ids,
         cap=cap,
         rng=rng,
+        rare_exempt_drops=set(train_drops),
     )
     n_dom_dropped = _stats["dom_dropped"]
     n_interesting_sampled = _stats["interesting_sampled"]
@@ -1173,6 +1175,22 @@ def assemble_yolo_dataset(
         f"{n_background_avail} available across {len(train_set)} train drop(s), "
         f"{n_background_kept} admitted "
         f"({(n_background_kept / denom if denom else 0):.0%} of {denom} train frames)."
+    )
+
+    # Val and test keep EVERY reviewed empty frame of their drops, unthinned.
+    # There the empties are part of what is measured: a box on empty water is a
+    # false positive, and without background frames no val/test frame could
+    # ever produce one. background_ratio is a training-mix knob, not a property
+    # of the data, so it does not apply here.
+    n_background_held_out = 0
+    for drop_id in set(val_drops) | set(test_drops):
+        stems = background_by_drop.get(drop_id, [])
+        if stems:
+            frame_filter.setdefault(drop_id, set()).update(stems)
+            n_background_held_out += len(stems)
+    logging.info(
+        f"assemble_yolo_dataset: {n_background_held_out} background frame(s) kept "
+        f"in val/test (all reviewed empties of those drops)."
     )
 
     for split_name, drops in [

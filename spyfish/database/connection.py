@@ -7,9 +7,10 @@ files, and wrong for every read-only consumer — the dashboard, a notebook, a
 reporting script — which must be able to fail when the database is absent
 rather than quietly conjure an empty one.
 
-So this is a plain function rather than a third method on the managers: a
-reader must be able to open a database without instantiating something that
-creates it.
+So this is a plain function, usable without any manager. The managers also
+route through it when constructed with ``read_only=True``, which skips
+``init_db()``, so readers can reuse their query methods without creating
+anything.
 """
 
 import sqlite3

@@ -7,15 +7,16 @@ attention", one from the annotation end and one from the field end.
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from theme import BAND_COLOURS, THRESHOLD_LINE
 
 from spyfish.config.base import IngestStatus
 
 from ..charting import style
+from ..data import stage_flags
 from ..layout import section
 
 # One definition of "done", shared with the funnel, so the same deployment
 # cannot be annotated in one chart and pending in the other.
-from .deployments import _stage_flags
 
 
 def render_bad_per_survey(dep: pd.DataFrame) -> None:
@@ -80,7 +81,7 @@ def render_bad_per_survey(dep: pd.DataFrame) -> None:
             "survey_id": "Survey",
             "bad_pct": "% bad deployments",
             "bad": "Count",
-            "reserve": "Reserve",
+            "reserve": "MPA",
         },
         category_orders={"survey_id": bad_surveys["survey_id"].tolist()},
         height=340,
@@ -92,11 +93,11 @@ def render_bad_per_survey(dep: pd.DataFrame) -> None:
     fig.add_hline(
         y=10,
         line_dash="dash",
-        line_color="#EF5350",
+        line_color=THRESHOLD_LINE,
         line_width=1,
         annotation_text="10% threshold",
         annotation_position="right",
-        annotation_font_color="#EF5350",
+        annotation_font_color=THRESHOLD_LINE,
     )
     style(
         fig,
@@ -121,16 +122,6 @@ BAND_LABELS = {
     "pending": "Not annotated yet",
     "bad": "Bad deployment",
     "ingest": "Ingest issue",
-}
-
-
-BAND_COLOURS = {
-    "Expert": "#0072B2",
-    "CitSci": "#E69F00",
-    "ML only": "#009E73",
-    "Not annotated yet": "#E0E0E0",
-    "Bad deployment": "#8C2F1F",
-    "Ingest issue": "#E08E7B",
 }
 
 
@@ -164,7 +155,7 @@ def render_annotation_depth(dep: pd.DataFrame) -> None:
         "until resolved, which is why they are not left as plain backlog."
     )
 
-    df = _stage_flags(dep)
+    df = stage_flags(dep)
     bad = df["is_bad_deployment"].fillna(0).astype(bool)
 
     # Exclusive, applied in order so the last assignment wins. Annotations are

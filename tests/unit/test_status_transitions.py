@@ -20,6 +20,8 @@ from spyfish.config.base import (
     InvalidTransitionError,
     MlStatus,
     ReportingStatus,
+    ZooCropsStatus,
+    ZooFramesStatus,
 )
 
 DROP = "KSF_20240124_BUV_KSF_085_01"
@@ -45,7 +47,15 @@ def _all_status_values(cls):
 def test_status_values_globally_unique():
     """Every status string is unique across all section classes — no collisions."""
     all_values = []
-    for cls in [MlStatus, CitSciStatus, ExpertStatus, ReportingStatus, IngestStatus]:
+    for cls in [
+        MlStatus,
+        CitSciStatus,
+        ExpertStatus,
+        ReportingStatus,
+        ZooFramesStatus,
+        ZooCropsStatus,
+        IngestStatus,
+    ]:
         all_values.extend(_all_status_values(cls))
     assert len(all_values) == len(set(all_values)), (
         f"Duplicate status values found: "
@@ -69,11 +79,22 @@ def test_status_values_have_section_prefix():
         assert val.startswith(
             "reporting_"
         ), f"ReportingStatus value {val!r} missing reporting_ prefix"
+    for val in _all_status_values(ZooFramesStatus):
+        assert val.startswith("zoo_frames_"), f"ZooFramesStatus value {val!r}"
+    for val in _all_status_values(ZooCropsStatus):
+        assert val.startswith("zoo_crops_"), f"ZooCropsStatus value {val!r}"
 
 
 def test_sections_registry_covers_all_section_classes():
     """The SECTIONS registry should be keyed by each class's COLUMN attribute."""
-    for cls in [MlStatus, CitSciStatus, ExpertStatus, ReportingStatus]:
+    for cls in [
+        MlStatus,
+        CitSciStatus,
+        ExpertStatus,
+        ReportingStatus,
+        ZooFramesStatus,
+        ZooCropsStatus,
+    ]:
         assert cls.COLUMN in SECTIONS
         assert SECTIONS[cls.COLUMN] is cls
 
@@ -281,6 +302,74 @@ def test_default_statuses_on_insert(temp_db):
     assert dep["citsci_status"] == CitSciStatus.PENDING
     assert dep["expert_status"] == ExpertStatus.PENDING
     assert dep["reporting_status"] == ReportingStatus.PENDING
+    assert dep["zoo_frames_status"] == ZooFramesStatus.PENDING
+    assert dep["zoo_crops_status"] == ZooCropsStatus.PENDING
+
+
+# ── Zooniverse validation transitions ────────────────────────────────────────
+
+
+def test_zoo_frames_happy_path(temp_db):
+    temp_db.add_or_update_deployment(drop_id=DROP)
+    temp_db.advance_status(DROP, ZooFramesStatus.COLUMN, ZooFramesStatus.UPLOADED)
+    temp_db.advance_status(DROP, ZooFramesStatus.COLUMN, ZooFramesStatus.COMPLETE)
+    assert temp_db.get_deployment(DROP)["zoo_frames_status"] == ZooFramesStatus.COMPLETE
+
+
+def test_zoo_frames_cannot_be_skipped():
+    """No SKIPPED: a drop with no detections is the purest recall check."""
+    assert not hasattr(ZooFramesStatus, "SKIPPED")
+
+
+def test_zoo_crops_pending_to_skipped(temp_db):
+    temp_db.add_or_update_deployment(drop_id=DROP)
+    temp_db.advance_status(DROP, ZooCropsStatus.COLUMN, ZooCropsStatus.SKIPPED)
+    assert temp_db.get_deployment(DROP)["zoo_crops_status"] == ZooCropsStatus.SKIPPED
+
+
+def test_zoo_crops_error_retries_to_uploaded(temp_db):
+    """The stage re-selects ERROR drops, so ERROR → UPLOADED must be legal."""
+    temp_db.add_or_update_deployment(drop_id=DROP)
+    temp_db.update_section_status(DROP, ZooCropsStatus.COLUMN, ZooCropsStatus.ERROR)
+    temp_db.advance_status(DROP, ZooCropsStatus.COLUMN, ZooCropsStatus.UPLOADED)
+    assert temp_db.get_deployment(DROP)["zoo_crops_status"] == ZooCropsStatus.UPLOADED
+
+
+def test_zoo_crops_cannot_complete_before_upload(temp_db):
+    temp_db.add_or_update_deployment(drop_id=DROP)
+    with pytest.raises(InvalidTransitionError):
+        temp_db.advance_status(DROP, ZooCropsStatus.COLUMN, ZooCropsStatus.COMPLETE)
+
+
+def test_zoo_sections_advance_independently(temp_db):
+    """Uploading crops leaves the frames section untouched, and the reverse."""
+    temp_db.add_or_update_deployment(drop_id=DROP)
+    temp_db.advance_status(DROP, ZooCropsStatus.COLUMN, ZooCropsStatus.UPLOADED)
+    dep = temp_db.get_deployment(DROP)
+    assert dep["zoo_crops_status"] == ZooCropsStatus.UPLOADED
+    assert dep["zoo_frames_status"] == ZooFramesStatus.PENDING
+
+
+def test_old_db_gains_zoo_columns_with_pending_default(tmp_path):
+    """A DB created before the zoo sections existed is migrated in place."""
+    import sqlite3
+
+    from spyfish.database.manager import DatabaseManager
+
+    db_path = tmp_path / "old.db"
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE deployments (drop_id TEXT PRIMARY KEY, "
+        "ml_status TEXT NOT NULL DEFAULT 'ml_pending')"
+    )
+    con.execute("INSERT INTO deployments (drop_id) VALUES (?)", (DROP,))
+    con.commit()
+    con.close()
+
+    db = DatabaseManager(db_path=str(db_path))
+    dep = db.get_deployment(DROP)
+    assert dep["zoo_frames_status"] == ZooFramesStatus.PENDING
+    assert dep["zoo_crops_status"] == ZooCropsStatus.PENDING
 
 
 # ── SQL injection whitelist ──────────────────────────────────────────────────

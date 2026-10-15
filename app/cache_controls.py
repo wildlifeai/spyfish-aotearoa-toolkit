@@ -6,7 +6,7 @@ The obvious home is `utils`, next to `sync_db_if_needed` and the download
 helpers, and that is where this lived. The problem is who has to call it: the
 button belongs on every page, so the entrypoint renders it once, and the
 entrypoint runs on every page load. Importing `utils` there would put
-`spyfish.storage.db_sync` — config, credentials, S3 — on the load path of the
+`spyfish.storage.db_sync`, config, credentials, S3, on the load path of the
 whole app, including the support page that exists to survive exactly that kind
 of breakage.
 

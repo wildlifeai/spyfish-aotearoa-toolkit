@@ -27,12 +27,11 @@ import streamlit as st
 from spyfish.config.base import VideoPresence
 
 from .charts.deployments import (
-    _stage_flags,
-    add_completion_flags,
     render_deployments_per_year,
     render_funnel,
     render_section_progress,
 )
+from .data import add_completion_flags, stage_flags
 from .layout import chips
 
 
@@ -81,7 +80,7 @@ def render(ctx: dict) -> None:
 
     chips(["Pipeline funnel", "Section progress"])
 
-    df = _stage_flags(dep)
+    df = stage_flags(dep)
     presence = df["video_presence"]
 
     st.subheader("Overview")

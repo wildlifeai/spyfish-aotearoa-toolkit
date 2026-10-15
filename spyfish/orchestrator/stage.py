@@ -9,7 +9,10 @@ Two stage types:
 
 Adding a new pipeline stage
 ---------------------------
-1. Write the step function in run_pipeline.py.
+1. Write the step function in the package that owns the work (e.g.
+   spyfish/zooniverse/validation_frames.py `run_validation_frames_drop`), not
+   in run_pipeline.py, which should only register stages. Older stages
+   (zooniverse-clips, biigle-upload) still have theirs in run_pipeline.py.
    - GlobalStage fn:  () -> None
    - DropStage fn:    (drop_id: str) -> str | None   (None = not ready, leave unchanged)
 2. Add one entry to STAGES in run_pipeline.py.
@@ -25,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from spyfish.config.base import SECTIONS
+from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.log_config import log_header
 
@@ -187,6 +191,19 @@ class StageRunner:
                 f"--survey {survey_id}: {len(drop_ids)} of {before} eligible "
                 f"drop(s) belong to this survey."
             )
+
+        # Same batch size as --ml: the top `limit_processing` by priority (the
+        # eligibility query already sorts priority DESC). --survey bypasses it,
+        # as it does for --ml, because then the survey is the batch. Without
+        # this, a drop stage processed EVERY eligible drop in the database,
+        # so a targeted ML batch had no way to carry through to clips or
+        # upload without sweeping the whole backlog.
+        if not survey_id and len(drop_ids) > config.limit_processing:
+            logging.info(
+                f"{len(drop_ids)} eligible drop(s); taking the top "
+                f"{config.limit_processing} by priority (limit_processing)."
+            )
+            drop_ids = drop_ids[: config.limit_processing]
 
         if not drop_ids:
             logging.info(f"No eligible deployments for {stage.flag}. Skipping.")

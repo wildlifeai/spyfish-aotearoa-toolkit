@@ -23,6 +23,27 @@ def get_cached_pipeline_model():
     return YOLO(str(model_path))
 
 
+def inference_stride(fps: float, ml_fps: float | None = None) -> int:
+    """Frames skipped between inference samples: one sample every `stride` frames.
+
+    The only definition. Anything that needs to know which frames inference
+    looked at (e.g. the Zooniverse validation grid) must use this, not its own
+    copy, or a change here would silently desynchronise them.
+    """
+    return max(1, round(fps / (ml_fps if ml_fps is not None else config.ml_fps)))
+
+
+def seek_to_sampling_start(cap, sampling_start: float) -> int:
+    """Seek `cap` to `sampling_start` and return the frame index it landed on.
+
+    The first frame inference samples is wherever this seek lands, not
+    ``round(start * fps)``. Shared so that rebuilding the sampled grid later
+    (Zooniverse validation) lands on the same frame inference did.
+    """
+    cap.set(cv2.CAP_PROP_POS_MSEC, sampling_start * 1000.0)
+    return int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+
 def get_video_fps(video_path):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -66,10 +87,7 @@ def run_yolo_inference(
         if not cap.isOpened():
             raise ValueError(f"Could not open video {video_url} during inference.")
 
-        cap.set(cv2.CAP_PROP_POS_MSEC, sampling_start * 1000.0)
-
-        # align current frame after precise seek
-        current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        current_frame = seek_to_sampling_start(cap, sampling_start)
 
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         actual_duration_seconds = total_video_frames / true_fps
@@ -408,7 +426,7 @@ def main(args):
     logging.info(f"Model: {model_path}")
 
     true_fps = get_video_fps(video_url)
-    vid_stride = max(1, round(true_fps / ml_fps))
+    vid_stride = inference_stride(true_fps, ml_fps)
     logging.info(
         f"Video FPS: {true_fps:.2f}, target ML FPS: {ml_fps}, stride: {vid_stride}, Confidence: {conf}"
     )

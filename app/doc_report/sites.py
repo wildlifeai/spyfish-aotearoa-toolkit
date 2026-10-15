@@ -29,8 +29,8 @@ from .charts.sites import (  # noqa: E402
     render_site_map,
 )
 from .charts.species import render_yearly_trend  # noqa: E402
-from .data import effort_per, experiments_frame, real_species  # noqa: E402
-from .layout import chips, extra_filters, section  # noqa: E402
+from .data import experiments_frame, richness_rollup  # noqa: E402
+from .layout import chips, section  # noqa: E402
 from .site_data import (  # noqa: E402
     apply_filters,
     best_per_drop_species,
@@ -43,9 +43,10 @@ from .site_data import (  # noqa: E402
 def render(ctx: dict | None = None) -> None:
     """Render the whole Sites view.
 
-    Year, MPA, region and protection status arrive via `ctx` from the shared
-    sidebar block; species is this view's own picker (rendered into the
-    sidebar via `extra_filters`).
+    Every filter, species included, arrives via `ctx` from the shared
+    sidebar block. Community metrics here (the KPIs, the per-site richness
+    table, the leaderboard) read the species-UNfiltered frames; only the
+    per-species year trend follows the Species filter.
     """
     # Above this view's own filters, so the strip sits directly under the
     # report-wide filter band on every view rather than after a row of widgets
@@ -75,7 +76,10 @@ def render(ctx: dict | None = None) -> None:
     # Every surveyed deployment, enriched the same way, so effort can be sliced by the
     # same site/protection/region attributes as the sightings.
     effort_all = join_site_metadata(
-        add_drop_id_columns(load_effort()), load_sites(show_coords)
+        add_drop_id_columns(
+            load_effort(bool((ctx or {}).get("exclude_bad_deployments")))
+        ),
+        load_sites(show_coords),
     )
 
     if df_all.empty:
@@ -84,9 +88,10 @@ def render(ctx: dict | None = None) -> None:
 
     df_all = best_per_drop_species(df_all)
 
-    # Year, MPA, region and protection status come from the shared sidebar
-    # block; species is this view's own picker below (the shared species
-    # filter was retired in favour of on-page pickers).
+    # Every filter comes from the shared sidebar block, species included.
+    # This view used to carry its own species multiselect; it was removed
+    # (2026-10-02) when the shared Species filter came back, so there is one
+    # control rather than two fighting each other.
     year_range = (ctx or {}).get("years")
     reserves = (ctx or {}).get("reserves") or []
     regions = (ctx or {}).get("regions") or []
@@ -103,34 +108,24 @@ def render(ctx: dict | None = None) -> None:
     df_context = apply_filters(df_all, **_filters)
     effort_view = apply_filters(effort_all, **_filters)
 
-    # This view's species picker, rendered into the sidebar under the shared
-    # filters. Options come from the already-filtered frame, so it never
-    # offers a species with no rows behind it under the current selection.
-    with extra_filters(1) as filter_cols:
-        with filter_cols[0]:
-            species = st.multiselect(
-                "Species (Sites view)",
-                sorted(df_context["display_name"].dropna().unique()),
-                default=[],
-            )
+    species = (ctx or {}).get("species") or []
 
-    df = df_context
-    if species:
-        df = df[df["display_name"].isin(species)]
-
-    if df.empty:
+    if df_context.empty:
         st.warning("No sites match these filters.")
         st.stop()
 
     # ── Headline counts ───────────────────────────────────────────────────────────
-
+    #
+    # From `df_context`, the species-UNfiltered frame: "how many sites, how
+    # many species" describes the selection, and ticking one species in the
+    # sidebar must not answer "1 species".
     kpis = st.columns(4)
-    kpis[0].metric("Deployments", f"{df['drop_id'].nunique():,}")
-    kpis[1].metric("Sites", f"{df['site_id'].nunique():,}")
+    kpis[0].metric("Deployments", f"{df_context['drop_id'].nunique():,}")
+    kpis[1].metric("Sites", f"{df_context['site_id'].nunique():,}")
     kpis[2].metric(
-        "Marine reserves", f"{len(split_reserves(df['link_to_marine_reserve'])):,}"
+        "MPAs", f"{len(split_reserves(df_context['link_to_marine_reserve'])):,}"
     )
-    kpis[3].metric("Species", f"{df['scientific_name'].nunique():,}")
+    kpis[3].metric("Species", f"{df_context['scientific_name'].nunique():,}")
 
     st.divider()
 
@@ -143,33 +138,18 @@ def render(ctx: dict | None = None) -> None:
 
     section("Site detail")
 
-    # Species per deployment, not mean MaxN: the old column summed MaxN across
-    # species before dividing, the number the MPA view refuses. Richness counts
-    # only real species (generic and unidentified classes are N unknowns under
-    # one label), summed per deployment then divided by the analysed count.
-    real = real_species(df)
-    site_rows = (
-        real.groupby(["site_id", "region", "protection_status"])
-        .agg(species=("scientific_name", "nunique"))
-        .reset_index()
-    )
-    rich_sum = (
-        real.groupby(["site_id", "drop_id"])["scientific_name"]
-        .nunique()
-        .groupby("site_id")
-        .sum()
-        .reset_index(name="rich_sum")
-    )
-    site_rows = site_rows.merge(rich_sum, on="site_id", how="left")
-    site_rows = site_rows.merge(
-        effort_per(effort_view, "site_id"), on="site_id", how="left"
-    )
-    site_rows["analysed"] = site_rows["analysed"].fillna(0)
-    site_rows["species_per_dep"] = site_rows["rich_sum"].fillna(0) / site_rows[
-        "analysed"
-    ].clip(lower=1)
-    site_rows = site_rows.drop(columns="rich_sum").sort_values(
-        "species_per_dep", ascending=False
+    # The shared rollup (`data.richness_rollup`), the same function the MPA
+    # view's per-area table uses, so "species per deployment" cannot mean
+    # two things in one report. Species per deployment, not mean MaxN: the
+    # old column summed MaxN across species, the number the MPA view
+    # refuses. The frame is the species-UNfiltered one, since richness is a
+    # community metric: with the sidebar filter on one species every site
+    # would otherwise read "1 species".
+    site_rows = richness_rollup(
+        df_context,
+        effort_view,
+        by="site_id",
+        attrs=("region", "protection_status"),
     )
 
     st.dataframe(
@@ -177,7 +157,7 @@ def render(ctx: dict | None = None) -> None:
         width="stretch",
         hide_index=True,
         column_config={
-            "site_id": st.column_config.TextColumn("SiteID"),
+            "site_id": st.column_config.TextColumn("SiteID", pinned=True),
             "region": st.column_config.TextColumn("Region"),
             "protection_status": st.column_config.TextColumn("Protection status"),
             "analysed": st.column_config.NumberColumn("Analysed"),
@@ -216,11 +196,21 @@ def render(ctx: dict | None = None) -> None:
     if ann is not None and not ann.empty:
         st.divider()
         exp = experiments_frame(ann)
-        render_site_leaderboard(exp)
+        # The leaderboard ranks sites by VARIETY, so it reads the
+        # species-unfiltered frame; with the sidebar filter on one species
+        # every site scored 1 and the chart was a wall of identical bars.
+        ann_all = (ctx or {}).get("annotations_all_species")
+        exp_all = (
+            experiments_frame(ann_all)
+            if ann_all is not None and not ann_all.empty
+            else exp
+        )
+        render_site_leaderboard(exp_all)
         st.divider()
         # One line per site over the years: a per-site question, which is
         # why it sits here rather than on Species where it was first put.
-        render_yearly_trend(exp)
+        # Per-species by nature, so it follows the sidebar Species filter.
+        render_yearly_trend(exp, species_filter=species)
 
     st.divider()
     render_site_map(df_context, effort_view, show_coords)
@@ -233,4 +223,6 @@ def render(ctx: dict | None = None) -> None:
     # above — drawing it a second time crashes the page.
     if exp is not None:
         st.divider()
-        render_click_to_filter(exp, show_coords)
+        # "Species at the selected sites" is a community question: what is
+        # at these sites, not just the picked species.
+        render_click_to_filter(exp_all, show_coords)

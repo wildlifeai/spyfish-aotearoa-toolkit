@@ -29,3 +29,6 @@
 # TON_20211026_BUV_TON_071_01   # dim mismatch: local 1440×1080 vs Biigle 1920×1080
 volume_30196   # UoA
 volume_30184   # UoA
+volume_32392   # data is copied into drops
+volume_32413   # data is copied into drops
+volume_32414   # data is copied into drops

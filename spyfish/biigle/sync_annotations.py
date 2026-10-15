@@ -13,6 +13,7 @@ from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import (
     AnnotationDatabaseManager,
+    biigle_external_id,
     null_deployment_row,
 )
 from spyfish.database.manager import DatabaseManager
@@ -97,8 +98,16 @@ def _map_biigle_to_spyfish_schema(
     frame_key: str,
     workflow_label_ids: Optional[set] = None,
     species_label_ids: Optional[set] = None,
+    volume_id: Optional[int] = None,
 ) -> Optional[Tuple[Tuple[str, str], Dict[str, Any]]]:
     """Maps a Biigle annotation row to the Spyfish schema. Returns (aggregation_key, mapped_dict).
+
+    `external_id` is the volume-scoped source key (`biigle_volume_{id}`), the
+    expert counterpart of the model name on ML rows. It used to be the BIIGLE
+    annotation id, which after aggregation was just the first box of each
+    (frame, species) group, and its non-NULL shape made the sync's clear
+    match legacy expert rows too. `volume_id` None (bundle synthesizer, no
+    API session) still yields a BIIGLE-prefixed key so ownership holds.
 
     Which LABEL TREE a label belongs to decides what it means, so that is
     checked first and the text second. A tree is assigned by the system; the
@@ -195,7 +204,9 @@ def _map_biigle_to_spyfish_schema(
         "annotated_by": "expert",
         "interval_annotation": "",
         "confidence_agreement": 1.0,
-        "external_id": str(row.get("annotation_id", row.get("id", ""))),
+        "external_id": biigle_external_id(
+            volume_id if volume_id is not None else "unknown"
+        ),
     }
     return key, mapped_item
 
@@ -205,8 +216,12 @@ def aggregate_raw_to_maxn_rows(
     drop_id: str,
     workflow_label_ids: Optional[set] = None,
     species_label_ids: Optional[set] = None,
+    volume_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Aggregate raw Biigle annotation rows into MaxN rows (one per frame × species).
+
+    `volume_id` becomes every row's `external_id` (`biigle_volume_{id}`), the
+    key `clear_synced_annotations` deletes by on re-sync.
 
     Public entry point reused by the Biigle sync pipeline AND by the
     download-volume bundle synthesizer. Returns a list of dicts using the
@@ -232,6 +247,7 @@ def aggregate_raw_to_maxn_rows(
             fname,
             workflow_label_ids,
             species_label_ids,
+            volume_id=volume_id,
         )
         if mapped is None:
             continue
@@ -367,15 +383,15 @@ def _record_null_deployment(db, ann_db, drop_id: str, volume_id: int, why: str) 
     advance the status like any other completion.
 
     Volume-scoped external_id so a re-sync replaces it: clear_synced_annotations
-    only removes rows with a non-null external_id, which is what protects
+    removes only `biigle_volume_*` rows, which is what protects legacy and
     hand-entered expert rows.
     """
     logging.info(f"  {why} for {drop_id} — recording a null-deployment row.")
-    ann_db.clear_synced_annotations(drop_id, "expert")
+    ann_db.clear_synced_annotations(drop_id, "expert", volume_id=volume_id)
     ann_db.add_annotations(
         [
             null_deployment_row(
-                drop_id, "expert", external_id=f"biigle_volume_{volume_id}"
+                drop_id, "expert", external_id=biigle_external_id(volume_id)
             )
         ]
     )
@@ -396,13 +412,16 @@ def _write_substrate_csv(parser, report: pd.DataFrame, drop_id: str, trees) -> N
     logging.info(f"  Expert substrate ({len(substrate_df)} rows) → {substrate_path}")
 
 
-def _ingest_species(db, ann_db, drop_id: str, annotations_to_add: list) -> None:
+def _ingest_species(
+    db, ann_db, drop_id: str, volume_id: int, annotations_to_add: list
+) -> None:
     """Replace this drop's synced expert rows, export its MaxN CSV, complete it.
 
-    Only Biigle-sourced rows are cleared (external_id IS NOT NULL), so
-    manually-entered expert annotations survive a re-sync.
+    Only THIS volume's rows are cleared (`external_id` = `biigle_volume_{id}`),
+    so the legacy expert account, hand-entered rows and any other volume's
+    review of the same drop survive a re-sync and sit beside this one.
     """
-    ann_db.clear_synced_annotations(drop_id, "expert")
+    ann_db.clear_synced_annotations(drop_id, "expert", volume_id=volume_id)
     ann_db.add_annotations(annotations_to_add)
 
     maxn_path = config.get_biigle_expert_maxn_csv_path(drop_id)
@@ -459,7 +478,9 @@ def _volume_has_drop_files(handler, volume_id: int, drop_id: str, cache: dict) -
     return any(pattern.search(name) for name in cache[volume_id])
 
 
-def _write_universe_csv(handler, volume_id: int, drop_id: str, cache: dict) -> int:
+def _write_reviewed_frames_csv(
+    handler, volume_id: int, drop_id: str, cache: dict
+) -> int:
     """Record every frame of `drop_id` present in `volume_id`, annotated or not.
 
     A Biigle annotation report contains only frames that HAVE annotations, so on
@@ -483,10 +504,10 @@ def _write_universe_csv(handler, volume_id: int, drop_id: str, cache: dict) -> i
     names = sorted(n for n in cache[volume_id] if n and pattern.search(n))
     if not names:
         return 0
-    path = config.get_biigle_expert_universe_csv_path(drop_id)
+    path = config.get_biigle_expert_reviewed_frames_csv_path(drop_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"filename": names}).to_csv(path, index=False)
-    logging.info(f"  Reviewed-frame universe ({len(names)}) → {path}")
+    logging.info(f"  Reviewed frames ({len(names)}) → {path}")
     return len(names)
 
 
@@ -576,6 +597,13 @@ def sync_biigle_annotations():
                     continue
 
             if report.empty:
+                # Reviewed and nothing found. The frame list is the only record
+                # that the expert looked at all - without it "saw nothing" and
+                # "never uploaded" are both just a missing file on disk, and
+                # every frame of a genuinely empty drop is a lost negative.
+                _write_reviewed_frames_csv(
+                    handler, volume_id, drop_id, volume_files_cache
+                )
                 _record_null_deployment(
                     db, ann_db, drop_id, volume_id, "No annotations found"
                 )
@@ -590,7 +618,7 @@ def sync_biigle_annotations():
 
             # Negatives: the frames in this volume that the report does NOT
             # mention are frames the expert reviewed and left empty.
-            _write_universe_csv(handler, volume_id, drop_id, volume_files_cache)
+            _write_reviewed_frames_csv(handler, volume_id, drop_id, volume_files_cache)
 
             _write_substrate_csv(parser, report, drop_id, trees)
 
@@ -598,7 +626,7 @@ def sync_biigle_annotations():
                 report, trees.species, trees.workflow, trees.substrate
             )
             annotations_to_add = aggregate_raw_to_maxn_rows(
-                countable, drop_id, trees.workflow, trees.species
+                countable, drop_id, trees.workflow, trees.species, volume_id=volume_id
             )
 
             if not annotations_to_add:
@@ -612,7 +640,7 @@ def sync_biigle_annotations():
                 processed_drops.append(drop_id)
                 continue
 
-            _ingest_species(db, ann_db, drop_id, annotations_to_add)
+            _ingest_species(db, ann_db, drop_id, volume_id, annotations_to_add)
             processed_drops.append(drop_id)
 
         except Exception as e:

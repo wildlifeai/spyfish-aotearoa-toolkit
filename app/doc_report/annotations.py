@@ -2,10 +2,11 @@
 
 Who annotated what, and whether the sources agree.
 
-Three sources write annotations: the model (`annotated_by` = a model name),
-Zooniverse volunteers (`citsci`) and experts (`expert`), the latter covering both legacy annotations and BIIGLE review. There is no merge
-step: where expert annotations exist they win, and the other two stay for
-auditing.
+Three sources write annotations: the model (`annotated_by` = `'ml'`, with the
+model name in `external_id`), Zooniverse volunteers (`citsci`) and experts
+(`expert`), the latter covering both legacy annotations and BIIGLE review.
+There is no merge step: where expert annotations exist they win, and the other
+two stay for auditing.
 
 The comparison panels need deployments carrying *both* ML and expert
 annotations, which is a much smaller set than either source alone. They say so
@@ -16,7 +17,16 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from ecology_data import source_bucket
-from theme import SOURCE_COLORS
+from theme import (
+    AGREEMENT_LABEL,
+    AGREEMENT_LINE,
+    GAP_SEVERITY_COLORS,
+    ROW_DIVIDER,
+    SOURCE_COLORS,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    TEXT_TERTIARY,
+)
 
 from .charting import style
 from .charts.annotations import render_source_calibration
@@ -55,8 +65,8 @@ _REVIEW_PAIRS = (("ML", "CitSci"), ("CitSci", "Expert"), ("ML", "Expert"))
 def _source_disagreement(ann: pd.DataFrame) -> pd.DataFrame:
     """Per-deployment total MaxN for every source pair that both reviewed it.
 
-    "Reviewed" comes from row presence — a null-species row is a review that
-    found nothing — while the totals come from named rows only. That keeps the
+    "Reviewed" comes from row presence, a null-species row is a review that
+    found nothing, while the totals come from named rows only. That keeps the
     two states apart: a source that reviewed and saw nothing compares as 0,
     a source that never looked is absent from the pair entirely.
     """
@@ -141,7 +151,7 @@ def render(ctx: dict) -> None:
         "Expert",
         f"{int(by_source.get('Expert', 0)):,}",
         help="Deployments with expert annotations, whether legacy or from BIIGLE. Expert wins wherever "
-        "sources disagree, so this is the number the reporting rests on.",
+        "sources disagree, so this is the number the reporting uses.",
     )
     kpis[3].metric(
         "ML",
@@ -187,19 +197,22 @@ def render(ctx: dict) -> None:
     with right:
         section("Species observed")
         st.caption(
-            "**Seen in** is frequency of occurrence, and it is the more robust "
+            "**Seen in** is frequency of occurrence, and it is the steadier "
             "number: a total can come from one lucky deployment, a frequency "
             "cannot. **Best drop** is the highest MaxN the species reached in "
             "any single deployment."
         )
         n_deps = ann["drop_id"].nunique()
+        species_col = (
+            "display_name" if "display_name" in ann.columns else "scientific_name"
+        )
         species = (
             # `max` is right here: the best a species reached in any single
             # interval of any deployment is its peak, which is what MaxN means.
-            ann.groupby("scientific_name")
+            ann.groupby(species_col)
             .agg(best=(INTERVAL_COUNT, "max"), seen=("drop_id", "nunique"))
             .reset_index()
-            .rename(columns={"scientific_name": "Species"})
+            .rename(columns={species_col: "Species"})
         )
         species["Best drop"] = species["best"].astype(int)
         species["Seen in"] = species["seen"].astype(str) + f" / {n_deps}"
@@ -211,6 +224,7 @@ def render(ctx: dict) -> None:
             width="stretch",
             height=300,
             column_config={
+                "Species": st.column_config.TextColumn("Species", pinned=True),
                 "Best drop": st.column_config.NumberColumn(
                     "Best drop",
                     help="Highest MaxN this species reached in any single "
@@ -227,7 +241,7 @@ def render(ctx: dict) -> None:
                     max_value=100,
                     format="%.0f%%",
                     help="Share of annotated deployments where the species was "
-                    "present. More robust than a total: a total can be one "
+                    "present. Harder to skew than a total: a total can be one "
                     "lucky drop, a frequency cannot.",
                 ),
             },
@@ -238,15 +252,15 @@ def render(ctx: dict) -> None:
     # ── Source disagreement ──────────────────────────────────────────────────
     section("Source disagreement")
     st.caption(
-        "The pipeline reviews in order — ML first, volunteers after, the expert "
-        "last — so each pair compares an earlier source against the later one "
+        "The pipeline reviews in order, ML first, volunteers after, the expert "
+        "last, so each pair compares an earlier source against the later one "
         "that re-reviewed the same deployment. Totals are class-agnostic (each "
         "source's species peaks, summed), because the sources do not share one "
-        "species vocabulary — volunteers pick from a short list, and much of "
+        "species vocabulary, volunteers pick from a short list, and much of "
         "the ML history was produced by the retired binary model, which had "
         "only one class. **Empty vs seen** is the sharpest "
         "conflict: one source reviewed and recorded nothing while the other "
-        "counted 3 or more — either a missed review or a wrong one, and under "
+        "counted 3 or more, either a missed review or a wrong one, and under "
         "expert-wins a wrong empty silently suppresses the other source's data."
     )
     # Source-unfiltered on purpose, like the ML-against-expert panel below:
@@ -282,7 +296,7 @@ def render(ctx: dict) -> None:
         )
     elif flagged.empty:
         st.success(
-            "Every deployment reviewed by two sources got comparable totals — "
+            "Every deployment reviewed by two sources got comparable totals, "
             "no disagreements at the current filters."
         )
     else:
@@ -369,7 +383,7 @@ def render(ctx: dict) -> None:
     )
     m[1].metric(
         "Agreement",
-        "—" if pd.isna(corr) else f"{corr:.2f}",
+        "-" if pd.isna(corr) else f"{corr:.2f}",
         help="Pearson correlation between the ML and expert totals for the "
         "same deployment. Needs at least three paired deployments.",
     )
@@ -399,14 +413,14 @@ def render(ctx: dict) -> None:
             y0=0,
             x1=lim,
             y1=lim,
-            line=dict(dash="dash", color="#B9C4D6", width=1.5),
+            line=dict(dash="dash", color=AGREEMENT_LINE, width=1.5),
         )
         fig.add_annotation(
             x=lim * 0.72,
             y=lim * 0.82,
             text="agree",
             showarrow=False,
-            font=dict(color="#8794A8"),
+            font=dict(color=AGREEMENT_LABEL),
         )
         fig.update_traces(marker=dict(size=11, color=SOURCE_COLORS["ml"], opacity=0.85))
         style(fig, height=330)
@@ -421,17 +435,17 @@ def render(ctx: dict) -> None:
         gap = paired.assign(gap=(paired["Expert"] - paired["ML"]).abs())
         gap = gap.sort_values("gap", ascending=False).head(8)
         for row in gap.itertuples():
-            colour = "#D9603B" if row.gap >= 10 else "#E8A33D"
+            colour = GAP_SEVERITY_COLORS["large" if row.gap >= 10 else "moderate"]
             direction = "ML low" if row.ML < row.Expert else "ML high"
             st.markdown(
                 f'<div style="display:flex;gap:.6rem;align-items:flex-start;'
-                f'padding:.35rem 0;border-bottom:1px solid #F0F3F8">'
+                f'padding:.35rem 0;border-bottom:1px solid {ROW_DIVIDER}">'
                 f'<div style="width:8px;height:8px;border-radius:50%;'
                 f'background:{colour};margin-top:.4rem;flex:0 0 8px"></div>'
-                f'<div style="font-size:.8rem;color:#2B3A55">{row.Index}<br>'
-                f'<span style="color:#7A879C">expert {int(row.Expert)} · '
+                f'<div style="font-size:.8rem;color:{TEXT_PRIMARY}">{row.Index}<br>'
+                f'<span style="color:{TEXT_SECONDARY}">expert {int(row.Expert)} · '
                 f"ML {int(row.ML)} · {direction}</span></div>"
-                f'<div style="margin-left:auto;font-size:.75rem;color:#94A0B4">'
+                f'<div style="margin-left:auto;font-size:.75rem;color:{TEXT_TERTIARY}">'
                 f"{int(row.gap)}</div></div>",
                 unsafe_allow_html=True,
             )
