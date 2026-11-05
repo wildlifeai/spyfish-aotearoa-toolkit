@@ -42,8 +42,8 @@ def render_contact_note() -> None:
     st.markdown(
         f"""
         <style>
-          a[href$="/{SUPPORT_PAGE_PATH}"][data-testid="stSidebarNavLink"],
-          li:has(> div > a[href$="/{SUPPORT_PAGE_PATH}"][data-testid="stSidebarNavLink"]) {{
+          a[href$=\"/{SUPPORT_PAGE_PATH}\"][data-testid=\"stSidebarNavLink\"],
+          li:has(> div > a[href$=\"/{SUPPORT_PAGE_PATH}\"][data-testid=\"stSidebarNavLink\"]) {{
             display: none;
           }}
         </style>
@@ -51,7 +51,8 @@ def render_contact_note() -> None:
         unsafe_allow_html=True,
     )
     st.sidebar.error(
-        "⚠️ **If this tool doesn't work**, contact Kalindi immediately on "
-        "Slack, or email [kalindi@wildlife.ai](mailto:kalindi@wildlife.ai).  \n"
+        "⚠️ **If this tool doesn't work**, please open a "
+        "[GitHub issue](https://github.com/wildlifeai/spyfish-aotearoa-toolkit/issues) "
+        "with the error details.  \n"
         f"Read more about it here: [Error page](/{SUPPORT_PAGE_PATH})"
     )

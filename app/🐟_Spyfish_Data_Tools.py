@@ -109,15 +109,15 @@ except Exception:  # noqa: BLE001, styling must never break navigation
 # different question in each, so they share an icon.
 VIEW_ICONS = {
     "Report home": "📊",
-    "Operations home": "🔄",
-    "MPA": "🛡️",
-    "Surveys": "🗓️",
+    "Operations home": "🛠️",
+    "MPA": "🪴️",
+    "Surveys": "🔬️",
     "Sites": "📍",
     "Deployments": "📺",
-    "Annotations": "✏️",
+    "Annotations": "✍️",
     "Species": "🐟",
-    "Metadata error review": "🔍",
-    "Species search": "🔎",
+    "Metadata error review": "🚨",
+    "Species search": "🔍",
 }
 
 
@@ -131,7 +131,7 @@ def _view(section: str, name: str):
     def page() -> None:
         from doc_report import shell
 
-        shell.register_home()
+        shell.register_homes()
         shell.render(section, name)
 
     page.__name__ = f"{section.lower()}_{name.lower().replace(' ', '_')}"
@@ -147,7 +147,6 @@ def home():
 
     st.divider()
     st.subheader("Quick links")
-
     cols = st.columns(2, border=True)
     with cols[0]:
         if reporting_home_page is not None:
@@ -157,31 +156,33 @@ def home():
             st.caption("📊 Reporting is unavailable, see the error banner.")
     with cols[1]:
         if operations_home_page is not None:
-            st.page_link(operations_home_page, label="Operations", icon="🔄")
+            st.page_link(operations_home_page, label="Operations", icon="🛠️")
             st.caption(
                 "Pipeline state, footage coverage, annotation progress and "
                 "data quality."
             )
         else:
-            st.caption("🔄 Operations is unavailable, see the error banner.")
+            st.caption("🛠️ Operations is unavailable, see the error banner.")
 
     cols = st.columns(2, border=True)
     with cols[0]:
         if metadata_page is not None:
-            st.page_link(metadata_page, label="Metadata error review", icon="🔍")
+            st.page_link(metadata_page, label="Metadata error review", icon="🚨")
             st.caption("Review validation errors and data quality issues.")
         else:
-            st.caption("🔍 Metadata error review is unavailable, see the error banner.")
+            st.caption("🚨 Metadata error review is unavailable, see the error banner.")
     with cols[1]:
         st.page_link(videos_page, label="View Deployment Videos", icon="📺")
         st.caption("View videos from the deployments.")
 
     st.divider()
     st.markdown(
-        "For more info about Spyfish Aotearoa check here: "
-        "https://spyfish.notion.site/overview  \n"
-        "For any issues please write to Kalindi or add your issues here: "
-        "https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues"
+        "For more information about the project see the "
+        "[design documentation](https://github.com/wildlifeai/spyfish-aotearoa-toolkit/blob/main/design_doc.md) "
+        "and [architecture overview](https://github.com/wildlifeai/spyfish-aotearoa-toolkit/blob/main/ARCHITECTURE.md).  \n"
+        "To contribute or report issues, please open a "
+        "[GitHub issue](https://github.com/wildlifeai/spyfish-aotearoa-toolkit/issues) "
+        "or submit a pull request. See the README for setup instructions."
     )
 
 
@@ -296,18 +297,18 @@ substrate_page = _file_page(
 # Checking tool, not a report: play a legacy-annotated deployment at the
 # second its MaxN was recorded, to judge the import against the footage.
 legacy_check_page = _file_page(
-    "pages/_advanced/🎬_Legacy_MaxN_Check.py",
+    "pages/_advanced/🎥_Legacy_MaxN_Check.py",
     title="Legacy MaxN check",
-    icon="🎬",
+    icon="🎥",
     url_path="legacy-maxn-check",
 )
 # Registered so the URL resolves, but left out of `st.navigation` groups so it
 # does not appear in the sidebar. The contact note at the bottom of the sidebar
 # is the way in.
 support_page = _file_page(
-    "pages/0_🆘_Support.py",
+    "pages/0_🚨_Support.py",
     title="Error page",
-    icon="🆘",
+    icon="🚨",
     url_path="support",
 )
 
@@ -322,17 +323,15 @@ support_page = _file_page(
 
 # Sections with no pages (the fallback mode) are left out entirely, an empty
 # nav group renders as a bare header pointing at nothing.
-_nav_sections: dict = {"": [home_page]}
+_nav_sections: dict = {"": : [home_page]}
 for _section in ("Reporting", "Operations"):
     if section_pages.get(_section):
         _nav_sections[_section] = section_pages[_section]
-
 
 # `_file_page` returns None for a file that is no longer there, so every group
 # is filtered before it reaches `st.navigation`, which rejects a None entry.
 def _present(pages: list) -> list:
     return [page for page in pages if page is not None]
-
 
 nav = st.navigation(
     {
@@ -354,30 +353,16 @@ nav = st.navigation(
             ]
         ),
     },
-    # Two sections of seven views each puts the nav over Streamlit's collapse
-    # threshold, which hid 15 of the 24 links behind a "View 15 more" link,
-    # including all of Operations. The grouped nav only works if the groups are
-    # visible.
-    expanded=True,
+    # Two sections of several views each. Streamlit's own grouped nav is the
+    # simplest that still gives every view its own entry and URL.
 )
 
-# Views link to each other, and `st.page_link` needs the page object rather than
-# a URL string for function-defined pages. The entrypoint owns those objects, so
-# it hands them over here. Keys are `(section, view name)`.
-if _SHELL_ERROR is None:
-    from doc_report import shell as _shell
-
-    _shell.register_pages(view_pages)
-else:
+if _SHELL_ERROR is not None:
     st.error(
-        "The reporting section failed to load and has been removed from the "
-        "navigation, the rest of the app still works. "
-        f"`{type(_SHELL_ERROR).__name__}: {_SHELL_ERROR}`"
+        "Reporting views are unavailable (a configuration or import error). "
+        "The rest of the app still works. The full error is in the logs."
     )
 
 nav.run()
-# Both go under the page list, in this order: the control first, the "who to
-# call when it breaks" note last. Once here rather than per page, which is why
-# the report views had no refresh button.
-render_sidebar_refresh()
 render_contact_note()
+render_sidebar_refresh()
