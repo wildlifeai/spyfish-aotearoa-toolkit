@@ -50,7 +50,7 @@ streamlit run "app/🐟_Spyfish_Data_Tools.py"
 
 Spyfish Aotearoa is a marine biodiversity data pipeline for processing underwater Baited Underwater Video (BUV) footage from New Zealand's marine reserves. It automates video ingestion → ML inference → community science export → expert annotation review → model retraining.
 
-**Stack**: Python 3.12+, AWS S3 (`marine-buv` bucket, DOC-managed; `marine-buv-kalindi` is Kalindi's dev bucket), SQLite, Ultralytics YOLO (v8-v12), FFmpeg, Streamlit, NIWA Mahuika HPC (SLURM). Environment managed via venv/pyenv on NeSI — not Docker. Scheduling via NeSI crontab.
+**Stack**: Python 3.10–3.13, AWS S3 (`marine-buv` bucket, DOC-managed; `marine-buv-kalindi` is Kalindi's dev bucket), SQLite, Ultralytics YOLO (v8-v12), FFmpeg, Streamlit, NIWA Mahuika HPC (SLURM). Environment managed via venv/pyenv on NeSI — not Docker. Scheduling via NeSI crontab.
 
 ### Pipeline Flow — multi-section status model
 
