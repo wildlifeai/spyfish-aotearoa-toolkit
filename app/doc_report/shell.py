@@ -38,6 +38,7 @@ from . import (
     sites,
     species,
     species_search,
+    survey_review,
     surveys,
 )
 from .charting import style, year_axis
@@ -57,6 +58,9 @@ REPORTING_VIEWS = {
     "Report home": None,  # replaced below by render_home
     "MPA": mpa.render,
     "Surveys": None,
+    # One survey's slates and MaxN frames, for checking by eye. Reads the
+    # deployment folders, so it lists only surveys with a slate or a frame.
+    "Survey review": survey_review.render,
     "Sites": sites.render,
     "Deployments": None,
     "Annotations": report_annotations.render,
@@ -146,7 +150,7 @@ class FilterSpec:
 
 
 FILTERS = {
-    "years": FilterSpec("report_years", "_w_years", "years", "Survey year", "range"),
+    "years": FilterSpec("report_years", "_w_years", "years", "Survey season", "range"),
     "reserves": FilterSpec("report_reserves", "_w_reserves", "reserve", "MPA"),
     "regions": FilterSpec("report_regions", "_w_regions", "region", "Region"),
     "protections": FilterSpec(
@@ -324,9 +328,9 @@ def build_context() -> dict:
     include_historical = st.session_state.get(
         "_w_hist", st.session_state["report_include_historical"]
     )
-    dated = deployments["survey_year"].dropna()
+    dated = deployments["survey_season"].dropna()
     if include_historical:
-        dated = pd.concat([dated, annotations["survey_year"].dropna()])
+        dated = pd.concat([dated, annotations["survey_season"].dropna()])
     bounds = (int(dated.min()), int(dated.max())) if not dated.empty else None
     st.session_state.setdefault("report_years", bounds)
     for spec in _MULTI.values():
@@ -383,7 +387,7 @@ def build_context() -> dict:
         if not years_now:
             return frame
         # Undated rows kept, same policy as `report_data.build_context`.
-        year = frame["survey_year"]
+        year = frame["survey_season"]
         return frame[year.between(*years_now) | year.isna()]
 
     dep_scope = in_years(deployments)
@@ -414,26 +418,36 @@ def build_context() -> dict:
             "between views."
         )
 
-        # Survey year first: it is the filter most readers reach for.
+        # Survey season first: it is the filter most readers reach for.
+        from ecology_data import season_definition, season_label
+
         year_range = st.session_state["report_years"]
         if bounds and bounds[0] < bounds[1]:
-            year_range = st.slider(
-                "Survey year",
-                bounds[0],
-                bounds[1],
+            # `select_slider`, not `slider`: a plain slider can only print its
+            # number, and a season is shown as 2026/27. `value` is what makes
+            # it a two-handle range, so it has to be passed, but it is the
+            # full span, constant for these options, never the mirrored
+            # selection (see the seeding note above). The handles still come
+            # from the `_w_years` key.
+            year_range = st.select_slider(
+                "Survey season",
+                options=list(range(bounds[0], bounds[1] + 1)),
+                value=bounds,
+                format_func=season_label,
                 key="_w_years",
+                help=season_definition(),
             )
         else:
             # `st.slider` raises when min equals max, so a database holding a
-            # single year (a sample database, or a first season) cannot have
-            # one. Name the year rather than showing nothing: a blank reads as
+            # single season (a sample database, or a first season) cannot have
+            # one. Name the season rather than showing nothing: a blank reads as
             # a filter that broke, not one with nothing to choose.
             only = (
-                f"{bounds[0]} · only year in the data"
+                f"{season_label(bounds[0])} · only season in the data"
                 if bounds
                 else ("no dated deployments")
             )
-            st.caption(f"Survey year: {only}")
+            st.caption(f"Survey season: {only}")
         st.session_state["report_years"] = year_range
 
         reserves = _multi_filter(
@@ -825,7 +839,7 @@ def render_home(ctx: dict) -> None:
     st.subheader("How to use it")
     st.markdown(
         "BUV survey results from the marine protected areas, for MPA reporting. "
-        "The sidebar filters (year, MPA and more) apply to every view and "
+        "The sidebar filters (season, MPA and more) apply to every view and "
         "stick between views. Each section below covers one topic; the "
         "chips at the top of a view link to its parts. Pipeline state is in "
         "the Operations section. Counts throughout are **MaxN**, the most "
@@ -868,7 +882,7 @@ def render_home(ctx: dict) -> None:
     # turn "Species recorded" into 1. The charts below keep `ann`, which is
     # the filter doing its job.
     ann_all = ctx["annotations_all_species"]
-    dated = dep[dep["survey_year"].notna()]
+    dated = dep[dep["survey_season"].notna()]
 
     reserves = report_data.split_reserves(dep["link_to_marine_reserve"])
 
@@ -884,10 +898,10 @@ def render_home(ctx: dict) -> None:
     per_species_all = None
     if not ann.empty:
         per_species = report_data.species_maxn(ann)
-        # survey_year, site_id and reserve_code ride along for the base charts
+        # survey_season, site_id and reserve_code ride along for the base charts
         # further down, which reuse this frame.
         meta = ann[
-            ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
+            ["drop_id", "protection_status", "survey_season", "site_id", "reserve_code"]
         ].drop_duplicates("drop_id")
         per_species = per_species.merge(meta, on="drop_id", how="left")
         per_species["Group"] = protection_group(per_species["protection_status"])
@@ -903,13 +917,13 @@ def render_home(ctx: dict) -> None:
         # unprotected only; partial regimes are their own group and belong
         # in neither mean.
         per_species_all = report_data.species_maxn(ann_all)
-        # survey_year and site_id ride along: the charts further down use
+        # survey_season and site_id ride along: the charts further down use
         # this frame for their per-year deployment denominators.
         # reserve_code too, so the headline difference can be measured
         # WITHIN each MPA instead of pooling places that are not sampled
         # alike (see `report_data.stratified_diff_ci`).
         meta_all = ann_all[
-            ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
+            ["drop_id", "protection_status", "survey_season", "site_id", "reserve_code"]
         ].drop_duplicates("drop_id")
         per_species_all = per_species_all.merge(meta_all, on="drop_id", how="left")
         per_species_all["Group"] = protection_group(
@@ -1009,23 +1023,23 @@ def render_home(ctx: dict) -> None:
 
     # No pipeline funnel here: how far the data got through processing is an
     # Operations question, and its home page opens with exactly that funnel.
-    st.subheader("Survey activity per year")
+    st.subheader("Survey activity per season")
     if dated.empty:
         st.info("No deployments have a parseable date in their DropID.")
     else:
         per_year = (
-            dated.groupby(dated["survey_year"].astype(int))
+            dated.groupby(dated["survey_season"].astype(int))
             .agg(Deployments=("drop_id", "nunique"), Surveys=("survey_id", "nunique"))
             .reset_index()
-            .rename(columns={"survey_year": "Year"})
+            .rename(columns={"survey_season": "Survey season"})
         )
         # Stacked one above the other on a shared x-axis rather than side by
         # side: the two counts differ by a factor of about fifty, so one
         # chart would flatten surveys into the axis. Aligned years let the
         # pair be read together, which is the point, many deployments in
         # few surveys is a different year from the reverse.
-        st.markdown("**Surveys per year**")
-        fig = px.bar(per_year, x="Year", y="Surveys", text="Surveys")
+        st.markdown("**Surveys per season**")
+        fig = px.bar(per_year, x="Survey season", y="Surveys", text="Surveys")
         fig.update_traces(
             marker_color=SINGLE_SERIES, textposition="outside", cliponaxis=False
         )
@@ -1188,9 +1202,11 @@ def render(section: str, name: str) -> None:
     dep = ctx["all_deployments"]
     # A fresh or partly-ingested database can hold no parseable DropID dates at
     # all; int(nan) would take the whole page down for a sentence of caption.
-    dated_years = dep["survey_year"].dropna()
+    from ecology_data import season_label
+
+    dated_years = dep["survey_season"].dropna()
     year_span = (
-        f"{int(dated_years.min())} to {int(dated_years.max())}"
+        f"{season_label(dated_years.min())} to {season_label(dated_years.max())}"
         if not dated_years.empty
         else "no parseable survey dates yet"
     )
@@ -1201,7 +1217,7 @@ Rebuild of the DOC PowerBI report. Views are added one at a time. Anything not
 built says so rather than rendering an empty chart.
 
 **The filters in the sidebar apply to every {section} view**, and stay put as
-you move between them. Survey year and MPA narrow which deployments are
+you move between them. Survey season and MPA narrow which deployments are
 counted; Region and Protection status narrow further; Species narrows the
 species-level charts (deployment and effort counts stay whole); and Source
 picks which annotation source the species numbers come from. The ↺ button

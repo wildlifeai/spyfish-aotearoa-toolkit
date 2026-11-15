@@ -2,12 +2,9 @@
 
 Single source of truth for loading + enriching annotation data. Used by the
 DOC report's data layer (``doc_report/data.py`` and the views that import
-from it), the advanced pages under ``pages/_advanced/`` and the UoA app in
-``in_progress/uoa/``. Page-specific viz helpers stay in their own pages, only
+from it) and the advanced pages under ``pages/_advanced/``. Page-specific viz helpers stay in their own pages, only
 the page-agnostic loaders and the drop_id/site enrichment live here.
 """
-
-import math
 
 import pandas as pd
 import streamlit as st
@@ -177,64 +174,6 @@ def protection_group(status: pd.Series) -> pd.Series:
     return status.map(bucket)
 
 
-# ── Diversity indices ────────────────────────────────────────────────────────
-#
-# Pure functions over a vector of per-species counts (MaxN). They live here
-# rather than in a page because two pages needed them and each had grown its own
-# copy, the Experiments page called its Pielou's evenness "Evenness", the
-# Mussel Insights page called the same formula something else, and neither could
-# be changed without silently diverging from the other.
-#
-# All three take counts in any order; zeros and NaNs are dropped. None of them
-# know where the counts came from, so they work equally on a deployment, a site
-# or a whole reserve, the caller decides what to aggregate first.
-#
-# What each one is for:
-#   shannon , rewards having many species AND having them in balance. Its
-#              ceiling is ln(S), so it is NOT comparable between datasets with
-#              different species pools.
-#   simpson , probability two individuals drawn at random are different
-#              species. Less sensitive to rare species than Shannon.
-#   pielou  . Shannon divided by its own maximum, so bounded 0-1 and therefore
-#              comparable across datasets. 1 = perfectly even, near 0 = one
-#              species dominates.
-
-
-def _clean_counts(counts) -> list[float]:
-    """Positive counts only, as plain floats."""
-    return [float(c) for c in counts if pd.notna(c) and float(c) > 0]
-
-
-def shannon(counts) -> float:
-    """Shannon diversity H' = -sum(p * ln p)."""
-    vals = _clean_counts(counts)
-    total = sum(vals)
-    if total <= 0:
-        return 0.0
-    return float(-sum((c / total) * math.log(c / total) for c in vals))
-
-
-def simpson(counts) -> float:
-    """Simpson's index in its 1-D form: higher = more diverse."""
-    vals = _clean_counts(counts)
-    total = sum(vals)
-    if total <= 0:
-        return 0.0
-    return float(1 - sum((c / total) ** 2 for c in vals))
-
-
-def pielou(counts) -> float:
-    """Pielou's evenness J' = H' / ln(S). Bounded 0-1.
-
-    Zero when only one species is present: with nothing to be uneven against,
-    evenness is undefined, and 0 is the conventional reported value.
-    """
-    vals = _clean_counts(counts)
-    if len(vals) < 2:
-        return 0.0
-    return float(shannon(vals) / math.log(len(vals)))
-
-
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_maxn() -> pd.DataFrame:
     df = AnnotationDatabaseManager(read_only=True).get_maxn_summary()
@@ -387,13 +326,50 @@ def _this_year() -> int:
     return date.today().year
 
 
+def survey_season(dates: pd.Series) -> pd.Series:
+    """Survey season each date falls in, as the calendar year the season starts in.
+
+    A season runs from `reporting.survey_season_start_month` (July) for twelve
+    months, so 15 Jan 2027 and 3 Dec 2026 are both season 2026. One number per
+    season keeps range filters, sorting and trend fits working; `season_label`
+    turns it into the `2026/27` every view shows.
+    """
+    before_start = dates.dt.month < config.survey_season_start_month
+    return dates.dt.year - before_start.astype(int)
+
+
+def season_label(season) -> str | None:
+    """`2026/27` for season 2026. Never show a bare season number to a reader."""
+    if pd.isna(season):
+        return None
+    season = int(season)
+    if config.survey_season_start_month == 1:
+        return str(season)
+    return f"{season}/{(season + 1) % 100:02d}"
+
+
+def season_definition() -> str:
+    """One sentence saying what a survey season is, for filter help text."""
+    import calendar
+
+    start = config.survey_season_start_month
+    if start == 1:
+        return "A survey season is a calendar year."
+    first = calendar.month_name[start]
+    last = calendar.month_name[start - 1]
+    return (
+        f"A survey season runs {first} to {last} and is named by both years: "
+        f"2026/27 is {first} 2026 to {last} 2027."
+    )
+
+
 def unparseable_dates(df: pd.DataFrame) -> pd.DataFrame:
     """DropIDs whose date could not be read, after `add_drop_id_columns`.
 
      Either the field is not a date at all, or it is outside the plausible range
     , most often a date typed DDMMYYYY instead of YYYYMMDD.
     """
-    return df[df["survey_year"].isna()]
+    return df[df["survey_season"].isna()]
 
 
 def add_drop_id_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -401,6 +377,9 @@ def add_drop_id_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     DropID is `{Reserve}_{YYYYMMDD}_BUV_{SiteCode}_{Replicate}`, so every one of
     these is derivable without touching another table.
+
+    `survey_season` is the season's starting year (see `survey_season()`), not
+    the calendar year of the date: a January 2027 deployment has 2026.
     """
     parts = df["drop_id"].str.split("_", expand=True)
     df = df.copy()
@@ -411,19 +390,22 @@ def add_drop_id_columns(df: pd.DataFrame) -> pd.DataFrame:
         format="%Y%m%d",
         errors="coerce",
     )
-    df["survey_year"] = df["survey_date"].dt.year
+    df["survey_season"] = survey_season(df["survey_date"])
     # A DropID whose date was typed DDMMYYYY still parses, `23042026` reads as
     # the year 2304, and one such deployment stretches every year axis in the
     # app by three centuries. Anything outside a plausible range is treated as
     # having no date rather than being clamped into a year it might not belong
     # to. `unparseable_dates()` reports them so they can be fixed upstream,
     # which is the only real fix: these deployments pass ingest today.
-    plausible = df["survey_year"].between(EARLIEST_SURVEY_YEAR, _this_year())
+    # Tested on the calendar year of the date, not the season: a January 1998
+    # deployment is season 1997 and is still a legitimate date.
+    calendar_year = df["survey_date"].dt.year
+    plausible = calendar_year.between(EARLIEST_SURVEY_YEAR, _this_year())
     implausible = ~plausible.fillna(False)
     # NaT belongs only in the datetime column, assigning it into the float
-    # survey_year column coerces the whole column to object dtype.
+    # survey_season column coerces the whole column to object dtype.
     df.loc[implausible, "survey_date"] = pd.NaT
-    df.loc[implausible, "survey_year"] = float("nan")
+    df.loc[implausible, "survey_season"] = float("nan")
     p3 = parts.get(3, pd.Series("", index=df.index)).fillna("")
     p4 = parts.get(4, pd.Series("", index=df.index)).fillna("")
     df["site_id"] = p3 + "_" + p4

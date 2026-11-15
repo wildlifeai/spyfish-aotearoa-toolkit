@@ -147,6 +147,11 @@ class ColumnsConfig(BaseConfig):
         return get_required(self.reporting, "indicator_species", "reporting")
 
     @property
+    def survey_season_start_month(self) -> int:
+        """First month (1-12) of the survey season the dashboard reports by."""
+        return get_required(self.reporting, "survey_season_start_month", "reporting")
+
+    @property
     def protected_statuses(self) -> list:
         """ProtectionStatus values treated as protected in inside/outside splits."""
         return get_required(self.reporting, "protected_statuses", "reporting")

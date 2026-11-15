@@ -6,14 +6,12 @@ Displays metrics for trained ML models, including:
   - Per-class breakdown (if available)
   - Confusion matrix images
   - Training curves (loss + mAP over epochs)
-  - Manual promote button (copy selected model to production)
 
 Reads metrics CSVs and confusion matrix images from S3 under
     process_files/training/results/
 """
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +21,6 @@ from utils import CACHE_TTL_SECONDS
 
 from spyfish.config.wrapper import config
 from spyfish.storage.s3_handler import S3Handler
-from spyfish.utils import validate_model_path
 
 # ---------------------------------------------------------------------------
 # Data loading helpers
@@ -135,47 +132,6 @@ def render_training_curves(results_df: pd.DataFrame) -> None:
         st.line_chart(chart_df)
 
 
-def render_promote_button(model_path: str) -> None:
-    """Render a promote button that copies the selected model to the local production path."""
-    st.divider()
-    st.subheader("🚀 Promote Model")
-
-    prod_model_path = config.pipeline_model_path
-    st.caption(
-        f"Promoting this model will replace the current production model at: `{prod_model_path}`. "
-        "The backup to S3 will occur during the next pipeline sync."
-    )
-
-    confirm = st.checkbox(
-        "I have reviewed the metrics and want to promote this model",
-        key="confirm_promote",
-    )
-    if st.button("✅ Promote to Production", disabled=not confirm, type="primary"):
-        with st.spinner(f"Promoting {model_path} ..."):
-            try:
-                # Ensure destination directory exists
-                prod_model_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # Validate source path
-                model_path = str(validate_model_path(model_path))
-
-                # Local copy
-                shutil.copy2(model_path, prod_model_path)
-
-                st.success(f"✅ Model promoted locally to: `{prod_model_path}`")
-                st.info(
-                    "The new model will be backed up to S3 during the final sync stage of the next pipeline run."
-                )
-                st.cache_data.clear()
-            except Exception as e:
-                st.error(f"Promotion failed: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Main page
-# ---------------------------------------------------------------------------
-
-
 def main():
     st.set_page_config(page_title="Model Metrics", page_icon="📊", layout="wide")
 
@@ -279,17 +235,6 @@ def main():
                     )
         else:
             st.info("No metrics CSV found for this run.")
-
-        # Promote button (only if we have a new model path)
-        if (
-            metrics_df is not None
-            and "model_path" in metrics_df.columns
-            and "role" in metrics_df.columns
-        ):
-            new_rows = metrics_df[metrics_df["role"] == "new"]
-            if not new_rows.empty:
-                new_model_path = str(new_rows["model_path"].iloc[0])
-                render_promote_button(new_model_path)
 
     with tab_curves:
         st.header("Training Curves")

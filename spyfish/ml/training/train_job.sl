@@ -1,7 +1,7 @@
 #!/bin/bash -e
 #SBATCH --job-name=spyfish_train
 #SBATCH --account=wildlife03546
-#SBATCH --time=7:00:00
+#SBATCH --time=10:00:00
 
 # GPU choice (billing weight per GPU-hour in brackets — sinfo TRESBillingWeights):
 #   genoa: l4 [20], pro_6000 [130], h100 [200]; milan: a100 [90]. No a100 in genoa.
@@ -28,55 +28,40 @@
 
 # Spyfish Aotearoa training job wrapper.
 #
-# Runs the retraining pipeline end-to-end: data prep + species training.
+# Trains the species model, evaluates it and promotes it on improvement
+# (python run_pipeline.py --retrain --species). It does NOT run data prep:
+# that is CPU work (balance, flatten, split, assemble) and has no business
+# holding an h100. Data prep goes through the three-job chain, or on its own:
+#   scripts/slurm/submit_retrain.sh                         # cpu.sl data prep, this job, then cpu.sl --sync-only (afterok)
+#   sbatch scripts/slurm/cpu.sl --retrain --data-prep       # rebuild the dataset only
+#   sbatch spyfish/ml/training/train_job.sl                 # train on the dataset already in species/
+# Until 2026-11-11 a bare `sbatch train_job.sl` ran data prep on the GPU first.
+# Data prep rmtrees the shared species/ workspace, so only one retrain at a
+# time: never submit data prep while a training job is queued or running.
+#
 # Optimizer / lr / dropout come from config.yaml's training section.
-# Auto-promotion is on — models that beat production by `retrain_min_improvement_pct`
+# Auto-promotion is on: models that beat production by `retrain_min_improvement_pct`
 # are copied into pipeline_model/ at the end of the run.
 #
-# To scope the run, pass any subset of --data-prep / --species:
-#   python run_pipeline.py --retrain --species              # just species training
-#   python run_pipeline.py --retrain --data-prep            # rebuild dataset only
+# Flags on the sbatch line replace the default command below (this is how
+# submit_retrain.sh passes --retrain --species --no-upload, leaving the S3
+# sync to its CPU job):
+#   sbatch spyfish/ml/training/train_job.sl --retrain --species
 #
 
 
-module purge
-# `module purge` on a zen3/milan node leaves NeSI/zen3 loaded, and that tree
-# carries only Python 3.14/foss-2026, so the 3.10.5 module kso_venv_0627 was
-# built against drops off MODULEPATH and the load below fails with "exists but
-# cannot be loaded as requested". With `#!/bin/bash -e` that kills the job in
-# about a second. Re-adding the mahuika tree fixes milan and is a no-op on
-# genoa, so it stays in regardless of which GPU block is active (2026-08-22).
-module use /opt/nesi/lmod/mahuika
-# module load Python/3.11.6-foss-2023a
-module load Python/3.10.5-gimkl-2022a
-module load CUDA/11.0.2
+# Modules (with the milan `module use` fix), venv, PROJECT_DIR, YOLO_CONFIG_DIR,
+# /opt/nesi/bin on PATH for the end-of-run S3 sync, cd into the repo and the
+# START/END stamps all come from the shared env (venv and repo paths are set
+# there); submit from the repo root like cpu.sl / gpu.sl.
+# This job is the one that still loads a CUDA module on top of it.
+SPYFISH_CUDA_MODULE=CUDA/11.0.2
+source scripts/slurm/_env.sh
 
-# TODO update to your venv
-VENV=/nesi/project/wildlife03546/kso_venv_0627/bin/activate
-
-# TODO update to where this repo is checked out on NeSI
-PROJECT_DIR=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit
-
-source "${VENV}"
-cd "${PROJECT_DIR}"
-# mkdir -p slurm_logs
-
-# Ultralytics keeps per-user defaults (runs_dir and friends) in
-# ~/.config/Ultralytics/settings.json, shared by every project on this
-# account. A YOLO call that forgets `project=` writes wherever that file
-# points, which is whatever project first imported ultralytics. A repo-local
-# config dir makes any such fallback land inside this repo instead.
-# The dir must exist BEFORE ultralytics imports: with a missing dir the env
-# var is silently ignored and everything falls back to /tmp.
-export YOLO_CONFIG_DIR="${PROJECT_DIR}/.ultralytics"
-mkdir -p "${YOLO_CONFIG_DIR}"
-
-# `aws` lives at /opt/nesi/bin and is on PATH in LOGIN shells only. The pipeline
-# syncs results to S3 at the END of the run, so without this a 3-hour retrain
-# finishes and then dies on "No such file or directory: 'aws'" with everything
-# already computed (run 8598080, 2026-08-23).
-export PATH=/opt/nesi/bin:$PATH
-
+# Start/end stamps go to stderr so the .err file shows the run window even
+# when it holds nothing else (INFO logging goes to .out, WARNING and above
+# to .err, see log_config.py; an .err with only these two lines is a clean run).
+spyfish_stamp_start
 echo "Starting Spyfish retraining on $(hostname)"
 # python -c "import torch; print('cuda:', torch.cuda.is_available(), '| devices:', torch.cuda.device_count())"
 # nvidia-smi || true
@@ -84,10 +69,18 @@ echo "Starting Spyfish retraining on $(hostname)"
 # python run_pipeline.py --retrain
 # python -m spyfish.biigle.biigle_to_yolo download-project --project-id 4626 --force
 # python -m spyfish.biigle.biigle_to_yolo download-project --project-id 3711 --force
-python run_pipeline.py --retrain --data-prep --species
+if [ $# -gt 0 ]; then
+    echo "Running: python run_pipeline.py $*"
+    python run_pipeline.py "$@"
+else
+    # Train only. Data prep is a CPU job (see the header), never the default here.
+    echo "Running: python run_pipeline.py --retrain --species"
+    python run_pipeline.py --retrain --species
+fi
 # python run_pipeline.py --retrain --data-prep --dry-run
 
 # python run_pipeline.py --biigle-sync   # pull latest annotations from BIIGLE API → raw CSVs on disk
 # python run_pipeline.py --retrain --no-upload
 
 echo "Retraining job complete. Outputs in process_files/training/runs/ and process_files/training/results/."
+spyfish_end

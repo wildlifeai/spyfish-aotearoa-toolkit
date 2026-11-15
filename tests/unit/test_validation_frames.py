@@ -320,6 +320,13 @@ def test_drop_with_no_detections_still_gets_blind_frames(tmp_path, strategy):
 # ── stage entry points ───────────────────────────────────────────────────────
 
 
+def _existing(n):
+    """A set already on Zooniverse holding `n` subjects, as the stage fetches it."""
+    from spyfish.zooniverse import upload as up
+
+    return up.ExistingSet(subject_set=object(), subjects=[object()] * n)
+
+
 def test_already_uploaded_set_skips_rendering(tmp_path, monkeypatch):
     from spyfish.zooniverse import upload as up
 
@@ -329,7 +336,7 @@ def test_already_uploaded_set_skips_rendering(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(config, "get_validation_manifest_path", lambda d, k: manifest)
     with (
-        patch.object(up, "existing_subject_count", return_value=2),
+        patch.object(up, "fetch_existing_set", return_value=_existing(2)),
         patch.object(vf, "prepare_validation") as prep,
     ):
         assert vf.run_validation_frames_drop(DROP_ID) == vf.ZooFramesStatus.UPLOADED
@@ -347,7 +354,7 @@ def test_existing_set_with_other_count_resumes(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(config, "get_validation_manifest_path", lambda d, k: manifest)
     with (
-        patch.object(up, "existing_subject_count", return_value=1),
+        patch.object(up, "fetch_existing_set", return_value=_existing(1)),
         patch.object(vf, "prepare_validation", return_value=None) as prep,
     ):
         assert vf.run_validation_frames_drop(DROP_ID) is None
@@ -359,7 +366,7 @@ def test_empty_manifest_leaves_the_drop_pending(tmp_path, monkeypatch):
     from spyfish.zooniverse import upload as up
 
     with (
-        patch.object(up, "existing_subject_count", return_value=None),
+        patch.object(up, "fetch_existing_set", return_value=None),
         patch.object(vf, "prepare_validation", return_value=object()),
         patch.object(vf, "render_validation_frames", return_value=pd.DataFrame()),
         patch.object(up, "upload_validation_frames_to_zooniverse") as upload,
@@ -372,8 +379,100 @@ def test_dry_run_never_asks_zooniverse(monkeypatch):
     from spyfish.zooniverse import upload as up
 
     with (
-        patch.object(up, "existing_subject_count") as ask,
+        patch.object(up, "fetch_existing_set") as ask,
         patch.object(vf, "prepare_validation", return_value=None),
     ):
         assert vf.run_validation_frames_drop(DROP_ID, dry_run=True) is None
     ask.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "run, render, upload_name, kind_name, path_column",
+    [
+        (
+            "run_validation_frames_drop",
+            "render_validation_frames",
+            "upload_validation_frames_to_zooniverse",
+            "frames",
+            vf.FRAME_PATH_COLUMN,
+        ),
+        (
+            "run_validation_crops_drop",
+            "render_validation_crops",
+            "upload_validation_crops_to_zooniverse",
+            "crops",
+            vf.CROP_PATH_COLUMN,
+        ),
+    ],
+)
+def test_partial_set_is_fetched_once_and_handed_to_the_upload(
+    tmp_path, monkeypatch, run, render, upload_name, kind_name, path_column
+):
+    """The stage's check already listed the set's subjects; the upload gets
+    that listing instead of paging the same set a second time."""
+    from spyfish.zooniverse import upload as up
+
+    manifest = tmp_path / f"{kind_name}_manifest.csv"
+    rendered = pd.DataFrame({path_column: ["a.jpg", "b.jpg"]})
+    rendered.to_csv(manifest, index=False)
+    monkeypatch.setattr(config, "get_validation_manifest_path", lambda d, k: manifest)
+    partial = _existing(1)
+    with (
+        patch.object(up, "fetch_existing_set", return_value=partial) as fetch,
+        patch.object(vf, "prepare_validation", return_value=object()),
+        patch.object(vf, render, return_value=rendered),
+        patch.object(up, upload_name) as upload,
+    ):
+        getattr(vf, run)(DROP_ID)
+    fetch.assert_called_once()
+    upload.assert_called_once()
+    assert upload.call_args.kwargs["existing"] is partial
+
+
+def test_frames_and_crops_stages_prepare_a_drop_once(ctx, monkeypatch):
+    """Both stages run on the same drops in one process: the raw CSV read,
+    video probe and selection are done by the first and reused by the second."""
+    vf.prepare_validation.cache_clear()
+    monkeypatch.setattr(vf.config, "get_video_path", lambda d: ctx.video_path)
+    with (
+        patch.object(vf, "load_detections", return_value=ctx.detections) as load,
+        patch.object(vf, "_open_local") as open_local,
+        patch.object(vf, "inference_grid", return_value=(FPS, [0, 15])),
+        patch.object(vf, "get_or_create_selection") as select,
+        patch.object(vf, "snap_selection_to_grid", return_value=ctx.frames),
+        patch.object(vf, "DatabaseManager") as db,
+        patch.object(
+            vf.config, "resolve_ml_raw_csv", return_value=("m", ctx.video_path)
+        ),
+    ):
+        db.return_value.get_deployment.return_value = {
+            "sampling_start": 0.0,
+            "sampling_end": 10.0,
+        }
+        first = vf.prepare_validation(DROP_ID)
+        second = vf.prepare_validation(DROP_ID)
+    vf.prepare_validation.cache_clear()
+    assert first is second
+    assert load.call_count == open_local.call_count == select.call_count == 1
+
+
+def test_crops_left_pending_when_no_frame_decoded(tmp_path, monkeypatch):
+    """A video that decoded nothing is a retry, not a skip: a skip is permanent,
+    and once the video is fixed the frames would upload but crops never would."""
+    empty = pd.DataFrame()
+    empty.attrs["frames_read"] = 0
+    with (
+        patch.object(vf, "_already_uploaded", return_value=(False, None)),
+        patch.object(vf, "prepare_validation", return_value=object()),
+        patch.object(vf, "render_validation_crops", return_value=empty),
+    ):
+        assert vf.run_validation_crops_drop(DROP_ID) is None
+
+    decoded_no_boxes = pd.DataFrame()
+    decoded_no_boxes.attrs["frames_read"] = 3
+    with (
+        patch.object(vf, "_already_uploaded", return_value=(False, None)),
+        patch.object(vf, "prepare_validation", return_value=object()),
+        patch.object(vf, "render_validation_crops", return_value=decoded_no_boxes),
+    ):
+        assert vf.run_validation_crops_drop(DROP_ID) == vf.ZooCropsStatus.SKIPPED

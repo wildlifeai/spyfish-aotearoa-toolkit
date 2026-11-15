@@ -143,6 +143,9 @@ def test_sync_annotation_counts(tmp_path, monkeypatch):
     from spyfish.config.wrapper import config as real_config
 
     monkeypatch.setattr(real_config, "_project_root", tmp_path)
+    from tests.conftest import write_test_species_registry
+
+    write_test_species_registry(tmp_path)
 
     # Both DBs must be at the canonical paths so sync_annotation_counts
     # (which creates its own AnnotationDatabaseManager internally) finds them.
@@ -160,7 +163,7 @@ def test_sync_annotation_counts(tmp_path, monkeypatch):
         [
             {
                 "drop_id": drop_id,
-                "scientific_name": "Pagrus auratus",
+                "scientific_name": "Chrysophrys auratus",
                 "time_of_max": "00:00:05",
                 "max_interval": 2,
                 "annotated_by": "ml",
@@ -180,7 +183,7 @@ def test_sync_annotation_counts(tmp_path, monkeypatch):
             },
             {
                 "drop_id": drop_id,
-                "scientific_name": "Pagrus auratus",
+                "scientific_name": "Chrysophrys auratus",
                 "time_of_max": "00:00:05",
                 "max_interval": 3,
                 "annotated_by": "expert",

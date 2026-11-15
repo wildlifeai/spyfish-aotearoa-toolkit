@@ -8,7 +8,7 @@ from spyfish.ml.draw_frames import count_summary, draw_banner, draw_boxes
 
 def test_draw_banner_paints_a_black_box_with_white_text_top_left():
     frame = np.full((200, 400, 3), 128, dtype=np.uint8)
-    draw_banner(frame, "model_x conf>=0.15 @ 00:01:02  |  Pagrus auratus 2")
+    draw_banner(frame, "model_x conf>=0.15 @ 00:01:02  |  Chrysophrys auratus 2")
     assert (frame[:20, :200] == 0).any(), "banner background must be painted black"
     assert (frame[:40, :400] == 255).any(), "banner text must be painted white"
     # The rest of the frame is untouched.
@@ -18,11 +18,11 @@ def test_draw_banner_paints_a_black_box_with_white_text_top_left():
 def test_count_summary_counts_only_boxes_above_threshold():
     rows = pd.DataFrame(
         {
-            "class": ["Pagrus auratus", "Pagrus auratus", "fish", "fish"],
+            "class": ["Chrysophrys auratus", "Chrysophrys auratus", "fish", "fish"],
             "confidence": [0.9, 0.5, 0.3, 0.1],
         }
     )
-    assert count_summary(rows, 0.15) == "Pagrus auratus 2, fish 1"
+    assert count_summary(rows, 0.15) == "Chrysophrys auratus 2, fish 1"
     assert count_summary(rows, 0.95) == "nothing"
 
 
@@ -30,7 +30,7 @@ def test_count_summary_and_boxes_use_the_labeller_for_names_only():
     """What a person reads is the label; the class name still keys the colour."""
     rows = pd.DataFrame(
         {
-            "class": ["Pagrus auratus", "Pagrus auratus", "fish"],
+            "class": ["Chrysophrys auratus", "Chrysophrys auratus", "fish"],
             "confidence": [0.9, 0.5, 0.3],
             "x": [100, 300, 60],
             "y": [100, 100, 40],
@@ -38,7 +38,7 @@ def test_count_summary_and_boxes_use_the_labeller_for_names_only():
             "h": [40, 40, 20],
         }
     )
-    common = {"Pagrus auratus": "Snapper"}
+    common = {"Chrysophrys auratus": "Snapper"}
     labeller = lambda c: common.get(c, c)  # noqa: E731
     assert count_summary(rows, 0.15, labeller) == "Snapper 2, fish 1"
 
@@ -92,3 +92,63 @@ def test_video_frames_are_rotated_like_the_clean_frames(tmp_path, monkeypatch):
     assert [p.split("/")[-1] for p in out] == [f"{drop_id}__frame_0002.000s.jpg"]
     img = cv2.imread(out[0])
     assert img.shape[:2] == (64, 48)  # landscape 64x48 source, now portrait
+
+
+def _tiny_video(path, n=9):
+    import cv2
+
+    w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 3, (64, 48))
+    for i in range(n):
+        w.write(np.full((48, 64, 3), (i * 10) % 255, dtype=np.uint8))
+    w.release()
+
+
+_RAW_ROWS = [
+    {
+        "frame": 6,
+        "time_seconds": 2.0,
+        "class": "fish",
+        "confidence": 0.9,
+        "x": 32,
+        "y": 24,
+        "w": 20,
+        "h": 16,
+    }
+]
+
+
+def test_a_passed_dataframe_is_drawn_without_reading_the_csv(tmp_path, monkeypatch):
+    """Post-processing hands over the raw CSV it already loaded: the file is
+    not read again, and the JPEG is the one the path-reading call writes."""
+    import cv2
+
+    from spyfish.ml import draw_frames
+
+    drop_id = "KSF_20240124_BUV_KSF_085_01"
+    video = tmp_path / f"{drop_id}.mp4"
+    _tiny_video(video)
+    raw = pd.DataFrame(_RAW_ROWS)
+    raw_csv = tmp_path / "raw.csv"
+    raw.to_csv(raw_csv, index=False)
+    monkeypatch.setattr(draw_frames, "common_name_labeller", lambda: str)
+
+    from_path = draw_frames.draw_boxes_on_video_frames(
+        video, raw_csv, tmp_path / "a", [6], 0.25, drop_id=drop_id, model_name="m"
+    )
+
+    def _no_read(path):
+        raise AssertionError(f"raw CSV read again: {path}")
+
+    monkeypatch.setattr(draw_frames, "read_raw_detections", _no_read)
+    from_df = draw_frames.draw_boxes_on_video_frames(
+        video,
+        None,
+        tmp_path / "b",
+        [6],
+        0.25,
+        drop_id=drop_id,
+        model_name="m",
+        raw_df=raw,
+    )
+    assert len(from_path) == len(from_df) == 1
+    assert (cv2.imread(from_path[0]) == cv2.imread(from_df[0])).all()

@@ -15,6 +15,7 @@ import pandas as pd
 
 from spyfish.config.species import species_registry
 from spyfish.extraction.extract_frames import read_frame_from_cap, read_video_rotation
+from spyfish.ml.raw_detections import read_raw_detections
 from spyfish.utils import generate_frame_filename, seconds_to_time
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -101,6 +102,7 @@ def draw_boxes_on_video_frames(
     confidence_threshold,
     drop_id="UNKNOWN",
     model_name=None,
+    raw_df=None,
 ):
     """
     Draws ML bounding boxes on specific frames and saves them as JPEGs.
@@ -115,6 +117,9 @@ def draw_boxes_on_video_frames(
             the confidence threshold, the video second and what was counted,
             same shape as the legacy review frames, so a QA frame says which
             model drew it without the folder name.
+        raw_df: The raw CSV already loaded through ``read_raw_detections``
+            (post-processing has it in hand). None = read ``raw_csv_path``
+            here; given, the file is not opened and ``raw_csv_path`` may be None.
     """
     logging.info(f"Drawing {len(frame_list)} frames from {video_path}")
 
@@ -122,12 +127,12 @@ def draw_boxes_on_video_frames(
         logging.error(f"Video not found: {video_path}")
         return []
 
-    if not os.path.exists(raw_csv_path):
+    if raw_df is None and not os.path.exists(raw_csv_path):
         logging.error(f"Raw CSV not found: {raw_csv_path}")
         return []
 
     os.makedirs(output_dir, exist_ok=True)
-    df = pd.read_csv(raw_csv_path)
+    df = raw_df if raw_df is not None else read_raw_detections(raw_csv_path)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():

@@ -1,8 +1,10 @@
 import logging
+import os
 import sqlite3
+import threading
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from spyfish.config.base import (
     SECTIONS,
@@ -33,6 +35,18 @@ def parse_geo_value(value) -> Optional[float]:
     if number != number or number == 0:  # NaN or the not-recorded sentinel
         return None
     return number
+
+
+def _clean_text(value) -> str:
+    """A CSV cell as stripped text, "" for a blank one.
+
+    pandas reads a blank cell as NaN and `str(NaN)` is the text "nan", which
+    is how 986 of 2550 site names came to read "nan" (found 2026-11-05).
+    """
+    if value is None or (isinstance(value, float) and value != value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "nan" else text
 
 
 def _clean_protection_status(value) -> str:
@@ -70,11 +84,160 @@ def _add_column_if_missing(cursor, table: str, column: str, decl: str) -> None:
             raise
 
 
+class SchemaInitCache:
+    """Runs a database's schema init once per process per database file.
+
+    Several stages construct a manager per drop, and every construction used
+    to open connections for CREATE TABLE IF NOT EXISTS plus the migrations.
+    On the HPC's network filesystem each open is slow, so a manager now asks
+    here first and a repeat construction costs one ``os.stat``.
+
+    A cached entry is trusted only while the file is still the one that was
+    initialised: same device and inode (and birth time where the platform
+    reports one), and not empty. A file that was deleted, or deleted and
+    recreated at the same path, is initialised again.
+
+    What the cache cannot see: rows or tables put into the SAME file by raw
+    SQL after it was initialised. Call ``init_db()`` directly to re-run the
+    migrations in that case; it never consults the cache.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._done: Dict[str, Tuple[tuple, Any]] = {}
+
+    @staticmethod
+    def _identity(db_path: str) -> Optional[tuple]:
+        """What tells one database file from another, None if absent or empty."""
+        try:
+            st = os.stat(db_path)
+        except OSError:
+            return None
+        if st.st_size == 0:
+            return None
+        return (st.st_dev, st.st_ino, getattr(st, "st_birthtime", None))
+
+    def run_once(self, db_path: str, init: Callable[[], Any]) -> Any:
+        """Return ``init()``'s result, calling it only for a file not yet seen."""
+        with self._lock:
+            identity = self._identity(db_path)
+            cached = self._done.get(db_path)
+            if identity is not None and cached is not None and cached[0] == identity:
+                return cached[1]
+            result = init()
+            identity = self._identity(db_path)
+            if identity is None:
+                self._done.pop(db_path, None)
+            else:
+                self._done[db_path] = (identity, result)
+            return result
+
+    def clear(self) -> None:
+        """Forget every initialised file (tests)."""
+        with self._lock:
+            self._done.clear()
+
+
+_DEPLOYMENT_UPSERT_SQL = """
+    INSERT INTO deployments (
+        drop_id, video_path, video_presence,
+        ingest_status, ml_status,
+        is_bad_deployment, sampling_start, sampling_end,
+        biigle_volume_id, latitude, longitude, depth,
+        nzmhcs_abiotic, nzmhcs_biotic
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(drop_id) DO UPDATE SET
+        video_path=excluded.video_path,
+        video_presence=excluded.video_presence,
+        ingest_status=excluded.ingest_status,
+        is_bad_deployment=excluded.is_bad_deployment,
+        sampling_start=excluded.sampling_start,
+        sampling_end=excluded.sampling_end,
+        biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id),
+        latitude=COALESCE(excluded.latitude, deployments.latitude),
+        longitude=COALESCE(excluded.longitude, deployments.longitude),
+        depth=COALESCE(excluded.depth, deployments.depth),
+        nzmhcs_abiotic=COALESCE(excluded.nzmhcs_abiotic, deployments.nzmhcs_abiotic),
+        nzmhcs_biotic=COALESCE(excluded.nzmhcs_biotic, deployments.nzmhcs_biotic)
+"""
+
+_VALIDATION_ERROR_INSERT_SQL = """
+    INSERT INTO validation_errors (SurveyID, DropID, ErrorType, FileName, ColumnName, ErrorMessage, InvalidValue)
+    VALUES (:SurveyID, :DropID, :ErrorType, :FileName, :ColumnName, :ErrorMessage, :InvalidValue)
+"""
+
+
+def _deployment_upsert_params(
+    drop_id: str,
+    *,
+    ingest_status: str = IngestStatus.OK,
+    ml_status: str = MlStatus.PENDING,
+    video_path: str = "",
+    video_presence: str = VideoPresence.ABSENT,
+    is_bad_deployment: bool = False,
+    sampling_start: Optional[int] = None,
+    sampling_end: Optional[int] = None,
+    biigle_volume_id: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    depth: Optional[float] = None,
+    nzmhcs_abiotic: Optional[str] = None,
+    nzmhcs_biotic: Optional[str] = None,
+) -> tuple:
+    """One deployment's values in `_DEPLOYMENT_UPSERT_SQL` order.
+
+    The single home of the defaults, shared by `add_or_update_deployment` and
+    `add_or_update_deployments`; an unknown field raises TypeError.
+    """
+    return (
+        drop_id,
+        video_path,
+        video_presence,
+        ingest_status,
+        ml_status,
+        is_bad_deployment,
+        sampling_start,
+        sampling_end,
+        biigle_volume_id,
+        latitude,
+        longitude,
+        depth,
+        nzmhcs_abiotic,
+        nzmhcs_biotic,
+    )
+
+
+def validation_error_row(
+    *,
+    survey_id: str,
+    drop_id: str,
+    error_type: str,
+    column_name: str,
+    error_message: str,
+    file_name: str = "",
+    invalid_value: str = "",
+) -> Dict[str, Any]:
+    """One `validation_errors` row from named fields, as `add_validation_errors` takes it."""
+    return {
+        "SurveyID": survey_id,
+        "DropID": drop_id,
+        "ErrorType": error_type,
+        "FileName": file_name,
+        "ColumnName": column_name,
+        "ErrorMessage": error_message,
+        "InvalidValue": invalid_value,
+    }
+
+
 class DatabaseManager:
     """
     Core SQLite database manager for the Spyfish pipeline.
     Uses pure sqlite3 with dict-like row factories for simplicity.
     """
+
+    # Schema init runs once per process per database file, see SchemaInitCache.
+    _schema_cache = SchemaInitCache()
 
     def __init__(self, db_path: Optional[str] = None, read_only: bool = False):
         """Open the pipeline database, creating its schema unless ``read_only``.
@@ -83,14 +246,26 @@ class DatabaseManager:
         ``init_db()``, and every connection goes through ``connect_readonly``,
         so a missing file raises instead of being created empty. See
         ``spyfish/database/connection.py`` for why an empty file is harmful.
+
+        ``init_db()`` and the column read run once per process per database
+        file: a second writable manager on the same file opens no connection.
         """
         self.db_path = (
             str(config.db_path) if db_path is None else str(Path(db_path).absolute())
         )
         self.read_only = read_only
-        if not read_only:
-            self.init_db()
-        self._deployments_columns: frozenset[str] = self._read_deployments_columns()
+        self._deployments_columns: frozenset[str]
+        if read_only:
+            self._deployments_columns = self._read_deployments_columns()
+        else:
+            self._deployments_columns = self._schema_cache.run_once(
+                self.db_path, self._init_schema
+            )
+
+    def _init_schema(self) -> frozenset[str]:
+        """Create or migrate the schema, then read the deployments columns."""
+        self.init_db()
+        return self._read_deployments_columns()
 
     def _read_deployments_columns(self) -> frozenset[str]:
         """Reads the actual column names from the deployments table schema.
@@ -337,15 +512,15 @@ class DatabaseManager:
                     """,
                     (
                         site_id,
-                        str(row.get(config.site_name_column, "")),
-                        str(row.get(config.link_to_marine_reserve_column, "")),
+                        _clean_text(row.get(config.site_name_column)),
+                        _clean_text(row.get(config.link_to_marine_reserve_column)),
                         _clean_protection_status(
                             row.get(config.protection_status_column)
                         ),
                         # Region is not on this sheet, it is resolved from
                         # Marine Reserves.csv via LinkToMarineReserve, so the
                         # caller passes it in on the row when available.
-                        str(row.get(config.region_column, "")).strip(),
+                        _clean_text(row.get(config.region_column)),
                         # Site coordinates are the PLANNED position and are named
                         # Targeted* upstream; the actual fix lives on deployments.
                         parse_geo_value(row.get(config.targeted_latitude_column)),
@@ -408,50 +583,54 @@ class DatabaseManager:
         a re-ingest from a CSV that has blanked them does not erase a
         previously recorded value.
         """
-        with self.get_connection() as conn:
+        self.add_or_update_deployments(
+            [
+                {
+                    "drop_id": drop_id,
+                    "ingest_status": ingest_status,
+                    "ml_status": ml_status,
+                    "video_path": video_path,
+                    "video_presence": video_presence,
+                    "is_bad_deployment": is_bad_deployment,
+                    "sampling_start": sampling_start,
+                    "sampling_end": sampling_end,
+                    "biigle_volume_id": biigle_volume_id,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "depth": depth,
+                    "nzmhcs_abiotic": nzmhcs_abiotic,
+                    "nzmhcs_biotic": nzmhcs_biotic,
+                }
+            ]
+        )
+
+    def add_or_update_deployments(
+        self,
+        deployments: List[Dict[str, Any]],
+        validation_errors: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Upsert many deployments, and their validation errors, in one transaction.
+
+        Each dict holds the keyword arguments of `add_or_update_deployment`
+        (`drop_id` required, the rest defaulted the same way) and gets exactly
+        that method's per-row semantics: section statuses are written on
+        INSERT only, so a re-ingest never resets pipeline progress.
+        `validation_errors` rows have the shape `add_validation_errors` takes.
+
+        One connection and one commit for the whole batch, where a loop over
+        the per-row methods opened and committed one per row. All or nothing:
+        if any row fails, nothing from this call is written.
+        """
+        params = [_deployment_upsert_params(**d) for d in deployments]
+        errors = validation_errors or []
+        if not params and not errors:
+            return
+        with self.get_writable_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO deployments (
-                    drop_id, video_path, video_presence,
-                    ingest_status, ml_status,
-                    is_bad_deployment, sampling_start, sampling_end,
-                    biigle_volume_id, latitude, longitude, depth,
-                    nzmhcs_abiotic, nzmhcs_biotic
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(drop_id) DO UPDATE SET
-                    video_path=excluded.video_path,
-                    video_presence=excluded.video_presence,
-                    ingest_status=excluded.ingest_status,
-                    is_bad_deployment=excluded.is_bad_deployment,
-                    sampling_start=excluded.sampling_start,
-                    sampling_end=excluded.sampling_end,
-                    biigle_volume_id=COALESCE(excluded.biigle_volume_id, deployments.biigle_volume_id),
-                    latitude=COALESCE(excluded.latitude, deployments.latitude),
-                    longitude=COALESCE(excluded.longitude, deployments.longitude),
-                    depth=COALESCE(excluded.depth, deployments.depth),
-                    nzmhcs_abiotic=COALESCE(excluded.nzmhcs_abiotic, deployments.nzmhcs_abiotic),
-                    nzmhcs_biotic=COALESCE(excluded.nzmhcs_biotic, deployments.nzmhcs_biotic)
-                """,
-                (
-                    drop_id,
-                    video_path,
-                    video_presence,
-                    ingest_status,
-                    ml_status,
-                    is_bad_deployment,
-                    sampling_start,
-                    sampling_end,
-                    biigle_volume_id,
-                    latitude,
-                    longitude,
-                    depth,
-                    nzmhcs_abiotic,
-                    nzmhcs_biotic,
-                ),
-            )
-            conn.commit()
+            if errors:
+                cursor.executemany(_VALIDATION_ERROR_INSERT_SQL, errors)
+            if params:
+                cursor.executemany(_DEPLOYMENT_UPSERT_SQL, params)
 
     def validate_column(self, column: str) -> None:
         """Rejects any column name not in the deployments table schema.
@@ -476,7 +655,6 @@ class DatabaseManager:
         code should use `advance_status()` instead.
         """
         self.validate_column(section)
-        status_cls = SECTIONS.get(section)
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
@@ -486,23 +664,36 @@ class DatabaseManager:
             row = cursor.fetchone()
             current_status = row[section] if row else None
 
-            cursor.execute(
-                f"UPDATE deployments SET {section} = ? WHERE drop_id = ?",
-                (new_status, drop_id),
+            self._write_section_status(
+                cursor, drop_id, section, current_status, new_status
             )
-
-            # If we're leaving an error state, clear this section's errors.
-            # `ingest_status` has no ERROR value so status_cls can be None.
-            if (
-                status_cls is not None
-                and current_status == status_cls.ERROR
-                and new_status != status_cls.ERROR
-            ):
-                cursor.execute(
-                    "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = ?",
-                    (drop_id, status_cls.ERROR),
-                )
             conn.commit()
+
+    @staticmethod
+    def _write_section_status(
+        cursor, drop_id: str, section: str, current_status, new_status: str
+    ) -> None:
+        """The write half of a status change, on the caller's open transaction.
+
+        `section` must already be validated by the caller.
+        """
+        status_cls = SECTIONS.get(section)
+        cursor.execute(
+            f"UPDATE deployments SET {section} = ? WHERE drop_id = ?",
+            (new_status, drop_id),
+        )
+
+        # If we're leaving an error state, clear this section's errors.
+        # `ingest_status` has no ERROR value so status_cls can be None.
+        if (
+            status_cls is not None
+            and current_status == status_cls.ERROR
+            and new_status != status_cls.ERROR
+        ):
+            cursor.execute(
+                "DELETE FROM validation_errors WHERE DropID = ? AND ErrorType = ?",
+                (drop_id, status_cls.ERROR),
+            )
 
     def bulk_update_section_status(
         self,
@@ -582,10 +773,10 @@ class DatabaseManager:
         """Validated state-machine transition for any section.
 
         Looks up the status class from the SECTIONS registry, checks that
-        the target transition is in VALID_TRANSITIONS, and delegates the
-        write to `update_section_status`. Raises `InvalidTransitionError`
-        for disallowed moves, `KeyError` for unknown drop_ids, and
-        `ValueError` for unknown section column names.
+        the target transition is in VALID_TRANSITIONS, and writes it the way
+        `update_section_status` does, on the same connection as the read.
+        Raises `InvalidTransitionError` for disallowed moves, `KeyError` for
+        unknown drop_ids, and `ValueError` for unknown section column names.
 
         Usage:
             db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
@@ -604,13 +795,15 @@ class DatabaseManager:
                 raise KeyError(f"No deployment found with drop_id={drop_id!r}")
             current = row[section]
 
-        allowed = status_cls.VALID_TRANSITIONS.get(current, set())
-        if to_status not in allowed:
-            raise InvalidTransitionError(
-                f"{drop_id}: invalid {status_cls.__name__} transition "
-                f"{current!r} → {to_status!r}"
-            )
-        self.update_section_status(drop_id, section, to_status)
+            allowed = status_cls.VALID_TRANSITIONS.get(current, set())
+            if to_status not in allowed:
+                raise InvalidTransitionError(
+                    f"{drop_id}: invalid {status_cls.__name__} transition "
+                    f"{current!r} → {to_status!r}"
+                )
+            self.validate_column(section)
+            self._write_section_status(cursor, drop_id, section, current, to_status)
+            conn.commit()
 
     def update_deployment_fields(self, drop_id: str, **fields) -> bool:
         """Update metadata columns on a deployment record. Returns False if drop_id not found."""
@@ -731,6 +924,7 @@ class DatabaseManager:
         section: str,
         statuses: List[str],
         prerequisites: Optional[Dict[str, Union[str, List[str]]]] = None,
+        survey_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Returns deployments eligible for processing by a pipeline stage.
 
@@ -741,6 +935,9 @@ class DatabaseManager:
         ``prerequisites`` values may be a single string (column = value) or a
         list (column IN (...)). The list form supports cases like "BIIGLE can
         proceed when citsci is complete OR skipped".
+
+        ``survey_id`` keeps only that survey's drops (DropID prefix), the one
+        meaning ``--survey`` has in every stage.
 
         Always orders by priority DESC so high-priority drops are processed first.
         """
@@ -763,6 +960,10 @@ class DatabaseManager:
                 else:
                     where.append(f"{col} = ?")
                     params.append(val)
+        if survey_id:
+            # substr, not LIKE: "_" is a LIKE wildcard and every DropID has them.
+            where.append("substr(drop_id, 1, ?) = ?")
+            params.extend([len(survey_id) + 1, f"{survey_id}_"])
         query = f"SELECT * FROM deployments WHERE {' AND '.join(where)} ORDER BY priority DESC"
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -857,15 +1058,15 @@ class DatabaseManager:
         """
         self.add_validation_errors(
             [
-                {
-                    "SurveyID": survey_id,
-                    "DropID": drop_id,
-                    "ErrorType": error_type,
-                    "FileName": file_name,
-                    "ColumnName": column_name,
-                    "ErrorMessage": error_message,
-                    "InvalidValue": invalid_value,
-                }
+                validation_error_row(
+                    survey_id=survey_id,
+                    drop_id=drop_id,
+                    error_type=error_type,
+                    column_name=column_name,
+                    error_message=error_message,
+                    file_name=file_name,
+                    invalid_value=invalid_value,
+                )
             ]
         )
 
@@ -881,13 +1082,7 @@ class DatabaseManager:
             return
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany(
-                """
-                INSERT INTO validation_errors (SurveyID, DropID, ErrorType, FileName, ColumnName, ErrorMessage, InvalidValue)
-                VALUES (:SurveyID, :DropID, :ErrorType, :FileName, :ColumnName, :ErrorMessage, :InvalidValue)
-            """,
-                errors,
-            )
+            cursor.executemany(_VALIDATION_ERROR_INSERT_SQL, errors)
             conn.commit()
 
     def get_all_validation_errors(self) -> List[Dict[str, Any]]:
@@ -952,17 +1147,19 @@ class DatabaseManager:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            for drop_id, counts in counts_by_drop.items():
-                cursor.execute(
-                    """
-                    UPDATE deployments
-                    SET ml_annotations = ?,
-                        expert_annotations = ?,
-                        citsci_annotations = ?
-                    WHERE drop_id = ?
-                """,
-                    (counts["ml"], counts["expert"], counts["citsci"], drop_id),
-                )
+            cursor.executemany(
+                """
+                UPDATE deployments
+                SET ml_annotations = ?,
+                    expert_annotations = ?,
+                    citsci_annotations = ?
+                WHERE drop_id = ?
+            """,
+                [
+                    (counts["ml"], counts["expert"], counts["citsci"], drop_id)
+                    for drop_id, counts in counts_by_drop.items()
+                ],
+            )
             conn.commit()
 
         # Advance section status for any drop that now has annotations.
@@ -973,13 +1170,18 @@ class DatabaseManager:
         # The three (source → column → complete-value) tuples are part of
         # the fixed schema contract; hardcoded here to keep DatabaseManager
         # decoupled from the per-section status classes.
+        # The fourth item lists states left alone besides COMPLETE. An ML drop
+        # that is ml_running or ml_inferred is mid-run: any ML rows it has are
+        # an OLDER model's (a --force re-run), and promoting it here would
+        # take it away from --ml-post before the new model's MaxN is ingested.
+        # post_process_drop advances those drops itself.
         section_map = [
-            ("ml", "ml_status", "ml_complete"),
-            ("citsci", "citsci_status", "citsci_complete"),
-            ("expert", "expert_status", "expert_complete"),
+            ("ml", "ml_status", "ml_complete", ["ml_running", "ml_inferred"]),
+            ("citsci", "citsci_status", "citsci_complete", []),
+            ("expert", "expert_status", "expert_complete", []),
         ]
         total_advanced = 0
-        for source, section_col, complete_val in section_map:
+        for source, section_col, complete_val, in_flight in section_map:
             drops_with_data = [d for d, c in counts_by_drop.items() if c[source] > 0]
             if not drops_with_data:
                 continue
@@ -987,7 +1189,7 @@ class DatabaseManager:
                 drops_with_data,
                 section_col,
                 complete_val,
-                skip_if_in=[complete_val],
+                skip_if_in=[complete_val, *in_flight],
             )
             if n:
                 logging.info(

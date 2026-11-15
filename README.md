@@ -56,9 +56,18 @@ The pipeline runs in production on New Zealand's NeSI HPC platform, not on a
 server of ours. Scheduled runs are submitted as [SLURM](https://slurm.schedmd.com/)
 batch jobs:
 
-- `run_pipeline.sl`: the batch script for regular pipeline runs (GPU node for
-  ML inference), triggered on a schedule via crontab on the login node.
-- `spyfish/ml/training/train_job.sl`: the batch script for model retraining.
+- `scripts/slurm/cpu.sl` and `gpu.sl`: resource descriptions for CPU and GPU
+  jobs. The action is the `run_pipeline.py` flags on the `sbatch` line, e.g.
+  `sbatch scripts/slurm/cpu.sl --zooniverse-sync`.
+- `scripts/slurm/submit_ml.sh SURVEY`: one survey's ML as a download → infer →
+  post-process chain, so the GPU is held only for inference.
+- `scripts/slurm/submit_retrain.sh`: data prep on CPU, then
+  `spyfish/ml/training/train_job.sl` on a GPU for model retraining, then the
+  S3 sync on CPU (`cpu.sl --sync-only`).
+
+Each job writes `slurm_logs/<name>_<jobid>.out` (the run narrative) and `.err`
+(warnings, errors, tracebacks, plus a `START`/`END` stamp). An `.err` holding
+only the two stamps is a clean run.
 
 The environment on NeSI is a plain Python venv, and large video
 downloads go to a scratch filesystem via the `media_base_dir` override in

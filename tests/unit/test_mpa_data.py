@@ -37,7 +37,7 @@ SITE_B = "KSF_086"
 RESERVE = config.protected_statuses[0]
 NO_PROTECTION = config.unprotected_statuses[0]
 PARTIAL_STATUS = "Mataitai"
-SNAPPER = "Pagrus auratus"
+SNAPPER = "Chrysophrys auratus"
 LOBSTER = "Jasus edwardsii"
 BLUE_COD = "Parapercis colias"
 
@@ -51,7 +51,7 @@ def _sightings(rows) -> pd.DataFrame:
             "site_id",
             "scientific_name",
             "maxn",
-            "survey_year",
+            "survey_season",
             "protection_status",
         ],
     )
@@ -61,7 +61,7 @@ def _sightings(rows) -> pd.DataFrame:
 def _effort(rows) -> pd.DataFrame:
     """An `effort_view`-shaped frame: one row per analysed deployment."""
     return pd.DataFrame(
-        rows, columns=["drop_id", "site_id", "survey_year", "protection_status"]
+        rows, columns=["drop_id", "site_id", "survey_season", "protection_status"]
     )
 
 
@@ -137,7 +137,7 @@ def test_trend_measure_richness_ignores_absences_and_unidentified():
     ).assign(protection=RESERVE)
     out = mpa_data.trend_measure(src, None)
     assert out.to_dict("records") == [
-        {"survey_year": 2024, "protection": RESERVE, "value": 2.0}
+        {"survey_season": 2024, "protection": RESERVE, "value": 2.0}
     ]
 
 
@@ -170,7 +170,7 @@ def test_protection_trend_fills_unsurveyed_years_with_nan_and_surveyed_with_zero
     df = _sightings([(DROP_A, SITE_A, SNAPPER, 4, 2022, RESERVE)])
     effort = _effort([(DROP_A, SITE_A, 2022, RESERVE), (DROP_D, SITE_B, 2024, RESERVE)])
     trend, _, _ = mpa_data.protection_trend(df, effort, SNAPPER, by_status=True)
-    by_year = trend.set_index("survey_year")["value"]
+    by_year = trend.set_index("survey_season")["value"]
     assert by_year.index.tolist() == [2022, 2023, 2024]
     assert by_year[2022] == 4.0
     assert math.isnan(by_year[2023])  # not surveyed: the line breaks
@@ -212,7 +212,7 @@ def test_protection_trend_richness_unsurveyed_year_stays_a_gap():
     )
     effort = _effort([(DROP_A, SITE_A, 2022, RESERVE), (DROP_B, SITE_A, 2024, RESERVE)])
     trend, _, _ = mpa_data.protection_trend(df, effort, None, by_status=True)
-    by_year = trend.set_index("survey_year")["value"]
+    by_year = trend.set_index("survey_season")["value"]
     assert by_year[2022] == 1 and by_year[2024] == 1
     assert math.isnan(by_year[2023])
 
@@ -302,7 +302,7 @@ def _exp(rows) -> pd.DataFrame:
             "reserve_code",
             "scientific_name",
             "maxn",
-            "survey_year",
+            "survey_season",
             "protection_status",
         ],
     )
@@ -357,7 +357,7 @@ def test_split_sides_drops_partial_and_unrecorded_but_counts_only_partial():
     sided, partial = mpa_data.split_sides(df)
     assert partial == 1
     assert sided["_side"].tolist() == [PROTECTED, UNPROTECTED]
-    assert sided["survey_year"].dtype.kind == "i"
+    assert sided["survey_season"].dtype.kind == "i"
 
 
 def test_reserve_trend_series_richness_is_mean_species_per_deployment():
@@ -370,7 +370,7 @@ def test_reserve_trend_series_richness_is_mean_species_per_deployment():
     )
     sided, _ = mpa_data.split_sides(df)
     out = mpa_data.reserve_trend_series(sided, mpa_data.RICHNESS_METRIC)
-    assert out.columns.tolist() == ["reserve_code", "survey_year", "Side", "metric"]
+    assert out.columns.tolist() == ["reserve_code", "survey_season", "Side", "metric"]
     assert out["metric"].tolist() == [1.5]
 
 
@@ -444,7 +444,7 @@ def _series(values: dict, reserve="KSF", side=PROTECTED) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "reserve_code": reserve,
-            "survey_year": list(values),
+            "survey_season": list(values),
             "Side": side,
             "metric": list(values.values()),
         }

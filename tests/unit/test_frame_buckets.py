@@ -51,6 +51,72 @@ class TestPerFrameSpeciesCounts:
         out = per_frame_species_counts(p, 0.25)
         assert out["elong"].nunique() == 1
 
+    def test_two_stage_certainty_is_detection_times_classifier(self, tmp_path):
+        """With BioCLIP's columns, `certainty` = detection x classifier score, so
+        the Uncertain bucket finds boxes BOTH models doubt; `mean_conf` is
+        untouched and an unclassified box counts on its detection alone."""
+        path = tmp_path / "raw.csv"
+        with open(path, "w", newline="") as fh:
+            w = csv_module.writer(fh)
+            w.writerow(
+                [
+                    "frame",
+                    "time_seconds",
+                    "class",
+                    "confidence",
+                    "x",
+                    "y",
+                    "w",
+                    "h",
+                    "yolo_class",
+                    "yolo_confidence",
+                    "clf_class",
+                    "clf_confidence",
+                ]
+            )
+            w.writerow(
+                [
+                    30,
+                    1.0,
+                    "Jasus edwardsii",
+                    0.5,
+                    10,
+                    10,
+                    40,
+                    20,
+                    "Parapercis colias",
+                    0.5,
+                    "Jasus edwardsii",
+                    0.4,
+                ]
+            )
+            w.writerow(
+                [
+                    60,
+                    2.0,
+                    "Jasus edwardsii",
+                    0.9,
+                    10,
+                    10,
+                    40,
+                    20,
+                    "Jasus edwardsii",
+                    0.9,
+                    "Jasus edwardsii",
+                    0.95,
+                ]
+            )
+            w.writerow([90, 3.0, "fish", 0.6, 10, 10, 8, 8, "fish", 0.6, "", ""])
+        df = per_frame_species_counts(str(path), 0.25).set_index("time_seconds")
+        assert df.loc[1.0, "certainty"] == pytest.approx(0.2)
+        assert df.loc[2.0, "certainty"] == pytest.approx(0.855)
+        assert df.loc[3.0, "certainty"] == pytest.approx(0.6)
+        assert df.loc[1.0, "mean_conf"] == pytest.approx(0.5)
+
+    def test_no_certainty_column_without_classifier(self, tmp_path):
+        p = _raw_csv(tmp_path / "raw.csv", [(1.0, "fish", 0.5, 10, 10)])
+        assert "certainty" not in per_frame_species_counts(p, 0.25).columns
+
     def test_confidence_floor_and_empty_inputs(self, tmp_path):
         p = _raw_csv(tmp_path / "raw.csv", [(100.0, "fish", 0.1, 10, 10)])
         assert per_frame_species_counts(p, 0.25).empty
@@ -64,15 +130,15 @@ class TestCollapsePeaks:
             tmp_path / "raw.csv",
             [
                 (100.0, "fish", 0.9, 10, 10),
-                (100.0, "Pagrus auratus", 0.9, 10, 10),
-                (103.0, "Pagrus auratus", 0.9, 10, 10),
+                (100.0, "Chrysophrys auratus", 0.9, 10, 10),
+                (103.0, "Chrysophrys auratus", 0.9, 10, 10),
             ],
         )
         counts = per_frame_species_counts(p, 0.25)
-        peaks = [(100.0, "fish", 1), (103.0, "Pagrus auratus", 1)]
+        peaks = [(100.0, "fish", 1), (103.0, "Chrysophrys auratus", 1)]
         out = collapse_peaks(peaks, counts, spacing=10.0)
         assert len(out) == 1
-        assert sorted(sp for sp, _ in out[0][1]) == ["Pagrus auratus", "fish"]
+        assert sorted(sp for sp, _ in out[0][1]) == ["Chrysophrys auratus", "fish"]
 
     def test_keeps_both_when_neither_frame_preserves_the_other(self, tmp_path):
         # B peaks at 2 at t=103 but is absent at t=100 — merging would undercount.
@@ -81,12 +147,12 @@ class TestCollapsePeaks:
             [
                 (100.0, "fish", 0.9, 10, 10),
                 (100.0, "fish", 0.9, 10, 10),
-                (103.0, "Pagrus auratus", 0.9, 10, 10),
-                (103.0, "Pagrus auratus", 0.9, 10, 10),
+                (103.0, "Chrysophrys auratus", 0.9, 10, 10),
+                (103.0, "Chrysophrys auratus", 0.9, 10, 10),
             ],
         )
         counts = per_frame_species_counts(p, 0.25)
-        peaks = [(100.0, "fish", 2), (103.0, "Pagrus auratus", 2)]
+        peaks = [(100.0, "fish", 2), (103.0, "Chrysophrys auratus", 2)]
         out = collapse_peaks(peaks, counts, spacing=10.0)
         assert len(out) == 2
 
@@ -97,11 +163,11 @@ class TestCollapsePeaks:
             [
                 (100.0, "fish", 0.9, 10, 10),
                 (103.0, "fish", 0.9, 10, 10),
-                (103.0, "Pagrus auratus", 0.9, 10, 10),
+                (103.0, "Chrysophrys auratus", 0.9, 10, 10),
             ],
         )
         counts = per_frame_species_counts(p, 0.25)
-        peaks = [(100.0, "fish", 1), (103.0, "Pagrus auratus", 1)]
+        peaks = [(100.0, "fish", 1), (103.0, "Chrysophrys auratus", 1)]
         out = collapse_peaks(peaks, counts, spacing=10.0)
         assert len(out) == 1
         assert out[0][0] == 103.0

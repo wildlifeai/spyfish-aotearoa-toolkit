@@ -1,5 +1,7 @@
 import logging
 import os
+import shutil
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
@@ -8,6 +10,28 @@ import pandas as pd
 
 from spyfish.config.base import VideoPresence
 from spyfish.config.wrapper import config
+
+
+def move_to_trash(path: Path) -> Optional[Path]:
+    """Move a file or folder to ``config.trash_dir/{YYYY-MM-DD}/{parent}/{name}`` instead of deleting it.
+
+    The parent folder's name is kept so the trash says whose file it was
+    (``{drop}_slate_candidates/1_0012.00s.jpg``). A name already taken that day
+    gets ``_1``, ``_2``... Returns where it went, or None when ``path`` does not exist.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    folder = config.trash_dir / date.today().isoformat() / path.parent.name
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / path.name
+    n = 0
+    while dest.exists():
+        n += 1
+        dest = folder / f"{path.stem}_{n}{path.suffix}"
+    shutil.move(str(path), str(dest))
+    logging.debug(f"moved {path} to {dest}")
+    return dest
 
 
 def delete_file(filename: str):

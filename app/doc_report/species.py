@@ -71,7 +71,7 @@ def render(ctx: dict) -> None:
 
     per_species = species_maxn(ann)
     meta = ann[
-        ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
+        ["drop_id", "protection_status", "survey_season", "site_id", "reserve_code"]
     ].drop_duplicates("drop_id")
     per_species = per_species.merge(meta, on="drop_id", how="left")
     per_species["Group"] = protection_group(per_species["protection_status"])
@@ -87,7 +87,7 @@ def render(ctx: dict) -> None:
     # unprotected comparison can be made WITHIN each MPA rather than pooled
     # across places that are not sampled alike.
     meta_all = ann_all[
-        ["drop_id", "protection_status", "survey_year", "site_id", "reserve_code"]
+        ["drop_id", "protection_status", "survey_season", "site_id", "reserve_code"]
     ].drop_duplicates("drop_id")
     per_species_all = per_species_all.merge(meta_all, on="drop_id", how="left")
     per_species_all["Group"] = protection_group(per_species_all["protection_status"])
@@ -98,7 +98,7 @@ def render(ctx: dict) -> None:
     # counts were already gone.
     per_dep = (
         per_species_all.groupby(
-            ["drop_id", "Group", "survey_year", "reserve_code"], dropna=False
+            ["drop_id", "Group", "survey_season", "reserve_code"], dropna=False
         )
         .agg(abundance=("maxn", "sum"), richness=("scientific_name", "nunique"))
         .reset_index()

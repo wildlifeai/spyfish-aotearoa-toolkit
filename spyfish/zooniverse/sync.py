@@ -7,9 +7,13 @@ that set, parse, aggregate, write the raw CSV + MaxN CSV, ingest the
 annotations into ``spyfish_annotations.db``, and advance the drop to
 ``citsci_complete``.
 
-Idempotent: if the per-drop raw CSV already exists, the Panoptes fetch is
-skipped and classification rows are re-read from disk. Pass ``force=True``
-to bypass the cache and re-fetch from the API.
+Classifications come from the per-workflow cache that ``panoptes_fetch``
+keeps current (new rows only, one cursor per workflow); the set's subjects
+are one bulk call. Idempotent: if the per-drop raw CSV already exists, the
+rows are re-read from disk. Pass ``force=True`` to rebuild it from the cache.
+
+A fully retired set that yields no classifications is an error, never an
+absence: "volunteers saw nothing" is written only from rows that say so.
 
 Entry point is ``sync_zooniverse_drops``, wired into ``run_pipeline.py``
 behind the ``--zooniverse-sync`` flag.
@@ -22,10 +26,14 @@ import pandas as pd
 from spyfish.config.base import CitSciStatus
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
+from spyfish.zooniverse.panoptes_fetch import (
+    classifications_for_set,
+    pull_workflows,
+    workflows_of,
+)
 from spyfish.zooniverse.parse_classifications import (
     aggregate_by_subject_species,
     connect_to_zooniverse,
-    fetch_classifications_for_set,
     ingest_zooniverse_annotations,
     parse_classifications,
     subject_completion_from_api,
@@ -37,9 +45,10 @@ from spyfish.zooniverse.parse_classifications import (
 def _sync_one_drop(drop_id: str, completion: pd.DataFrame, force: bool) -> bool:
     """Process one drop. Returns True if the drop advanced to citsci_complete.
 
-    The empty-classifications case (volunteers retired the subjects as
-    all-NOTHINGHERE) still produces an empty MaxN CSV and ingests, so the
-    drop progresses rather than getting stuck at clips_uploaded.
+    All-NOTHINGHERE answers aggregate to nothing and produce an empty MaxN
+    CSV, so the drop progresses as "reviewed, nothing seen". A retired set
+    with NO classifications at all raises instead: that is a fetch or data
+    problem, and recording it as absence would be wrong data.
     """
     clips_rows = completion[
         (completion["drop_id"] == drop_id) & (completion["subject_set_type"] == "clips")
@@ -65,21 +74,19 @@ def _sync_one_drop(drop_id: str, completion: pd.DataFrame, force: bool) -> bool:
     if not force and raw_csv.exists():
         logging.info(
             f"  {drop_id}: raw CSV found, re-aggregating from disk "
-            "(pass --force to re-fetch from API)."
+            "(pass --force to rebuild it from the classification cache)."
         )
         parsed_df = pd.read_csv(raw_csv)
     else:
         if force:
-            logging.info(f"  {drop_id}: --force, re-fetching from API.")
-        raw = fetch_classifications_for_set(subject_set_id)
+            logging.info(f"  {drop_id}: --force, rebuilding the raw CSV.")
+        raw = classifications_for_set(subject_set_id, row["workflow_ids"])
         if not raw:
-            logging.info(
-                f"  {drop_id}: no classifications returned, "
-                "writing empty MaxN CSV (all-NOTHINGHERE)."
+            raise RuntimeError(
+                f"{drop_id}: subject set {subject_set_id} is fully retired "
+                f"({int(row['total'])} subjects) but has no classifications on "
+                f"workflow(s) {row['workflow_ids']}. Refusing to record absence."
             )
-            write_empty_zooniverse_maxn_csv(drop_id)
-            ingest_zooniverse_annotations(drop_id)
-            return True
         parsed_df = parse_classifications(raw)
         raw_csv.parent.mkdir(parents=True, exist_ok=True)
         parsed_df.to_csv(raw_csv, index=False)
@@ -102,9 +109,9 @@ def sync_zooniverse_drops(force: bool = False) -> None:
 
     Eligibility: ``citsci_status = citsci_clips_uploaded`` AND
     ``ingest_status = ok`` (enforced by ``get_deployments_eligible``).
-    Per-drop completion check is one batch Panoptes call up front;
-    the loop then dispatches to a per-drop fetch only for fully-retired
-    sets without a cached raw CSV.
+    One Panoptes call up front for every set's completion, then one
+    incremental pull per workflow that a retired, not-yet-cached set is
+    attached to; the loop itself only joins and aggregates.
     """
     db = DatabaseManager()
     eligible = db.get_deployments_eligible(
@@ -125,14 +132,39 @@ def sync_zooniverse_drops(force: bool = False) -> None:
         logging.info("Completion data unavailable from Panoptes, nothing to do.")
         return
 
+    ready = completion[
+        completion["drop_id"].isin(drop_ids)
+        & (completion["subject_set_type"] == "clips")
+        & completion["fully_complete"]
+    ]
+    to_fetch = {
+        r["subject_set_id"]: r["drop_id"]
+        for _, r in ready.iterrows()
+        if force or not config.get_zooniverse_raw_csv_path(r["drop_id"]).exists()
+    }
+    # A workflow whose pull failed may have left a partial cache: drops that
+    # needed that pull are skipped this run (they stay at clips_uploaded);
+    # drops already cached on disk are unaffected and proceed.
+    failed_pulls = (
+        set(pull_workflows(workflows_of(completion, to_fetch))) if to_fetch else set()
+    )
+    blocked = {
+        drop_id
+        for set_id, drop_id in to_fetch.items()
+        if workflows_of(completion, [set_id]) & failed_pulls
+    }
+
     # Per-drop isolation: Panoptes throws transient 5xx errors under load,
     # and one bad response must not kill the sync for every drop behind it
     # in the list (a 502 once took out the whole stage with zero drops
     # ingested). A failed drop stays at citsci_clips_uploaded and is picked
     # up again on the next run; already-fetched sets come from the raw CSV
     # cache, so retries are cheap.
-    failed: list[str] = []
+    failed: list[str] = sorted(blocked)
     for drop_id in drop_ids:
+        if drop_id in blocked:
+            logging.error(f"  {drop_id}: its workflow pull failed, skipped this run.")
+            continue
         try:
             _sync_one_drop(drop_id, completion, force)
         except Exception as e:  # noqa: BLE001, isolate per drop

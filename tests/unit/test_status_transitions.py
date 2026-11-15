@@ -106,8 +106,26 @@ def test_ml_full_happy_path(temp_db):
     temp_db.add_or_update_deployment(drop_id=DROP, ml_status=MlStatus.PENDING)
     temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.READY)
     temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.RUNNING)
+    temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.INFERRED)
     temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.COMPLETE)
     assert temp_db.get_deployment(DROP)["ml_status"] == MlStatus.COMPLETE
+
+
+def test_ml_complete_only_via_inferred(temp_db):
+    """ml_running → ml_complete skips the raw-CSV-on-disk checkpoint that the
+    GPU/CPU job split relies on, so it is not a valid transition."""
+    temp_db.add_or_update_deployment(drop_id=DROP, ml_status=MlStatus.RUNNING)
+    with pytest.raises(InvalidTransitionError):
+        temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.COMPLETE)
+
+
+def test_ml_inferred_can_error_and_retry(temp_db):
+    """A post-processing failure (--ml-post) errors the drop like an inference
+    failure does, and the retry path is the same ml_error → ml_ready."""
+    temp_db.add_or_update_deployment(drop_id=DROP, ml_status=MlStatus.INFERRED)
+    temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.ERROR)
+    temp_db.advance_status(DROP, MlStatus.COLUMN, MlStatus.READY)
+    assert temp_db.get_deployment(DROP)["ml_status"] == MlStatus.READY
 
 
 def test_ml_error_and_retry(temp_db):
@@ -289,6 +307,20 @@ def test_eligibility_filters_ingest_status(temp_db):
     drop_ids = [r["drop_id"] for r in eligible]
     assert DROP in drop_ids
     assert DROP_2 not in drop_ids
+
+
+def test_eligibility_survey_filter_is_a_drop_id_prefix(temp_db):
+    """`survey_id` keeps that survey's drops only. The "_" in an id is matched
+    literally: KSF_20240124_BUV must not also match a KSFX20240124XBUV... id."""
+    other = "NOI_20250226_BUV_NOI_001_01"
+    lookalike = "KSFX20240124XBUVXKSF_085_01"
+    for d in (DROP, other, lookalike):
+        temp_db.add_or_update_deployment(drop_id=d, ml_status=MlStatus.READY)
+
+    eligible = temp_db.get_deployments_eligible(
+        MlStatus.COLUMN, [MlStatus.READY], survey_id="KSF_20240124_BUV"
+    )
+    assert [r["drop_id"] for r in eligible] == [DROP]
 
 
 # ── Default statuses on insert ───────────────────────────────────────────────

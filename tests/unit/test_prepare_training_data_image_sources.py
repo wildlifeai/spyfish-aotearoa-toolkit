@@ -66,7 +66,7 @@ def stub_class_map(tmp_path, monkeypatch):
                 "0": {"class_id": 0, "scientific_name": "fish", "common_name": ""},
                 "1": {
                     "class_id": 1,
-                    "scientific_name": "Pagrus auratus",
+                    "scientific_name": "Chrysophrys auratus",
                     "common_name": "Snapper",
                 },
             }

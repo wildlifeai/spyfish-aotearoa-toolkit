@@ -19,8 +19,36 @@ from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.extract_frames import nearest_raw_frame
 from spyfish.ml.draw_frames import draw_boxes_on_video_frames
 from spyfish.ml.legacy_review_frames import write_legacy_review_frames
+from spyfish.ml.maxn_rules import (  # noqa: F401
+    centered_rolling_min as _centered_rolling_min,
+)
+from spyfish.ml.maxn_rules import gap_fill as _gap_fill  # noqa: F401
+from spyfish.ml.model_meta import resolve_maxn_threshold
+from spyfish.ml.raw_detections import read_raw_detections
 from spyfish.utils import seconds_to_time
-from spyfish.visualisations.maxn_visualisation import plot_maxn_timeline
+from spyfish.visualisations.maxn_visualisation import (
+    load_selection_frames,
+    plot_maxn_timeline,
+)
+
+
+def maxn_columns() -> list[str]:
+    """Column order of the ML MaxN CSV: the row dicts `process_maxn` builds,
+    and the header of the empty CSV written when a drop has no detections."""
+    return [
+        config.drop_id_column,
+        config.csv_scientific_name_column,
+        config.csv_maxn_time_column,
+        config.csv_max_interval_column,
+        config.csv_annotated_by_column,
+        config.csv_model_name_column,
+        config.csv_interval_annotation_column,
+        config.csv_confidence_agreement_column,
+        config.csv_maxn_time_seconds_column,
+        config.csv_raw_max_interval_column,
+        config.csv_spike_flag_column,
+        config.csv_spike_time_seconds_column,
+    ]
 
 
 def _build_sampled_grid(raw_df: pd.DataFrame):
@@ -68,40 +96,6 @@ def _build_sampled_grid(raw_df: pd.DataFrame):
         frame_to_idx,
         dt_grid,
     )
-
-
-def _gap_fill(counts: np.ndarray, max_gap: int) -> np.ndarray:
-    """Morphological closing on a count series: zero-runs up to `max_gap` slots
-    flanked by detections on BOTH sides take min(neighbours). Never invents a
-    detection — an isolated blip has zeros on both sides and stays exposed."""
-    if max_gap <= 0:
-        return counts
-    filled = counts.copy()
-    n = len(filled)
-    i = 0
-    while i < n:
-        if filled[i] != 0:
-            i += 1
-            continue
-        j = i
-        while j < n and filled[j] == 0:
-            j += 1
-        if 0 < i and j < n and (j - i) <= max_gap:
-            filled[i:j] = min(filled[i - 1], filled[j])
-        i = j
-    return filled
-
-
-def _centered_rolling_min(counts: np.ndarray, window: int) -> np.ndarray:
-    """Rolling min over `window` slots, value assigned to the window's middle
-    slot. Slots beyond the series edges count as zero, so a visit shorter than
-    the window is suppressed even when it touches the first or last detection."""
-    if window <= 1:
-        return counts
-    left = window // 2
-    right = window - 1 - left
-    padded = np.concatenate([np.zeros(left), counts, np.zeros(right)])
-    return np.lib.stride_tricks.sliding_window_view(padded, window).min(axis=1)
 
 
 def process_maxn(
@@ -261,7 +255,7 @@ def process_maxn(
     for cls in df_filtered["class"].unique():
         maxn_results.extend(_series_rows(df_filtered[df_filtered["class"] == cls], cls))
 
-    maxn_df = pd.DataFrame(maxn_results)
+    maxn_df = pd.DataFrame(maxn_results, columns=maxn_columns())
 
     if not maxn_df.empty:
         maxn_df = maxn_df.sort_values(
@@ -348,13 +342,18 @@ def _run_qa_visualizations(
     interval: float,
     raw_csv_path: Optional[str] = None,
     model_name: Optional[str] = None,
+    deployment: Optional[dict] = None,
 ):
     """Draw MaxN timeline plot and lowest-confidence annotated frames for human QA review.
 
     Each QA frame carries a banner with the model name, threshold, second and
     counts, so the frame reads on its own like the legacy review frames do.
     """
-    # Save MaxN timeline visualisation
+    # Save MaxN timeline visualisation. The sampling window and any selection
+    # files are decoration: missing ones just leave the axis/tracks off.
+    # `deployment` comes from the caller's own DB handle; this module only
+    # draws from what it is given and never opens the pipeline DB itself.
+    dep = deployment or {}
     plot_maxn_timeline(
         raw_df=raw_df,
         maxn_df=maxn_df,
@@ -363,6 +362,9 @@ def _run_qa_visualizations(
         base_conf=base_conf,
         maxn_conf=maxn_conf,
         interval_seconds=interval,  # type: ignore
+        sampling_start=dep.get("sampling_start"),
+        sampling_end=dep.get("sampling_end"),
+        **load_selection_frames(drop_id),
     )
 
     # Draw lowest-confidence frames for QA review
@@ -402,16 +404,49 @@ def _run_qa_visualizations(
         logging.warning(f"Video not found at {video_path}, skipping QA frame drawing")
         return
 
-    frames_dir = str(config.get_drop_dir(drop_id) / "qa_frames")
+    frames_dir = str(config.get_frames_dir(drop_id, "qa"))
     draw_boxes_on_video_frames(
         video_path=video_path,
         raw_csv_path=raw_csv_path,
+        raw_df=raw_df,  # already loaded by the caller: one raw CSV read per drop
         output_dir=frames_dir,
         frame_list=frame_indices,
         confidence_threshold=base_conf,
         drop_id=drop_id,
         model_name=model_name,
     )
+
+
+def _flag_static_boxes(raw_csv: str, drop_id: str) -> None:
+    """Relabel the raw CSV's static junk boxes ``config.static_box_label`` in place.
+
+    Before MaxN, so they never count (``maxn_exclude_classes``), and before
+    ``--biigle-upload`` reads the CSV, so they go up as "Not a fish?" for the
+    expert. See ``spyfish/ml/static_boxes.py``. The original name stays in
+    ``static_class``; rerunning is idempotent.
+    """
+    from spyfish.ml.static_boxes import STATIC_TRACK_COLUMN, flag_static
+
+    df = pd.read_csv(raw_csv)
+    if df.empty:
+        return
+    had = STATIC_TRACK_COLUMN in df.columns
+    out, flagged = flag_static(df, drop_id)
+    if flagged.empty and not had:
+        return  # nothing static, and nothing flagged before: leave the file alone
+    out.to_csv(raw_csv, index=False)
+    if len(flagged):
+        boxes = int(out[STATIC_TRACK_COLUMN].notna().sum())
+        logging.info(
+            f"{drop_id}: {len(flagged)} static track(s), {boxes} boxes, relabelled "
+            f"'{config.static_box_label}': not counted, sent to BIIGLE for review "
+            f"(fish scores {sorted(flagged['fish_score'].round(1).tolist())})."
+        )
+
+
+class DegenerateInferenceError(ValueError):
+    """The raw CSV is saturated with boxes: re-running post-processing on it
+    cannot succeed, a person has to look at the footage or the threshold."""
 
 
 def process_one_drop(
@@ -423,8 +458,13 @@ def process_one_drop(
     base_conf: float,
     maxn_conf: float,
     draw_images: bool = True,
+    deployment: Optional[dict] = None,
 ) -> None:
     """Post-inference processing for a single drop: MaxN + annotation ingest + QA viz.
+
+    ``deployment`` is the drop's deployments-table row, read by the caller
+    from the DB handle it already holds. Only the QA timeline uses it (for
+    the sampling-window lines); without it the plot is drawn without them.
 
     QA viz failures are swallowed and logged, they're diagnostic only and must
     not block the caller from marking the drop complete. MaxN extraction and
@@ -433,13 +473,15 @@ def process_one_drop(
     """
     drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
     drop_annotations_dir.mkdir(parents=True, exist_ok=True)
-    raw_csv = str(drop_annotations_dir / f"{drop_id}_{model_name}_raw.csv")
+    raw_csv = str(config.get_raw_csv_path(drop_id, model_name))
     maxn_csv = str(config.get_maxn_csv_path(drop_id, model_name))
 
     if not Path(raw_csv).exists():
         raise FileNotFoundError(f"Raw CSV not found for {drop_id} at {raw_csv}")
 
-    raw_df = pd.read_csv(raw_csv)
+    if config.classifier_static_boxes.not_a_fish_flag:
+        _flag_static_boxes(raw_csv, drop_id)
+    raw_df = read_raw_detections(raw_csv)
 
     # Circuit-breaker: refuse degenerate inference before it propagates downstream.
     # A healthy BUV frame has a handful of detections; hundreds/frame means the model
@@ -450,7 +492,7 @@ def process_one_drop(
         n_frames = max(1, raw_df["time_seconds"].nunique())
         boxes_per_frame = len(raw_df) / n_frames
         if boxes_per_frame > config.ml_max_boxes_per_frame:
-            raise ValueError(
+            raise DegenerateInferenceError(
                 f"{drop_id}: degenerate ML inference, {boxes_per_frame:.0f} "
                 f"detections/frame across {n_frames} frames ({len(raw_df):,} total), "
                 f"exceeding max_boxes_per_frame={config.ml_max_boxes_per_frame}. The "
@@ -475,22 +517,7 @@ def process_one_drop(
         logging.warning(
             f"No MaxN results for {drop_id}. Saving empty CSV for health checks."
         )
-        maxn_df = pd.DataFrame(
-            columns=[
-                config.drop_id_column,
-                config.csv_scientific_name_column,
-                config.csv_maxn_time_column,
-                config.csv_max_interval_column,
-                config.csv_annotated_by_column,
-                config.csv_model_name_column,
-                config.csv_interval_annotation_column,
-                config.csv_confidence_agreement_column,
-                config.csv_maxn_time_seconds_column,
-                config.csv_raw_max_interval_column,
-                config.csv_spike_flag_column,
-                config.csv_spike_time_seconds_column,
-            ]
-        )
+        maxn_df = pd.DataFrame(columns=maxn_columns())
         maxn_df.to_csv(maxn_csv, index=False)
 
     _ingest_ml_annotations(ann_db, drop_id, maxn_df, model_name)
@@ -507,6 +534,7 @@ def process_one_drop(
                 interval=interval,
                 raw_csv_path=raw_csv,
                 model_name=model_name,
+                deployment=deployment,
             )
         except Exception as e:
             logging.error(
@@ -545,12 +573,12 @@ def run_post_ml(
     For each drop: extracts MaxN, ingests annotations, optionally draws QA frames.
     Then syncs annotation counts to the main pipeline DB once at the end.
     """
-    model_name = Path(config.pipeline_model_path).stem
+    model_name = config.pipeline_model_name
     db = DatabaseManager()
     ann_db = AnnotationDatabaseManager()
     interval = config.interval_seconds
     base_conf = config.confidence_threshold
-    maxn_conf = config.maxn_confidence_threshold
+    maxn_conf = resolve_maxn_threshold(config.pipeline_model_path)
 
     for drop_id in drop_ids:
         logging.debug(f"Post-ML processing: {drop_id}")
@@ -564,6 +592,7 @@ def run_post_ml(
                 base_conf=base_conf,
                 maxn_conf=maxn_conf,
                 draw_images=draw_images,
+                deployment=db.get_deployment(drop_id),
             )
             logging.info(f"  → Post-ML processing complete for: {drop_id}")
         except Exception as e:

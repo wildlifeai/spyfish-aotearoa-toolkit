@@ -57,6 +57,14 @@ class DropStage:
     prerequisites: optional extra column=value conditions AND'd into the query
                    (e.g. {"ml_status": "ml_complete"} for zooniverse-clips).
                    May be a static dict or a callable (args, run_all) -> dict.
+
+    ready: optional (deployment row) -> bool, checked BEFORE the batch is cut
+           to the top `limit_processing`. Disk and DB only, never an API or S3
+           call. A drop the step function would return None for (no local
+           video, no raw CSV, no sampling window) otherwise kept its slot on
+           every run at the same priority, so a handful of stuck drops at the
+           top of the queue stopped the stage. Drops it rejects are counted in
+           the log and left untouched.
     """
 
     flag: str
@@ -70,6 +78,7 @@ class DropStage:
         | Callable[[argparse.Namespace, bool], dict[str, str | list[str]]]
         | None
     ) = None
+    ready: Callable[[dict], bool] | None = None
 
 
 StageSpec = GlobalStage | DropStage
@@ -175,21 +184,28 @@ class StageRunner:
             else stage.prerequisites
         )
 
-        records = self.db.get_deployments_eligible(stage.section, statuses, prereqs)
-        drop_ids = [r["drop_id"] for r in records]
-
         # --survey scopes every drop stage the same way it scopes --ml: only
         # this survey's drops (DropID prefix). Without it, a stage like
         # biigle-upload processes EVERY eligible drop across all surveys,
         # which after a backfill can be a mass upload nobody intended.
         survey_id = getattr(args, "survey", None)
+        records = self.db.get_deployments_eligible(
+            stage.section, statuses, prereqs, survey_id=survey_id
+        )
+        if stage.ready is not None:
+            not_ready = [r["drop_id"] for r in records if not stage.ready(r)]
+            if not_ready:
+                logging.info(
+                    f"{len(not_ready)} eligible drop(s) not ready on disk for "
+                    f"{stage.flag} (left unchanged, not taking batch slots): "
+                    f"{not_ready[:5]}" + (" ..." if len(not_ready) > 5 else "")
+                )
+                skip = set(not_ready)
+                records = [r for r in records if r["drop_id"] not in skip]
+        drop_ids = [r["drop_id"] for r in records]
         if survey_id:
-            prefix = f"{survey_id}_"
-            before = len(drop_ids)
-            drop_ids = [d for d in drop_ids if d.startswith(prefix)]
             logging.info(
-                f"--survey {survey_id}: {len(drop_ids)} of {before} eligible "
-                f"drop(s) belong to this survey."
+                f"--survey {survey_id}: {len(drop_ids)} eligible drop(s) in this survey."
             )
 
         # Same batch size as --ml: the top `limit_processing` by priority (the

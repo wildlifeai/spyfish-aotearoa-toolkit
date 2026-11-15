@@ -15,6 +15,7 @@ inconsistent, needs human investigation).
 """
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -87,6 +88,25 @@ def _build_base_subject_meta(
             f"Subject metadata has empty fields: {empty_keys}. Row columns: {list(row.index)}"
         )
     return meta
+
+
+def _json_safe(meta: dict) -> dict:
+    """Blank out NaN / None so Panoptes accepts the metadata.
+
+    A manifest column that is empty on SOME rows (a blind frame's target
+    species, a boxless frame's mean confidence) comes out of the DataFrame as
+    NaN, and Panoptes posts metadata with ``allow_nan=False``: the whole
+    subject save fails with "Out of range float values are not JSON
+    compliant" (HOR trial, 2026-10-16). Blank is what those values mean.
+    """
+    return {
+        key: (
+            ""
+            if value is None or (not isinstance(value, str) and pd.isna(value))
+            else value
+        )
+        for key, value in meta.items()
+    }
 
 
 # ── subject kind descriptor + shared upload loop ─────────────────────────────
@@ -235,10 +255,14 @@ def _identity(meta: dict, keys: tuple) -> "tuple | None":
     return tuple(out)
 
 
-def _existing_identities(subject_set, kind: SubjectKind) -> tuple[set, int, int]:
-    """(identities present, subjects without a readable identity, total subjects)."""
+def _existing_identities(subjects, kind: SubjectKind) -> tuple[set, int, int]:
+    """(identities present, subjects without a readable identity, total subjects).
+
+    `subjects` is the set's subject listing, already fetched (`ExistingSet`):
+    paging a set is one request per page, so it is done once per drop.
+    """
     present, unreadable, total = set(), 0, 0
-    for subject in subject_set.subjects:
+    for subject in subjects:
         total += 1
         ident = _identity(getattr(subject, "metadata", None) or {}, kind.identity_keys)
         if ident is None:
@@ -248,11 +272,79 @@ def _existing_identities(subject_set, kind: SubjectKind) -> tuple[set, int, int]
     return present, unreadable, total
 
 
+# ── one login and one project lookup per process ─────────────────────────────
+
+# Thread-local because panoptes_client keeps its logged-in client per thread.
+# The client refreshes its own bearer token, so one login lasts a whole run.
+_session = threading.local()
+
+
+def _connect() -> None:
+    """Log in to Panoptes once per process (and per set of credentials).
+
+    A stage run uploads many drops; logging in again for each one only repeats
+    the same sign-in requests.
+    """
+    credentials = (config.user, config.password)
+    if getattr(_session, "credentials", None) == credentials:
+        return
+    logging.info(f"Connecting to Zooniverse as {config.user}...")
+    Panoptes.connect(username=config.user, password=config.password)
+    _session.credentials = credentials
+    _session.projects = {}
+
+
+def _upload_project():
+    """The upload target project, looked up once per login."""
+    _connect()
+    project_id = config.zooniverse_project_id
+    if project_id not in _session.projects:
+        _session.projects[project_id] = Project.find(project_id)
+    return _session.projects[project_id]
+
+
+def reset_session() -> None:
+    """Forget the cached login and project (tests, or after a credential change)."""
+    _session.__dict__.clear()
+
+
+@dataclass(frozen=True)
+class ExistingSet:
+    """A subject set already on Zooniverse and its subjects, listed once.
+
+    The stage's "already uploaded?" check and the uploader's resume both need
+    the set's subjects. Whoever lists them first hands this to the other.
+    """
+
+    subject_set: object
+    subjects: list
+
+
+def fetch_existing_set(kind: SubjectKind, drop_id: str) -> ExistingSet | None:
+    """This drop's set of `kind` on Zooniverse with its subjects, or None if no set.
+
+    One query for the set and one page walk over its subjects, so a stage can
+    skip all rendering for a drop that is already up (a retry after an error,
+    or a re-run). Pass the result to the upload as `existing` so the set is
+    not looked up and paged a second time.
+    """
+    _connect()
+    return _find_set(config.zooniverse_project_id, f"{kind.set_name_prefix}{drop_id}")
+
+
+def _find_set(project_id, set_name: str) -> ExistingSet | None:
+    sets = list(SubjectSet.where(project_id=project_id, display_name=set_name))
+    if not sets:
+        return None
+    return ExistingSet(subject_set=sets[0], subjects=list(sets[0].subjects))
+
+
 def _upload_subjects_to_zooniverse(
     df: pd.DataFrame,
     kind: SubjectKind,
     subject_set_name: str | None,
     test_upload: bool,
+    existing: ExistingSet | None = None,
 ) -> None:
     """Shared upload loop for clips and frames.
 
@@ -268,6 +360,11 @@ def _upload_subjects_to_zooniverse(
     never adds a duplicate. Only when the existing subjects carry no identity
     metadata (sets from before the keys existed) does the old count rule
     apply: same count skips, a different count raises for a human to look.
+
+    `existing` is the set as `fetch_existing_set` already found it in this
+    run; given, the set is neither looked up nor paged again. Without it (or
+    when the earlier check found no set) the lookup happens here, so two
+    machines racing on one drop still cannot create the set twice.
     """
     if not all([config.user, config.password, config.zooniverse_project_id]):
         raise EnvironmentError(
@@ -276,12 +373,14 @@ def _upload_subjects_to_zooniverse(
         )
 
     uploadable = df[df[kind.path_column].notna()].copy()
+    # Nothing to upload raises rather than returns: every caller advances the
+    # drop to *_UPLOADED when this returns, so a silent return recorded a set
+    # on Zooniverse that does not exist and the drop was never retried.
     if uploadable.empty:
-        logging.error(
+        raise RuntimeError(
             f"No {kind.noun_plural} available to upload "
             f"({kind.path_column} is empty for all rows)."
         )
-        return
 
     # Missing files are dropped BEFORE counting. Counting first made a set with
     # one missing file come up one short on every later run, which the
@@ -293,8 +392,10 @@ def _upload_subjects_to_zooniverse(
         )
     uploadable = uploadable[exists]
     if uploadable.empty:
-        logging.error(f"None of the {kind.noun_plural} files exist on disk.")
-        return
+        raise FileNotFoundError(
+            f"None of the {kind.noun_plural} files exist on disk "
+            f"({len(exists)} listed in {kind.path_column})."
+        )
 
     if test_upload:
         uploadable = uploadable.iloc[:1]
@@ -306,9 +407,7 @@ def _upload_subjects_to_zooniverse(
     video_filename = config.get_video_s3_key(drop_id)
     site_reserve_meta = _get_site_reserve_meta(site_id)
 
-    logging.info(f"Connecting to Zooniverse as {config.user}...")
-    Panoptes.connect(username=config.user, password=config.password)
-    zoo_project = Project.find(config.zooniverse_project_id)
+    zoo_project = _upload_project()
 
     set_name = subject_set_name or f"{kind.set_name_prefix}{drop_id}"
 
@@ -316,27 +415,30 @@ def _upload_subjects_to_zooniverse(
     # the set, which is how a re-run tells "already there" from "missing".
     planned = []
     for _, row in uploadable.iterrows():
-        meta = {
-            **_build_base_subject_meta(
-                row,
-                drop_id,
-                video_filename,
-                site_id,
-                site_reserve_meta,
-                subject_type=kind.noun_singular,
-                blank_ok=kind.blank_ok,
-            ),
-            SubjectKeys.UPL_SECONDS: kind.upl_seconds_fn(row),
-            **(kind.extra_meta_fn(row) if kind.extra_meta_fn else {}),
-        }
+        meta = _json_safe(
+            {
+                **_build_base_subject_meta(
+                    row,
+                    drop_id,
+                    video_filename,
+                    site_id,
+                    site_reserve_meta,
+                    subject_type=kind.noun_singular,
+                    blank_ok=kind.blank_ok,
+                ),
+                SubjectKeys.UPL_SECONDS: kind.upl_seconds_fn(row),
+                **(kind.extra_meta_fn(row) if kind.extra_meta_fn else {}),
+            }
+        )
         planned.append((row, meta))
 
-    existing_sets = list(
-        SubjectSet.where(project_id=zoo_project.id, display_name=set_name)
-    )
-    if existing_sets:
-        subject_set = existing_sets[0]
-        present, unreadable, existing_count = _existing_identities(subject_set, kind)
+    if existing is None:
+        existing = _find_set(zoo_project.id, set_name)
+    if existing is not None:
+        subject_set = existing.subject_set
+        present, unreadable, existing_count = _existing_identities(
+            existing.subjects, kind
+        )
         if unreadable:
             # Pre-identity subjects: the count is all there is to go on.
             if existing_count == n:
@@ -380,27 +482,34 @@ def _upload_subjects_to_zooniverse(
 
     # Linked to the set in chunks as they are saved, not in one call at the end:
     # a crash mid-run used to leave every saved subject orphaned outside the set.
-    linked, pending = [], []
-
-    def _link() -> None:
-        batch = list(pending)  # a copy: `pending` is reused for the next chunk
+    # Within a chunk the saves run on panoptes_client's own thread pool
+    # (`Subject.async_saves`): the same requests, several in flight at once.
+    linked = []
+    for start in range(0, len(planned), _LINK_CHUNK):
+        chunk = planned[start : start + _LINK_CHUNK]
+        batch = []
+        with Subject.async_saves():
+            for row, meta in chunk:
+                subject = Subject()
+                subject.links.project = zoo_project
+                subject.add_location(
+                    str(row[kind.path_column]), manual_mimetype=kind.mimetype
+                )
+                subject.metadata.update(meta)
+                subject.save()  # queued; the `with` waits for the whole chunk
+                batch.append(subject)
+        for subject, (row, _) in zip(batch, chunk):
+            file_name = Path(row[kind.path_column]).name
+            # A failed save re-raises here. Nothing of this chunk is linked
+            # then, exactly as when a one-at-a-time save raised mid-chunk.
+            if not subject.async_save_result:
+                raise RuntimeError(
+                    f"{file_name}: subject save did not complete; "
+                    f"'{set_name}' is partial, re-run to resume."
+                )
+            logging.info(f"  Saved: {file_name} ({row.get('SelectionReason', '')})")
         subject_set.add(batch)
         linked.extend(batch)
-        pending.clear()
-
-    for row, meta in planned:
-        file_path = Path(row[kind.path_column])
-        subject = Subject()
-        subject.links.project = zoo_project
-        subject.add_location(str(file_path), manual_mimetype=kind.mimetype)
-        subject.metadata.update(meta)
-        subject.save()
-        pending.append(subject)
-        logging.info(f"  Saved: {file_path.name} ({row.get('SelectionReason', '')})")
-        if len(pending) >= _LINK_CHUNK:
-            _link()
-    if pending:
-        _link()
     logging.info(
         f"Uploaded {len(linked)}/{n} {kind.noun_plural} to subject set '{set_name}'."
     )
@@ -412,6 +521,35 @@ def _upload_subjects_to_zooniverse(
 
 
 # ── public entry points ──────────────────────────────────────────────────────
+
+
+def record_clip_uploads(drop_id: str, clips_df: pd.DataFrame, uploaded_at: str) -> Path:
+    """Append this run's clips to the drop's upload record, keyed on clip start.
+
+    Call only after the upload returned: it raises on failure, so a clip in
+    the record is a clip on Zooniverse. A clip already recorded keeps its
+    first `UploadedAt`, since the upload skipped it as already present. Clips
+    uploaded before this record existed get the date of the first run that
+    logs them, not their real upload date.
+    """
+    path = config.get_clip_uploads_csv_path(drop_id)
+    start_col = config.csv_clip_start_absolute_column
+    fresh = clips_df[clips_df[CLIP_KIND.path_column].notna()].drop(
+        columns=[CLIP_KIND.path_column]
+    )
+    fresh = fresh.assign(UploadedAt=uploaded_at)
+    if path.exists():
+        fresh = pd.concat([pd.read_csv(path), fresh], ignore_index=True)
+    record = (
+        fresh.assign(_key=fresh[start_col].astype(float).round(3))
+        .drop_duplicates("_key", keep="first")
+        .drop(columns="_key")
+        .sort_values(start_col)
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record.to_csv(path, index=False)
+    logging.info(f"Clip upload record: {len(record)} clip(s) in {path.name}")
+    return path
 
 
 def upload_clips_to_zooniverse(
@@ -458,32 +596,35 @@ def upload_frames_to_zooniverse(
 def existing_subject_count(kind: SubjectKind, drop_id: str) -> int | None:
     """Subjects already in this drop's set of `kind` on Zooniverse, or None if no set.
 
-    One small metadata query, so a stage can skip all rendering for a drop
-    that is already up (a retry after an error, or a re-run).
+    Counts the subjects actually listed. For many drops at once, read the
+    counts off one subject-set listing instead (`--db-refresh` does); to go on
+    and upload, use `fetch_existing_set` and pass its result along.
     """
-    Panoptes.connect(username=config.user, password=config.password)
-    sets = list(
-        SubjectSet.where(
-            project_id=config.zooniverse_project_id,
-            display_name=f"{kind.set_name_prefix}{drop_id}",
-        )
-    )
-    return sum(1 for _ in sets[0].subjects) if sets else None
+    found = fetch_existing_set(kind, drop_id)
+    return len(found.subjects) if found else None
 
 
-def upload_validation_frames_to_zooniverse(manifest_df: pd.DataFrame) -> None:
+def upload_validation_frames_to_zooniverse(
+    manifest_df: pd.DataFrame, existing: ExistingSet | None = None
+) -> None:
     """Upload a drop's validation frames (every ML box drawn) as ``vframes_{drop}``.
 
     `manifest_df` is from `validation_frames.render_validation_frames`. The set
-    is NOT attached to a workflow, attach it by hand, as for clips.
+    is NOT attached to a workflow, attach it by hand, as for clips. `existing`
+    is the stage's own `fetch_existing_set` result, if it found the set.
     """
-    _upload_subjects_to_zooniverse(manifest_df, VALIDATION_FRAME_KIND, None, False)
+    _upload_subjects_to_zooniverse(
+        manifest_df, VALIDATION_FRAME_KIND, None, False, existing
+    )
 
 
-def upload_validation_crops_to_zooniverse(manifest_df: pd.DataFrame) -> None:
+def upload_validation_crops_to_zooniverse(
+    manifest_df: pd.DataFrame, existing: ExistingSet | None = None
+) -> None:
     """Upload a drop's validation crops (one per ML box) as ``crops_{drop}``.
 
     `manifest_df` is from `validation_frames.render_validation_crops`. Rows
     with no CropPath (boxes not cropped) are skipped by the shared loop.
+    `existing` is the stage's own `fetch_existing_set` result, if it found the set.
     """
-    _upload_subjects_to_zooniverse(manifest_df, CROP_KIND, None, False)
+    _upload_subjects_to_zooniverse(manifest_df, CROP_KIND, None, False, existing)

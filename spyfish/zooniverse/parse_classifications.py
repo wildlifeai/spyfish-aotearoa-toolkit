@@ -50,85 +50,6 @@ def connect_to_zooniverse() -> None:
     Panoptes.connect(username=config.user, password=config.password)
 
 
-def fetch_classifications_for_set(subject_set_id: str) -> list[dict]:
-    """
-    Fetch all retired classifications for a single subject set.
-
-    Used by the per-subject-set sync path: call ``subject_completion_from_api``
-    to confirm ``fully_complete=True``, then call this to retrieve the data.
-    Returns the same dict shape as ``fetch_classifications`` so both feed into
-    ``parse_classifications`` without modification.
-
-    A non-retired subject in a "fully complete" set is unexpected but possible
-    if retirement changed between the completion check and this fetch; those
-    classifications are skipped and logged.
-    """
-    from panoptes_client import Classification
-
-    classifications = []
-    n_skipped = 0
-
-    # `scope="project"` is required for two reasons:
-    #   1. Without it, Panoptes returns only the authenticated user's own
-    #      classifications (default "private" scope), not the volunteer pool,
-    #      ~21 of ~500 for a typical retired drop on the team account.
-    #   2. Without it, the response strips `subject_data` (no metadata, no
-    #      retired field), so the per-subject retirement filter below rejects
-    #      every classification regardless of actual status.
-    for c in Classification.where(subject_set_id=subject_set_id, scope="project"):
-        raw = c.raw
-        links = raw.get("links", {})
-        subject_ids = links.get("subjects", [])
-        if not subject_ids:
-            continue
-
-        subject_id = str(subject_ids[0])
-        subject_data = raw.get("subject_data", {}).get(subject_id, {})
-
-        if not subject_data.get("retired"):
-            n_skipped += 1
-            continue
-
-        metadata = subject_data.get("metadata", {})
-        locations = subject_data.get("locations", [])
-        subject_set_ids = subject_data.get("links", {}).get("subject_sets", [])
-
-        classifications.append(
-            {
-                "classification_id": raw.get("id"),
-                "created_at": raw.get("created_at"),
-                "user_name": raw.get("user_name"),
-                "user_id": raw.get("user_id"),
-                # Hashed-IP token Panoptes assigns to anonymous classifications
-                # (and includes for logged-in too). Carried through so the
-                # dedupe in aggregate_by_subject_species can fall back to it
-                # when user_id is None, otherwise all anonymous votes on a
-                # subject collapse to a single (None, subject, species) row.
-                "user_ip": raw.get("user_ip"),
-                "annotations": raw.get("annotations", []),
-                "subject_id": subject_id,
-                "subject_set_id": (
-                    str(subject_set_ids[0]) if subject_set_ids else None
-                ),
-                "workflow_id": str(links.get("workflow")),
-                "subject_metadata": metadata,
-                "subject_locations": locations,
-            }
-        )
-
-    if n_skipped:
-        logging.warning(
-            f"Subject set {subject_set_id}: skipped {n_skipped} classification(s) "
-            "from non-retired subjects, set marked complete but retirement may be "
-            "in progress. Rerun to pick up when fully settled."
-        )
-
-    logging.info(
-        f"Subject set {subject_set_id}: fetched {len(classifications)} classification(s)."
-    )
-    return classifications
-
-
 # ── Phase 1. Parse ──────────────────────────────────────────────────────────
 
 
@@ -340,6 +261,9 @@ def _build_classification_record(
         "user_name": classification["user_name"],
         "user_id": classification["user_id"],
         "user_ip": classification.get("user_ip"),
+        # Browser session token from the classification metadata. The live API
+        # gives no user_ip, so this is the anonymous-volunteer key there.
+        "session": classification.get("session"),
         "subject_id": classification["subject_id"],
         "subject_set_id": classification["subject_set_id"],
         "workflow_id": classification["workflow_id"],
@@ -366,7 +290,7 @@ def _build_classification_record(
         "event_date": meta_fields["event_date"],
         "is_nothing_here": annotation["is_nothing_here"],
         "is_blank_submission": annotation.get("is_blank_submission", False),
-        "is_retired": True,  # fetch_classifications skips non-retired subjects
+        "is_retired": True,  # the sync only reads fully retired subject sets
         "subject_locations": classification["subject_locations"],
     }
 
@@ -517,8 +441,9 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
     # (user_id, subject, species) dedupe collapses every anonymous vote to a
     # single (None, subject, species) row, silent data loss for workflows
     # with sizeable anonymous traffic (e.g. 14054). Fall back through
-    # user_name then user_ip (hashed IP token Panoptes provides on
-    # anonymous classifications). Final fallback is the classification_id
+    # user_name, user_ip (hashed IP token the CSV export carries), then the
+    # browser session token (what the live API offers instead of user_ip).
+    # Final fallback is the classification_id
     # itself, which preserves the row rather than collapsing it when we
     # genuinely cannot identify the volunteer.
     def _col_or_nan(col: str) -> pd.Series:
@@ -530,6 +455,7 @@ def aggregate_by_subject_species(df: pd.DataFrame) -> pd.DataFrame:
         .astype("object")
         .fillna(_col_or_nan("user_name"))
         .fillna(_col_or_nan("user_ip"))
+        .fillna(_col_or_nan("session"))
         .fillna(df["classification_id"].astype("object"))
     )
 
@@ -822,11 +748,14 @@ def _parse_subject_set_display_name(
     """
     Parse a subject set display_name into (subject_set_type, drop_id).
 
-    upload.py writes display_name as ``clips_{drop_id}`` or ``frames_{drop_id}``.
+    upload.py writes display_name as ``clips_{drop_id}`` or ``frames_{drop_id}``,
+    and the validation stages as ``vframes_{drop_id}`` / ``crops_{drop_id}``.
     Returns (None, None) for any set that doesn't follow this convention
     (manually created sets, legacy sets uploaded before the convention).
+    Each consumer filters on its own type (the clips sync on ``clips``, the
+    validation sync on ``vframes`` / ``crops``).
     """
-    for prefix in ("clips_", "frames_"):
+    for prefix in ("clips_", "frames_", "vframes_", "crops_"):
         if display_name.startswith(prefix):
             candidate = display_name[len(prefix) :]
             try:
@@ -847,7 +776,7 @@ def subject_completion_from_api() -> pd.DataFrame:
 
     Returns:
         DataFrame with columns: project_id, subject_set_id, subject_set_type,
-        drop_id, total, retired, pct_retired, fully_complete.
+        drop_id, total, retired, pct_retired, workflow_ids, fully_complete.
     """
     from panoptes_client import SubjectSet
 
@@ -863,13 +792,25 @@ def subject_completion_from_api() -> pd.DataFrame:
                 n_unrecognised += 1
 
             total = int(ss.raw.get("set_member_subjects_count") or 0)
+            # The workflows the set is attached to: classifications are pulled
+            # per workflow (panoptes_fetch), so this is how a set finds its own.
+            workflow_ids = [
+                str(w) for w in ((ss.raw.get("links") or {}).get("workflows") or [])
+            ]
             # Retirement progress lives in `completeness`, a dict keyed by
             # workflow_id, value is the fraction (0.0–1.0) of subjects retired
             # in that workflow. A subject set linked to multiple workflows is
             # retired once any workflow has classified everything, so we take
             # the max. The Panoptes API does NOT return a count field for
-            # retired subjects directly.
-            completeness = ss.raw.get("completeness") or {}
+            # retired subjects directly. Only CURRENTLY linked workflows count:
+            # Panoptes keeps a stale 1.0 for a workflow a set was unlinked from
+            # (SLI 2026 sets showed {23924: 1.0} with zero classifications,
+            # 2026-11-03), and a set linked to nothing is 0%, never done.
+            completeness = {
+                str(k): v
+                for k, v in (ss.raw.get("completeness") or {}).items()
+                if str(k) in workflow_ids
+            }
             pct_retired = max(completeness.values()) * 100 if completeness else 0.0
             retired = int(round(total * pct_retired / 100))
             rows.append(
@@ -881,6 +822,7 @@ def subject_completion_from_api() -> pd.DataFrame:
                     "total": total,
                     "retired": retired,
                     "pct_retired": round(pct_retired, 1),
+                    "workflow_ids": workflow_ids,
                 }
             )
 
@@ -914,8 +856,14 @@ def _zoo_choice_to_scientific(choice: str) -> Optional[str]:
     """
     if not choice:
         return None
-    sp = species_registry().from_zoo_choice(choice)
-    return sp.scientific_name if sp else "fish"
+    registry = species_registry()
+    sp = registry.from_zoo_choice(choice)
+    if sp is None:
+        return "fish"
+    # The entry a choice lands on may carry a retired name ("WHITE TREVALLY"
+    # -> Pseudocaranx dentex), so the CSV gets the same canonical name the
+    # annotations-DB gate would write.
+    return registry.canonical_name(sp.scientific_name)
 
 
 # ── Phase 4. MaxN CSV export ────────────────────────────────────────────────
@@ -1033,7 +981,7 @@ def get_all_db_drop_ids() -> list[str]:
 
 def ingest_zooniverse_annotations(drop_id: str) -> int:
     """
-    Read the per-drop Zooniverse MaxN CSV (written by spyfish.zooniverse.live_extract)
+    Read the per-drop Zooniverse MaxN CSV (written by spyfish.zooniverse.sync)
     and store annotations in spyfish_annotations.db with annotated_by='citsci'.
 
     Clears any previous citsci annotations for this drop before writing, so

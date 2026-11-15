@@ -61,6 +61,7 @@ from spyfish.extraction.render_annotations import (
     warn_if_rotated,
 )
 from spyfish.extraction.select_frames import select_frames
+from spyfish.ml.raw_detections import read_raw_detections
 from spyfish.ml.run_inference import inference_stride, seek_to_sampling_start
 from spyfish.utils import generate_frame_filename
 
@@ -98,7 +99,10 @@ def load_detections(raw_csv: Path) -> pd.DataFrame:
     lower threshold would otherwise show volunteers boxes the pipeline no
     longer reports.
     """
-    df = pd.read_csv(raw_csv)
+    df = read_raw_detections(raw_csv)
+    # Static junk goes to BIIGLE experts, not volunteers: "is this the right
+    # species" means nothing for a box labelled "Not a fish?".
+    df = df[df["class"] != config.static_box_label]
     df = df[df["confidence"] >= config.confidence_threshold].copy()
     # Row order within a frame is the model's output order, kept stable so a
     # box's index in its frame (the DetectionKey) is reproducible.
@@ -238,19 +242,18 @@ def prepare_validation(drop_id: str) -> Optional[ValidationContext]:
     is not a fallback worth having.
     """
     config.validate_drop_id(drop_id)
-    model_name = Path(config.pipeline_model_path).stem
     video_path = config.get_video_path(drop_id)
-    raw_csv = config.get_raw_csv_path(drop_id, model_name)
     if not video_path.exists():
         logging.warning(
             f"{drop_id}: video not on local disk ({video_path}); not ready."
         )
         return None
-    if not raw_csv.exists():
-        logging.warning(
-            f"{drop_id}: no raw CSV for {model_name} ({raw_csv}); not ready."
-        )
+    # The pipeline model's raw CSV, else the newest model that ran on the drop.
+    resolved = config.resolve_ml_raw_csv(drop_id)
+    if resolved is None:
+        logging.warning(f"{drop_id}: no ML raw CSV on disk; not ready.")
         return None
+    model_name, raw_csv = resolved
 
     deployment = DatabaseManager().get_deployment(drop_id)
     if not deployment or None in (
@@ -428,7 +431,9 @@ def render_validation_crops(ctx: ValidationContext) -> pd.DataFrame:
     params = config.zooniverse_validation_crops
     registry = species_registry()
     rows = []
+    frames_read = 0
     for fr, image, clean, boxes in _read_frames(ctx):
+        frames_read += 1
         frame_h, frame_w = image.shape[:2]
         counts = boxes["class"].value_counts()
         for _, d in boxes.iterrows():
@@ -487,6 +492,8 @@ def render_validation_crops(ctx: ValidationContext) -> pd.DataFrame:
             rows.append(row)
     manifest = pd.DataFrame(rows)
     _save_manifest(ctx.drop_id, "crops", manifest)
+    # Read by the stage: zero frames decoded is a retry, not a skip.
+    manifest.attrs["frames_read"] = frames_read
     return manifest
 
 
@@ -503,13 +510,30 @@ def _save_manifest(drop_id: str, kind: str, manifest: pd.DataFrame) -> None:
 # (not ready, or a dry run). The pipeline file only registers these.
 
 
-def _already_uploaded(kind, kind_name: str, path_column: str, drop_id: str) -> bool:
-    """True if this drop's set is already complete on Zooniverse; checked before
+def locally_ready(drop_id: str) -> bool:
+    """Disk-only readiness: the video is in media_dir and an ML raw CSV exists.
+
+    The stage runner checks this (``DropStage.ready``) before it takes the top
+    ``limit_processing``, so a drop with no local video neither fills the
+    batch nor costs a Zooniverse login and set lookup on every run before
+    being found not ready.
+    """
+    return (
+        config.get_video_path(drop_id).exists()
+        and config.resolve_ml_raw_csv(drop_id) is not None
+    )
+
+
+def _already_uploaded(kind, kind_name: str, path_column: str, drop_id: str):
+    """``(complete, existing set)`` for this drop on Zooniverse; checked before
     any rendering. A set with a different count is NOT complete: the stage
-    renders and the uploader resumes, adding only the missing subjects."""
-    on_zooniverse = zoo_upload.existing_subject_count(kind, drop_id)
-    if on_zooniverse is None:
-        return False
+    renders and the uploader resumes, adding only the missing subjects. The
+    set and its subjects, listed here once, are returned for that upload so it
+    does not page the same set again (None when there is no set)."""
+    existing = zoo_upload.fetch_existing_set(kind, drop_id)
+    if existing is None:
+        return False, None
+    on_zooniverse = len(existing.subjects)
     manifest = config.get_validation_manifest_path(drop_id, kind_name)
     expected = (
         int(pd.read_csv(manifest)[path_column].notna().sum())
@@ -521,21 +545,24 @@ def _already_uploaded(kind, kind_name: str, path_column: str, drop_id: str) -> b
             f"{drop_id}: {kind.set_name_prefix}{drop_id} already on Zooniverse "
             f"with all {expected} {kind_name}; nothing to render or upload."
         )
-        return True
+        return True, existing
     logging.warning(
         f"{drop_id}: {kind.set_name_prefix}{drop_id} exists on Zooniverse with "
         f"{on_zooniverse} subjects but the local manifest lists {expected}; "
         "rendering and resuming the upload (missing subjects only)."
     )
-    return False
+    return False, existing
 
 
 def run_validation_frames_drop(drop_id: str, dry_run: bool = False) -> Optional[str]:
     """--zooniverse-frames: picked frames with every ML box drawn, for recall."""
-    if not dry_run and _already_uploaded(
-        zoo_upload.VALIDATION_FRAME_KIND, "frames", FRAME_PATH_COLUMN, drop_id
-    ):
-        return ZooFramesStatus.UPLOADED
+    existing = None
+    if not dry_run:
+        done, existing = _already_uploaded(
+            zoo_upload.VALIDATION_FRAME_KIND, "frames", FRAME_PATH_COLUMN, drop_id
+        )
+        if done:
+            return ZooFramesStatus.UPLOADED
     ctx = prepare_validation(drop_id)
     if ctx is None:
         return None
@@ -555,16 +582,19 @@ def run_validation_frames_drop(drop_id: str, dry_run: bool = False) -> Optional[
             f"{config.get_validation_upload_dir(drop_id)}; nothing uploaded."
         )
         return None
-    zoo_upload.upload_validation_frames_to_zooniverse(manifest)
+    zoo_upload.upload_validation_frames_to_zooniverse(manifest, existing=existing)
     return ZooFramesStatus.UPLOADED
 
 
 def run_validation_crops_drop(drop_id: str, dry_run: bool = False) -> Optional[str]:
     """--zooniverse-crops: one crop per ML box in the validation frames, for precision."""
-    if not dry_run and _already_uploaded(
-        zoo_upload.CROP_KIND, "crops", CROP_PATH_COLUMN, drop_id
-    ):
-        return ZooCropsStatus.UPLOADED
+    existing = None
+    if not dry_run:
+        done, existing = _already_uploaded(
+            zoo_upload.CROP_KIND, "crops", CROP_PATH_COLUMN, drop_id
+        )
+        if done:
+            return ZooCropsStatus.UPLOADED
     ctx = prepare_validation(drop_id)
     if ctx is None:
         return None
@@ -576,8 +606,17 @@ def run_validation_crops_drop(drop_id: str, dry_run: bool = False) -> Optional[s
             f"{config.get_validation_upload_dir(drop_id)}; nothing uploaded."
         )
         return None
+    if manifest.attrs.get("frames_read") == 0:
+        # Same rule as the frames stage: a video that decoded nothing (truncated,
+        # still copying) is not a drop with nothing to judge. Leave it pending
+        # rather than skipping it for good.
+        logging.warning(
+            f"{drop_id}: no validation frame could be read from the video; "
+            "leaving the drop pending."
+        )
+        return None
     if n_crops == 0:
         logging.info(f"{drop_id}: no croppable boxes in the validation frames.")
         return ZooCropsStatus.SKIPPED
-    zoo_upload.upload_validation_crops_to_zooniverse(manifest)
+    zoo_upload.upload_validation_crops_to_zooniverse(manifest, existing=existing)
     return ZooCropsStatus.UPLOADED

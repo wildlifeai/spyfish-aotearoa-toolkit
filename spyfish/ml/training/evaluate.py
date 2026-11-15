@@ -3,6 +3,8 @@ evaluate.py. Evaluate trained YOLO models and optionally promote to production.
 
 Workflow:
   1. Run model.val() on the test split → collect mAP@0.5, precision, recall.
+  1b. Pick the model's MaxN confidence cutoff on the VAL split (F-beta peak,
+      spyfish/ml/training/threshold.py) and write it beside the weights.
   2. Compare new model vs current production model on the same test set.
   3. If improvement ≥ retrain_min_improvement_pct → promote (update config, upload to S3).
   4. Save metrics CSV, confusion matrix image, and training curves to S3.
@@ -23,6 +25,16 @@ import pandas as pd
 import yaml
 
 from spyfish.config.wrapper import config
+from spyfish.ml.training.test_eval import (
+    clears_promotion_margin,
+    evaluate_on_test,
+    per_class_table,
+    promotion_decision,
+    promotion_margin,
+    val_metrics,
+)
+from spyfish.ml.training.threshold import pick_threshold_on_val
+from spyfish.ml.training.yolo_labels import read_class_names_by_id
 from spyfish.utils import validate_model_path
 
 
@@ -105,10 +117,7 @@ def evaluate_model(
         "model_path": model_path,
         "data_yaml": data_yaml,
         "eval_split": eval_split,
-        "mAP50": round(float(metrics.box.map50), 4),
-        "mAP50_95": round(float(metrics.box.map), 4),
-        "precision": round(float(metrics.box.mp), 4),
-        "recall": round(float(metrics.box.mr), 4),
+        **val_metrics(metrics),
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -131,12 +140,10 @@ def _class_list_mismatch(model_path: str, data_yaml: str) -> Optional[str]:
         from ultralytics import YOLO
 
         model_names = YOLO(str(model_path)).names
-        with open(data_yaml) as f:
-            data_names = yaml.safe_load(f).get("names", [])
+        data_map = read_class_names_by_id(Path(data_yaml))
     except Exception as e:  # unreadable checkpoint or yaml, say so and skip
         return f"could not read class lists ({type(e).__name__}: {e})."
 
-    data_map = dict(enumerate(data_names))
     if model_names == data_map:
         return None
     missing = [(i, n) for i, n in data_map.items() if i not in model_names]
@@ -176,7 +183,7 @@ def compare_with_production(
         (production_metrics, should_promote) where should_promote is True if
         new mAP50 > production mAP50 + min_improvement_pct.
     """
-    min_improvement = config.retrain_min_improvement_pct / 100.0
+    min_improvement = promotion_margin()
 
     if not Path(production_model_path).exists():
         logging.warning(
@@ -211,8 +218,9 @@ def compare_with_production(
         output_dir=output_dir,
     )
 
-    improvement = new_metrics["mAP50"] - prod_metrics["mAP50"]
-    should_promote = improvement >= min_improvement
+    should_promote, improvement = clears_promotion_margin(
+        new_metrics["mAP50"], prod_metrics["mAP50"], min_improvement
+    )
 
     logging.info(
         f"\n=== Model comparison ===\n"
@@ -248,6 +256,61 @@ def save_metrics(
 # ---------------------------------------------------------------------------
 
 
+# Returned in place of the production record when a production checkpoint
+# exists but could not be scored. Distinct from None ("no production model"):
+# None means "first model, promote"; this means "cannot compare, keep".
+PRODUCTION_UNSCORABLE = "unscorable"
+
+
+def _record_on_frozen_test(
+    model_path: str, production_model_path: str, dataset_dir: Path
+) -> Optional[Tuple[dict, Optional[dict]]]:
+    """(new record, production record) on the frozen test set, or None when
+    there is no test split.
+
+    The production slot is None when there is no production checkpoint (the
+    decision then falls to "first model"), or ``PRODUCTION_UNSCORABLE`` when
+    a checkpoint exists but scoring it raised (CUDA OOM, corrupt sidecar,
+    missing class map). The two must stay distinct: reading a scoring
+    failure as "no production model" would promote whatever was trained.
+    A failure scoring the NEW model propagates; the caller saves the
+    val-based comparison before calling this so nothing is lost.
+    """
+    new_record = evaluate_on_test(model_path, dataset_dir=dataset_dir)
+    if new_record is None:
+        return None
+    prod_record = None
+    if production_model_path and Path(production_model_path).exists():
+        try:
+            prod_record = evaluate_on_test(
+                production_model_path, dataset_dir=dataset_dir
+            )
+        except Exception as e:  # keep the new model's record either way
+            logging.error(
+                f"Could not score production model on the test set: "
+                f"{type(e).__name__}: {e}. Keeping the existing model."
+            )
+            prod_record = PRODUCTION_UNSCORABLE
+    return new_record, prod_record
+
+
+def frozen_test_decision(
+    new_record: dict, prod_record
+) -> Tuple[bool, str, Optional[dict]]:
+    """(should_promote, why, comparable production record or None).
+
+    Wraps ``promotion_decision`` so an unscorable production model is a
+    refusal, not a first-model promotion."""
+    if prod_record == PRODUCTION_UNSCORABLE:
+        return (
+            False,
+            "production model could not be scored on the test set; keep existing",
+            None,
+        )
+    should_promote, why = promotion_decision(new_record, prod_record)
+    return should_promote, why, prod_record
+
+
 def run_evaluation_pipeline(
     model_path: str,
     data_yaml: str,
@@ -277,6 +340,13 @@ def run_evaluation_pipeline(
         model_path, data_yaml, split=split, imgsz=imgsz, output_dir=local_results_dir
     )
 
+    # The MaxN cutoff this model will run at: picked on VAL at the F-beta peak
+    # (never on the frozen test set, which has to stay an honest report) and
+    # written beside the weights, so promotion carries it. One extra val pass.
+    threshold_selection = pick_threshold_on_val(
+        model_path, data_yaml, imgsz=imgsz, out_dir=local_results_dir / "threshold_val"
+    )
+
     # Compare with production model
     try:
         production_model_path = str(config.pipeline_model_path)
@@ -292,14 +362,34 @@ def run_evaluation_pipeline(
         output_dir=local_results_dir / "production_eval",
     )
 
-    # Save metrics CSV
+    # Save the val-based comparison first: the frozen-test scoring below can
+    # raise (corrupt label, GPU OOM on the second pass) and these metrics are
+    # already paid for.
     metrics_csv = local_results_dir / "metrics_comparison.csv"
     save_metrics(new_metrics, prod_metrics, metrics_csv)
+
+    # Frozen test set: the per-class, cross-version record (test_eval.py). When
+    # the test split exists this is the promotion gate, because it scores both
+    # models on the same images in each one's own vocabulary, which the
+    # class-list guard above cannot do, and it leaves a record that stays
+    # comparable after the next retrain.
+    test_records = _record_on_frozen_test(
+        model_path, production_model_path, Path(data_yaml).parent
+    )
+    if test_records is not None:
+        new_record, prod_record = test_records
+        should_promote, why, prod_record = frozen_test_decision(new_record, prod_record)
+        logging.info(
+            f"\n=== Frozen test set ===\n  {why}\n  Decision: "
+            f"{'✅ PROMOTE' if should_promote else '❌ KEEP EXISTING'}\n"
+            + ("\n" + per_class_table([prod_record, new_record]) if prod_record else "")
+        )
 
     summary = {
         "new_metrics": new_metrics,
         "production_metrics": prod_metrics,
         "should_promote": should_promote,
+        "maxn_threshold": threshold_selection,
     }
     logging.info(
         f"Evaluation pipeline complete: {json.dumps({k: v for k, v in new_metrics.items() if isinstance(v, (int, float, str))}, indent=2)}"

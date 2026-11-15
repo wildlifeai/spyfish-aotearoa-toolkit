@@ -1,0 +1,14 @@
+boto3==1.37.17
+botocore>=1.37.17
+numpy==2.2.4
+pandas==2.2.3
+plotly>=6.0.0
+python-dotenv==1.0.1
+pyyaml
+scipy
+# UoA Mussel Insights app only. Streamlit Community Cloud reads the
+# requirements file beside the entrypoint before the repo root's, so this
+# deploy skips the pipeline's ML stack (ultralytics/torch, opencv): the app
+# imports `spyfish` only for S3Handler and config, which need nothing heavier.
+# Versions pinned to match the root requirements.
+streamlit==1.50.0

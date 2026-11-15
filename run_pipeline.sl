@@ -1,10 +1,17 @@
 #!/bin/bash -e
+# SUPERSEDED (2026-11-03) by scripts/slurm/: gpu.sl + cpu.sl take run_pipeline.py
+# flags on the sbatch line, and submit_ml.sh chains download → infer → post so
+# the GPU is held only for inference. Kept until the new chain has run once.
 
 #SBATCH --job-name=run-spyfish-pipeline
 #SBATCH --account=wildlife03546
-#SBATCH --time=06:00:00
+#SBATCH --time=03:00:00
 
+#SBATCH --time=08:00:00
+#SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
+
+
 #SBATCH --mem=32G
 #SBATCH --output=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/run_pipeline_%j.out
 #SBATCH --error=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit/slurm_logs/run_pipeline_%j.err
@@ -70,6 +77,10 @@ source /nesi/project/wildlife03546/kso_venv_0627/bin/activate
 # the work is done (run 8598080, 2026-08-23).
 export PATH=/opt/nesi/bin:$PATH
 
+# Start/end stamps go to stderr so the .err file shows the run window even
+# when it holds nothing else (an empty-but-for-stamps .err is a clean run;
+# INFO logging now goes to .out, WARNING and above to .err, see log_config.py).
+echo "START $(date '+%F %T') job=${SLURM_JOB_ID:-none} host=$(hostname) survey=${SURVEY:-none}" >&2
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 # A job that silently loses its GPU takes ~40 min per video instead of ~6, and
 # only shows up as a timeout hours later. Fail fast and loudly instead.
@@ -106,7 +117,13 @@ else
 #   && python run_pipeline.py --zooniverse-clips --survey SLI_20220228_BUV \
 #   && python run_pipeline.py --zooniverse-clips --survey SLI_20240124_BUV
 
-python run_pipeline.py --check-arrivals
+# python run_pipeline.py --check-arrivals
+
+# HOR validation trial (2026-10-15): the 5 drops in deployment_targets.csv.
+# Run scripts/download_videos.py --targets on a CPU node first so the GPU
+# does not idle through the transfers.
+python run_pipeline.py --set-targets --ml
+python run_pipeline.py --zooniverse-frames --zooniverse-crops
 
 fi
 
@@ -115,3 +132,4 @@ echo "============================================"
 echo "Pipeline complete!"
 echo "============================================"
 echo ""
+echo "END   $(date '+%F %T') job=${SLURM_JOB_ID:-none}" >&2

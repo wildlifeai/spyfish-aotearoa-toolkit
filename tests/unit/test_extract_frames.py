@@ -122,3 +122,124 @@ class TestBuildCocoTimeTolerance:
         coco = build_coco_from_raw_csv(str(raw_csv), frame_records)
         assert len(coco["annotations"]) == 1
         assert coco["annotations"][0]["image_id"] == 1
+
+
+class _FakeCapture:
+    """cv2.VideoCapture stand-in whose frames are 1x2 arrays holding their own
+    index, and which records how each frame was reached."""
+
+    def __init__(self, n_frames=1000, unreadable=(), opened=True, rotation=0):
+        self.pos = 0
+        self.n = n_frames
+        self.unreadable = set(unreadable)
+        self.opened = opened
+        self.rotation = rotation
+        self.seeks = []
+        self.grabs = 0
+        self.released = False
+
+    def isOpened(self):
+        return self.opened
+
+    def get(self, prop):
+        return self.rotation
+
+    def set(self, prop, value):
+        self.seeks.append(int(value))
+        self.pos = int(value)
+
+    def grab(self):
+        self.grabs += 1
+        self.pos += 1
+        return self.pos <= self.n
+
+    def read(self):
+        import numpy as np
+
+        idx = self.pos
+        self.pos += 1
+        if idx >= self.n or idx in self.unreadable:
+            return False, None
+        return True, np.full((1, 2), idx, dtype=np.int32)
+
+    def release(self):
+        self.released = True
+
+
+def _raw_rows(frames):
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "frame": frames,
+            "time_seconds": [f / 30.0 for f in frames],
+            "x": range(len(frames)),
+        }
+    )
+
+
+class TestIterRawFrames:
+    def _iterate(self, monkeypatch, cap, df, **kwargs):
+        from spyfish.extraction import extract_frames as ef
+
+        monkeypatch.setattr(ef.cv2, "VideoCapture", lambda path: cap)
+        return [
+            (idx, None if frame is None else int(frame[0, 0]), list(rows["x"]))
+            for idx, frame, rows in ef.iter_raw_frames("video.mp4", df, **kwargs)
+        ]
+
+    def test_seeks_to_every_frame_in_order_with_its_rows(self, monkeypatch):
+        cap = _FakeCapture()
+        got = self._iterate(monkeypatch, cap, _raw_rows([40, 10, 40, 500]))
+        assert got == [(10, 10, [1]), (40, 40, [0, 2]), (500, 500, [3])]
+        assert cap.seeks == [10, 40, 500] and cap.grabs == 0
+        assert cap.released
+
+    def test_read_ahead_decodes_short_gaps_and_seeks_long_ones(self, monkeypatch):
+        cap = _FakeCapture()
+        got = self._iterate(
+            monkeypatch, cap, _raw_rows([0, 10, 20, 500, 510]), max_read_ahead=120
+        )
+        assert [(i, f) for i, f, _ in got] == [(i, i) for i in (0, 10, 20, 500, 510)]
+        # 0, 10, 20 and 510 are read forward; only the 480-frame jump seeks.
+        assert cap.seeks == [500]
+        assert cap.grabs == 9 + 9 + 9
+
+    def test_failed_read_yields_none_and_later_frames_still_come(self, monkeypatch):
+        cap = _FakeCapture(unreadable={300})
+        got = self._iterate(
+            monkeypatch, cap, _raw_rows([290, 300, 310]), max_read_ahead=120
+        )
+        assert [(i, f) for i, f, _ in got] == [(290, 290), (300, None), (310, 310)]
+        # position unknown after the failure, so 310 is reached by a seek
+        assert cap.seeks == [290, 310]
+
+    def test_failed_read_near_the_start_still_seeks_for_the_next(self, monkeypatch):
+        # Frame 20 is within read-ahead of the start of the file, but after a
+        # failed read the capture is not at the start any more.
+        cap = _FakeCapture(unreadable={10})
+        got = self._iterate(monkeypatch, cap, _raw_rows([10, 20]), max_read_ahead=120)
+        assert [(i, f) for i, f, _ in got] == [(10, None), (20, 20)]
+        assert cap.seeks == [20]
+
+    def test_rotation_from_the_container_is_applied_on_both_paths(self, monkeypatch):
+        for kwargs in ({}, {"max_read_ahead": 120}):
+            cap = _FakeCapture(rotation=90)
+            from spyfish.extraction import extract_frames as ef
+
+            monkeypatch.setattr(ef.cv2, "VideoCapture", lambda path, cap=cap: cap)
+            shapes = [
+                frame.shape
+                for _, frame, _ in ef.iter_raw_frames(
+                    "video.mp4", _raw_rows([0, 5]), **kwargs
+                )
+            ]
+            assert shapes == [(2, 1), (2, 1)]  # 1x2 turned on its side
+
+    def test_video_that_will_not_open_raises_its_own_error(self, monkeypatch):
+        import pytest
+
+        from spyfish.extraction.extract_frames import VideoOpenError
+
+        with pytest.raises(VideoOpenError, match="video.mp4"):
+            self._iterate(monkeypatch, _FakeCapture(opened=False), _raw_rows([0]))

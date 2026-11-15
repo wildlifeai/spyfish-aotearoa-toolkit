@@ -20,6 +20,7 @@ def panoptes(monkeypatch):
     monkeypatch.setenv("ZOONIVERSE_USER", "tester")
     monkeypatch.setenv("ZOONIVERSE_PASSWORD", "secret")
     saved = []
+    up.reset_session()  # each test logs in afresh, so request counts are its own
 
     def _subject():
         s = MagicMock()
@@ -28,7 +29,7 @@ def panoptes(monkeypatch):
         return s
 
     with (
-        patch.object(up, "Panoptes"),
+        patch.object(up, "Panoptes") as client,
         patch.object(up, "Project") as project,
         patch.object(up, "SubjectSet") as subject_set,
         patch.object(up, "Subject", side_effect=_subject),
@@ -40,7 +41,13 @@ def panoptes(monkeypatch):
     ):
         project.find.return_value = MagicMock(id=99999)
         subject_set.where.return_value = []
-        yield {"set": subject_set, "subjects": saved}
+        yield {
+            "set": subject_set,
+            "subjects": saved,
+            "client": client,
+            "project": project,
+        }
+    up.reset_session()
 
 
 def _base(tmp_path, name, **extra):
@@ -225,3 +232,185 @@ def test_upload_says_which_workflow_and_never_links_one(tmp_path, panoptes, capl
     assert f"Attach subject set 'crops_{DROP_ID}'" in caplog.text
     assert "species-check workflow" in caplog.text
     assert not hasattr(up, "Workflow")
+
+
+def test_nan_in_mixed_manifest_is_sent_as_blank(tmp_path, panoptes):
+    """A column empty on SOME rows becomes NaN in the DataFrame; Panoptes
+    rejects NaN outright (allow_nan=False), so the subject must carry ""."""
+    detected, img_a = _base(
+        tmp_path,
+        "a.jpg",
+        **{
+            config.csv_scientific_name_column: "Parapercis colias",
+            config.csv_max_interval_column: 3,
+            config.csv_confidence_agreement_column: 0.77,
+            "RenderScale": 1.0,
+        },
+    )
+    blind, img_b = _base(
+        tmp_path,
+        "b.jpg",
+        **{
+            config.selection_reason_column: "Blind (False Negative Check)",
+            config.csv_scientific_name_column: None,
+            config.csv_max_interval_column: 0,
+            config.csv_confidence_agreement_column: None,
+            "RenderScale": 1.0,
+        },
+    )
+    manifest = pd.DataFrame(
+        [{**detected, "FramePath": str(img_a)}, {**blind, "FramePath": str(img_b)}]
+    )
+    assert (
+        manifest[config.csv_confidence_agreement_column].isna().iloc[1]
+    )  # NaN, not None
+
+    up.upload_validation_frames_to_zooniverse(manifest)
+    for subject in panoptes["subjects"]:
+        for key, value in subject.metadata.items():
+            assert isinstance(value, str) or not pd.isna(value), (key, value)
+    blind_meta = panoptes["subjects"][1].metadata
+    assert blind_meta["#TargetSpecies"] == ""
+    assert blind_meta["#ConfidenceAgreement"] == ""
+    assert panoptes["subjects"][0].metadata["#ConfidenceAgreement"] == 0.77
+
+
+# ── request counts ───────────────────────────────────────────────────────────
+
+
+def _drop_manifest(tmp_path, drop_id, n=2):
+    manifest = _crop_manifest(tmp_path / drop_id, n=n)
+    manifest[config.drop_id_column] = drop_id
+    manifest["DetectionKey"] = [f"{drop_id}|18010|{i}" for i in range(len(manifest))]
+    return manifest
+
+
+def test_many_drops_share_one_login_and_one_project_lookup(tmp_path, panoptes):
+    """A stage run uploads drop after drop in one process: one sign-in and one
+    project lookup for all of them, one set query per drop."""
+    drops = [f"KSF_20240124_BUV_KSF_085_{i:02d}" for i in range(1, 6)]
+    for drop_id in drops:
+        (tmp_path / drop_id).mkdir()
+        up.upload_validation_crops_to_zooniverse(_drop_manifest(tmp_path, drop_id))
+        up.upload_validation_frames_to_zooniverse(
+            _drop_manifest(tmp_path, drop_id)
+            .rename(columns={"CropPath": "FramePath"})
+            .assign(RenderScale=1.0)
+        )
+        up.existing_subject_count(up.CROP_KIND, drop_id)
+
+    panoptes["client"].connect.assert_called_once()
+    panoptes["project"].find.assert_called_once()
+    # 2 uploads + 1 count per drop, each exactly one set query.
+    assert panoptes["set"].where.call_count == 3 * len(drops)
+    assert len(panoptes["subjects"]) == 4 * len(drops)
+
+
+def test_changed_credentials_log_in_again(tmp_path, panoptes, monkeypatch):
+    up.upload_validation_crops_to_zooniverse(_crop_manifest(tmp_path))
+    monkeypatch.setenv("ZOONIVERSE_USER", "someone_else")
+    if config.user != "someone_else":
+        pytest.skip("config caches credentials; nothing to re-key on")
+    up.upload_validation_crops_to_zooniverse(_crop_manifest(tmp_path))
+    assert panoptes["client"].connect.call_count == 2
+
+
+class _PagedSet(MagicMock):
+    """A subject set whose `subjects` counts every time it is paged."""
+
+    pages = 0
+    members: list = []
+
+    @property
+    def subjects(self):
+        _PagedSet.pages += 1  # not type(self): each mock is its own subclass
+        return iter(_PagedSet.members)
+
+
+def test_existing_set_is_paged_once_across_check_and_upload(tmp_path, panoptes):
+    """The stage asks "is it already up?" and then uploads the missing
+    subjects: one set query and one walk over its subjects, not two."""
+    manifest = _crop_manifest(tmp_path, n=2)
+    up.upload_validation_crops_to_zooniverse(manifest)
+    first = panoptes["subjects"][0]
+    _PagedSet.pages = 0
+    _PagedSet.members = [MagicMock(metadata=dict(first.metadata))]
+    on_zooniverse = _PagedSet()
+    panoptes["set"].where.return_value = [on_zooniverse]
+    panoptes["set"].where.reset_mock()
+    del panoptes["subjects"][:]
+
+    existing = up.fetch_existing_set(up.CROP_KIND, DROP_ID)
+    assert len(existing.subjects) == 1
+    up.upload_validation_crops_to_zooniverse(manifest, existing=existing)
+
+    assert panoptes["set"].where.call_count == 1
+    assert _PagedSet.pages == 1
+    assert len(panoptes["subjects"]) == 1  # only the missing crop
+    on_zooniverse.add.assert_called_once()
+
+
+def test_without_a_prefetched_set_the_upload_still_looks_it_up(tmp_path, panoptes):
+    """Single-drop callers (clips) pass nothing and behave as before."""
+    up.upload_validation_crops_to_zooniverse(_crop_manifest(tmp_path))
+    panoptes["set"].where.assert_called_once_with(
+        project_id=99999, display_name=f"crops_{DROP_ID}"
+    )
+
+
+def test_a_failed_save_raises_and_links_nothing_of_its_chunk(tmp_path, monkeypatch):
+    """Saves in a chunk run concurrently; one failure must still stop the
+    upload loudly, with no partial chunk linked as if it were whole."""
+    monkeypatch.setenv("ZOONIVERSE_USER", "tester")
+    monkeypatch.setenv("ZOONIVERSE_PASSWORD", "secret")
+    up.reset_session()
+    made = []
+
+    class _Failing:
+        """Mimics panoptes_client: reading the result re-raises the save error."""
+
+        def __init__(self):
+            self.metadata, self.links = {}, MagicMock()
+            self.index = len(made)
+            made.append(self)
+
+        add_location = save = lambda self, *a, **k: None
+
+        @property
+        def async_save_result(self):
+            if self.index == 3:
+                raise ConnectionError("upload failed")
+            return True
+
+    _Failing.async_saves = MagicMock()
+    monkeypatch.setattr(up, "_LINK_CHUNK", 2)
+    with (
+        patch.object(up, "Panoptes"),
+        patch.object(up, "Project"),
+        patch.object(up, "SubjectSet") as subject_set,
+        patch.object(up, "Subject", _Failing),
+        patch.object(up, "_get_site_reserve_meta", return_value={}),
+    ):
+        subject_set.where.return_value = []
+        with pytest.raises(ConnectionError, match="upload failed"):
+            up.upload_validation_crops_to_zooniverse(_crop_manifest(tmp_path, n=5))
+    up.reset_session()
+    linked = subject_set.return_value.add.call_args_list
+    assert [len(c.args[0]) for c in linked] == [2]  # first chunk only
+    assert len(made) == 4  # the third chunk was never started
+
+
+def test_a_save_that_never_ran_is_an_error_not_a_skip(tmp_path, panoptes):
+    """`async_save_result` is False for a save that was not queued or did not
+    finish: that subject is not on Zooniverse, so the upload must not go on."""
+
+    def _unsaved():
+        s = MagicMock()
+        s.metadata = {}
+        s.async_save_result = False
+        return s
+
+    with patch.object(up, "Subject", side_effect=_unsaved):
+        with pytest.raises(RuntimeError, match="did not complete"):
+            up.upload_validation_crops_to_zooniverse(_crop_manifest(tmp_path))
+    panoptes["set"].return_value.add.assert_not_called()

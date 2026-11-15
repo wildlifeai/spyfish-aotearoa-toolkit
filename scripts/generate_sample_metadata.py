@@ -80,7 +80,7 @@ SITES_PER_RESERVE = 6  # last two are unprotected control sites outside the rese
 # Real species only (validation-passing AphiaIDs); includes the three
 # indicator species from config reporting so dashboards have data to show.
 SPECIES = [
-    (398546, "Snapper", "Pagrus auratus"),
+    (367239, "Snapper", "Chrysophrys auratus"),
     (276989, "Blue cod", "Parapercis colias"),
     (382879, "Rock lobster", "Jasus edwardsii"),
     (281786, "Spotty", "Notolabrus celidotus"),

@@ -23,6 +23,7 @@ from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
 from spyfish.log_config import log_header
+from spyfish.ml.model_meta import resolve_maxn_threshold
 from spyfish.ml.process_ml_annotations import process_one_drop
 
 
@@ -33,12 +34,12 @@ def find_raw_csvs() -> list:
     per-frame files, not full-video timelines, and never feed MaxN.
     """
     found = []
-    for raw in sorted(config.deployment_data_dir.glob("*/*/annotations/*_raw.csv")):
-        if "zooniverse_frames" in raw.name or "biigle" in raw.name:
-            continue
-        drop_id = raw.parent.parent.name
-        model_name = raw.stem.removeprefix(f"{drop_id}_").removesuffix("_raw")
-        found.append((drop_id, model_name, raw))
+    for raw in sorted(
+        config.deployment_data_dir.glob(f"*/*/annotations/*{config.ml_raw_suffix}")
+    ):
+        parsed = config.parse_ml_raw_csv_name(raw.name)
+        if parsed:
+            found.append((*parsed, raw))
     return found
 
 
@@ -67,7 +68,9 @@ def main() -> None:
                 model_name=model_name,
                 interval=config.interval_seconds,
                 base_conf=config.confidence_threshold,
-                maxn_conf=config.maxn_confidence_threshold,
+                maxn_conf=resolve_maxn_threshold(
+                    config.model_path_for_name(model_name)
+                ),
                 draw_images=False,  # no video needed: MaxN + DB ingest only
             )
             done.append(drop_id)

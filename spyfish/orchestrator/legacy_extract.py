@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from spyfish.config.base import ExpertStatus
 from spyfish.config.wrapper import config
@@ -185,6 +186,40 @@ def parse_legacy_rows(df: pd.DataFrame) -> tuple[list, list]:
     return annotations, placeholders
 
 
+def load_legacy_drop_id_map(path: Path) -> dict[str, str]:
+    """`legacy DropID -> SharePoint DropID` from the YAML; both sides validated.
+
+    A missing file raises: the map is part of the legacy knowledge files, and
+    running without it would quietly put annotations back on the wrong IDs.
+    """
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} missing: copy it with the other legacy knowledge files "
+            f"(an empty mapping `{{}}` is fine when there is nothing to translate)."
+        )
+    raw = yaml.safe_load(path.read_text()) or {}
+    return {
+        config.validate_drop_id(str(k)): config.validate_drop_id(str(v))
+        for k, v in raw.items()
+    }
+
+
+def apply_legacy_drop_id_map(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
+    """Rename legacy DropIDs to the deployment SharePoint records, logging each one used."""
+    if not mapping:
+        return df
+    col = config.drop_id_column
+    hits = df[col].isin(mapping.keys())
+    for old, n in df.loc[hits, col].value_counts().items():
+        logging.info(f"legacy DropID {old} -> {mapping[old]} ({n} rows)")
+    unused = set(mapping) - set(df[col])
+    if unused:
+        logging.warning(f"legacy DropID map entries not in the CSV: {sorted(unused)}")
+    out = df.copy()
+    out.loc[hits, col] = out.loc[hits, col].map(mapping)
+    return out
+
+
 def ingest_legacy_expert_annotations():
     """Download legacy expert annotations from S3 and ingest them.
 
@@ -229,6 +264,9 @@ def ingest_legacy_expert_annotations():
         # 2. Parse CSV
         df = pd.read_csv(local_csv)
         logging.info(f"Loaded {len(df)} legacy annotation records.")
+        df = apply_legacy_drop_id_map(
+            df, load_legacy_drop_id_map(config.legacy_drop_id_map_path)
+        )
 
         # Expected columns: DropID, ScientificName, TimeOfMax, MaxInterval, AnnotatedBy, IntervalAnnotation, ConfidenceAgreement
         annotations, placeholders = parse_legacy_rows(df)

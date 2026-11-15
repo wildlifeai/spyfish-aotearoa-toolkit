@@ -24,14 +24,15 @@ DROP = "KSF_20240124_BUV_KSF_085_01"
 # The literal shapes emitted by select_frames.py, parameters and all.
 REAL_REASONS = [
     ("MaxN (Parapercis colias)", "maxn_peak"),
-    ("MaxN (Parapercis colias, Pagrus auratus)", "maxn_peak"),
-    ("Uncertain (Pagrus auratus)", "uncertain_id"),
+    ("MaxN (Parapercis colias, Chrysophrys auratus)", "maxn_peak"),
+    ("Uncertain (Chrysophrys auratus)", "uncertain_id"),
     ("ML peak (conf>=0.25, count=4)", "ml_peak"),
     ("ML peak (conf>=0.4, count=11)", "ml_peak"),
     ("Fish size band 1", "fish_variety"),
     ("Fish size band 3", "fish_variety"),
     ("Blind (False Negative Check)", "spot_check"),
     ("Video Start", "video_start"),
+    ("Hand count: Snapper MaxN 2, Sweep MaxN 5 (interval 3), ML peak", "manual_count"),
 ]
 
 
@@ -303,10 +304,10 @@ def test_backfill_filenames_sort_in_time_order():
         # collapse_peaks merges peaks landing on one frame, so a reason can
         # name several species and each earns its own image label.
         (
-            "MaxN (Parapercis colias, Pagrus auratus)",
-            ["Parapercis colias", "Pagrus auratus"],
+            "MaxN (Parapercis colias, Chrysophrys auratus)",
+            ["Parapercis colias", "Chrysophrys auratus"],
         ),
-        ("Uncertain (Pagrus auratus)", ["Pagrus auratus"]),
+        ("Uncertain (Chrysophrys auratus)", ["Chrysophrys auratus"]),
         ("MaxN (fish)", ["fish"]),  # the catch-all is a legitimate class
         ("Confusing (fish)", ["fish"]),  # legacy spelling still yields species
     ],
@@ -409,10 +410,10 @@ def test_two_species_peaking_in_one_frame_collapse_to_one_image(mock_handler_cls
     frames = _frames_df(
         [
             {"FramePath": name, "SelectionReason": "MaxN (Parapercis colias)"},
-            {"FramePath": name, "SelectionReason": "MaxN (Pagrus auratus)"},
+            {"FramePath": name, "SelectionReason": "MaxN (Chrysophrys auratus)"},
         ]
     )
-    species = {"Parapercis colias": 477318, "Pagrus auratus": 477319}
+    species = {"Parapercis colias": 477318, "Chrysophrys auratus": 477319}
 
     with (
         patch.object(

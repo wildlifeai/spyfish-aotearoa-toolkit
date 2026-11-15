@@ -9,7 +9,7 @@ Composable functions:
   copy_split_files()                . Copy images + labels into YOLO train/val/test layout.
   generate_data_yaml()              . Write a YOLO data.yaml for a given split.
   assemble_yolo_dataset()           . Top-level: builds the species dataset from drop lists.
-  apply_post_assembly_floor()       . Merge classes below class_floor_min_images train images into 'fish'.
+  rollup.apply_rollup()             . (rollup.py) roll thin taxa up the taxonomy; what nothing catches trains as 'fish'.
 
 Typical orchestration order (see retrain_runner.py):
   1. biigle_to_yolo.py                → writes per-drop label files
@@ -18,7 +18,7 @@ Typical orchestration order (see retrain_runner.py):
   4. flatten_and_remap_labels()       → stages labels with unified class IDs
   5. split_data.py                    → assigns drops to train/val/test
   6. assemble_yolo_dataset()          → writes the final YOLO dataset + data.yaml
-  7. apply_post_assembly_floor()      → merges classes with too few train images into 'fish'
+  7. rollup.apply_rollup()            → computes the class each taxon trains as, writes rollup_map.json
 """
 
 import json
@@ -26,13 +26,20 @@ import logging
 import random
 import shutil
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import yaml
 
 from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
+from spyfish.ml.training.yolo_labels import (
+    SPLITS,
+    iter_class_ids,
+    read_class_names,
+    remap_label_file,
+    write_class_names,
+)
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -64,7 +71,7 @@ def prepare_from_annotations(
 
     No floor is applied here: EVERY surviving species name becomes a candidate
     class, however few frames it has. `class_floor_min_images` is enforced once,
-    at the end, by `apply_post_assembly_floor`, against train images that
+    at the end, by `rollup.apply_rollup`, against train images that
     survived `cap_frames_per_drop` and the val split. So the species list this
     returns is longer than the model's final class list, and the difference is
     whatever got merged into 'fish'.
@@ -103,11 +110,18 @@ def prepare_from_annotations(
                 f"Excluded {len(hit)} drop(s) per {config.training_excluded_drops_file.name}: "
                 f"{sorted(hit)}"
             )
-        stale = excluded - loaded_drops
+        # Entries absent from the MaxN data are usually extras (training-volume
+        # drops, volume_<id> bundles), excluded later by the extras walk. Only an
+        # entry with no folder anywhere under deployment_data is truly stale.
+        stale = sorted(
+            d
+            for d in excluded - loaded_drops
+            if not any(config.deployment_data_dir.glob(f"*/{d}"))
+        )
         if stale:
             logging.warning(
                 f"{len(stale)} drop(s) listed in {config.training_excluded_drops_file.name} "
-                f"were not found in loaded annotations (stale entries?): {sorted(stale)}"
+                f"have no folder under deployment_data (stale entries?): {stale}"
             )
 
     # One call, so the MaxN path and the label path (_build_id_remap) agree on
@@ -155,16 +169,20 @@ def canonicalize_species(name: str) -> str:
 
     Two steps, in this order:
 
-    1. **Resolve the name form** through the species registry, which knows the
-       "Common - Scientific" spelling and every bucket alias. This is what turns
-       the BIIGLE workflow labels ('Fish: final', 'Fish: review required',
-       'To review') into plain 'fish'. Without it they reach the class list as
-       literal strings and become phantom classes, because the expert MaxN CSVs
-       carry whatever the annotator's label was called and nothing else on this
-       path consults the registry.
+    1. **Resolve the name** through the species registry (`resolve_name`),
+       which knows the "Common - Scientific" spelling, every bucket alias and
+       the synonyms in `paths.species_synonyms`. This is what turns the BIIGLE
+       workflow labels ('Fish: final', 'Fish: review required', 'To review')
+       into plain 'fish', and a retired name ('Pseudocaranx dentex') into the
+       current one ('Pseudocaranx georgianus'), the same way the annotations
+       DB gate does. Without it they reach the class list as literal strings
+       and become phantom classes, because the expert MaxN CSVs carry whatever
+       the annotator's label was called and nothing else on this path consults
+       the registry.
     2. **Merge distinct taxa** via config.yaml `training.species_canonicalization`:
-       family/species splits ('Chelidonichthys kumu' -> 'Triglidae') and
-       nomenclature drift ('Pseudocaranx dentex' -> 'Pseudocaranx georgianus').
+       family/species splits ('Chelidonichthys kumu' -> 'Triglidae'). One
+       animal under two names is step 1's job (the synonyms map); two taxa
+       trained as one class is step 2's.
 
     Order matters. Step 1 normalises spelling so step 2's keys only ever have to
     list canonical scientific names. Names the registry does not know pass
@@ -173,8 +191,7 @@ def canonicalize_species(name: str) -> str:
 
     Runs BEFORE any counting, flooring, or class-list building.
     """
-    sp = species_registry().get(name)
-    resolved = sp.scientific_name if sp else name
+    resolved, _problem = species_registry().resolve_name(name)
     return config.training_species_canonicalization.get(resolved, resolved)
 
 
@@ -203,36 +220,6 @@ def _build_id_remap(
         )
         for old_id, species in src_map.items()
     }
-
-
-def _rewrite_label_file(
-    src_txt: Path, dst_txt: Path, id_remap: Dict[int, Optional[int]]
-) -> None:
-    """Rewrite a single YOLO .txt through id_remap, dropping lines whose class
-    resolves to None."""
-    out_lines = []
-    for line in src_txt.read_text().splitlines():
-        parts = line.strip().split()
-        if len(parts) != 5:
-            continue
-        old_id = int(parts[0])
-        new_id = id_remap.get(old_id)
-        if new_id is None:
-            continue
-        out_lines.append(f"{new_id} " + " ".join(parts[1:]))
-    dst_txt.write_text("\n".join(out_lines))
-
-
-def _iter_class_ids(label_path: Path) -> Iterator[int]:
-    """Yield class IDs from a YOLO label file, skipping blank or malformed lines."""
-    for line in label_path.read_text().splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        try:
-            yield int(parts[0])
-        except ValueError:
-            continue
 
 
 def discover_extra_drops(
@@ -335,15 +322,9 @@ def discover_extra_drops(
                 class_map_path=decode_path
             ).class_id_to_scientific()
             for lf in label_files:
-                for line in lf.read_text().splitlines():
-                    parts = line.strip().split()
-                    if len(parts) == 5:
-                        try:
-                            cid = int(parts[0])
-                        except ValueError:
-                            continue
-                        if cid in id_to_name:
-                            drop_species.add(id_to_name[cid])
+                for cid in iter_class_ids(lf, boxes_only=True):
+                    if cid in id_to_name:
+                        drop_species.add(id_to_name[cid])
 
         extras.append(drop_id)
         species_set.update(
@@ -354,7 +335,7 @@ def discover_extra_drops(
 
     if extras:
         logging.info(
-            f"discover_extra_drops: {len(extras)} extras → train split "
+            f"discover_extra_drops: {len(extras)} extras (join the train/val split) "
             f"(species contributed: {sorted(species_set)})"
         )
     return extras, sorted(species_set)
@@ -392,7 +373,10 @@ def flatten_and_remap_labels(
     if dst_dir.exists():
         training_root = config.local_training_dir.resolve()
         resolved = dst_dir.resolve()
-        if dst_dir.name != "labels_staged" or training_root not in resolved.parents:
+        if (
+            dst_dir.name != config.training_labels_staged_dir.name
+            or training_root not in resolved.parents
+        ):
             raise ValueError(
                 f"Refusing to wipe {resolved}: expected a 'labels_staged' dir "
                 f"under {training_root}. Aborting to avoid deleting unintended files."
@@ -420,7 +404,9 @@ def flatten_and_remap_labels(
             continue
         drop_dst = dst_dir / drop_id
         drop_dst.mkdir(parents=True, exist_ok=True)
-        _rewrite_label_file(src_txt, drop_dst / src_txt.name, id_remap)
+        # An id the source class map does not know, or one that resolves to
+        # None (excluded species), drops the box.
+        remap_label_file(src_txt, id_remap, dst=drop_dst / src_txt.name, missing="drop")
         n += 1
 
     if skipped_drops:
@@ -671,7 +657,7 @@ def generate_data_yaml(
 # ---------------------------------------------------------------------------
 
 
-def _write_sidecar_class_map(
+def write_sidecar_class_map(
     class_names: List[str],
     output_dir: Path,
     source_class_map_path: Optional[Path] = None,
@@ -714,7 +700,7 @@ def _clean_yolo_split_dirs(yolo_root: Path) -> None:
     training_excluded_drops.txt) don't leak into training.
     """
     for kind in ("images", "labels"):
-        for split in ("train", "val", "test"):
+        for split in SPLITS:
             d = yolo_root / kind / split
             if d.exists():
                 shutil.rmtree(d)
@@ -737,7 +723,7 @@ def print_per_drop_species_inventory(
             continue
         per_drop: Dict[str, int] = {}
         for txt in drop_dir.glob("*.txt"):
-            for cid in _iter_class_ids(txt):
+            for cid in iter_class_ids(txt):
                 if 0 <= cid < len(class_names):
                     name = class_names[cid]
                     per_drop[name] = per_drop.get(name, 0) + 1
@@ -826,25 +812,18 @@ def print_assembled_summary(
 
     # --- Per-species bounding-box counts ---
     counts: Dict[str, Dict[str, int]] = {
-        name: {"train": 0, "val": 0, "test": 0} for name in class_names
+        name: {split: 0 for split in SPLITS} for name in class_names
     }
-    for split in ("train", "val", "test"):
+    for split in SPLITS:
         labels_dir = species_dir / "labels" / split
         if not labels_dir.is_dir():
             continue
         for txt in labels_dir.glob("*.txt"):
-            for line in txt.read_text().splitlines():
-                parts = line.split()
-                if not parts:
-                    continue
-                try:
-                    cid = int(parts[0])
-                except ValueError:
-                    continue
+            for cid in iter_class_ids(txt):
                 if 0 <= cid < len(class_names):
                     counts[class_names[cid]][split] += 1
 
-    df = pd.DataFrame.from_dict(counts, orient="index")[["train", "val", "test"]]
+    df = pd.DataFrame.from_dict(counts, orient="index")[list(SPLITS)]
     df["total"] = df.sum(axis=1)
     df = df[df["total"] > 0].sort_values("total", ascending=False)
 
@@ -909,6 +888,29 @@ def _sample_background_frames(
     return out
 
 
+def _cap_frames(
+    rare: List[str],
+    interesting: List[str],
+    dominant_only: List[str],
+    cap: int,
+    rng: random.Random,
+    stats: Dict[str, int],
+) -> Set[str]:
+    """One deployment's kept frames under the cap: rare always, then
+    interesting (sampled down to ``cap``), then dominant-only to fill."""
+    total = len(interesting) + len(dominant_only)
+    if total <= cap:
+        stats["under_budget"] += 1
+        return set(rare) | set(interesting) | set(dominant_only)
+    if len(interesting) >= cap:
+        stats["dom_dropped"] += len(dominant_only)
+        stats["interesting_sampled"] += 1
+        return set(rare) | set(rng.sample(interesting, cap))
+    budget = cap - len(interesting)
+    stats["dom_dropped"] += len(dominant_only) - budget
+    return set(rare) | set(interesting) | set(rng.sample(dominant_only, budget))
+
+
 def select_frames_per_drop(
     drops: Set[str],
     species_labels_dir: Path,
@@ -918,6 +920,7 @@ def select_frames_per_drop(
     cap: int,
     rng: random.Random,
     rare_exempt_drops: Optional[Set[str]] = None,
+    extra_deployments: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]], Dict[str, int]]:
     """Choose which frames of each drop enter the dataset.
 
@@ -935,8 +938,13 @@ def select_frames_per_drop(
     * ``background`` - empty .txt. Returned separately; the train-split share is
       decided globally by ``background_ratio``.
 
-    Extras bypass the cap entirely: externally curated bulk imports where every
-    annotated frame is high-signal.
+    Extras bypass the cap, unless ``extra_deployments`` maps their frames to
+    source deployments (``{drop: {stem: deployment}}``, from
+    ``training.extra_frame_deployments_file``): then each source deployment is
+    capped like a drop of its own. A curated volume can hold hundreds of frames
+    of one video (volume 30505: 328 from one 2021 deployment, against ~10 for a
+    pipeline drop), which is redundancy, not variety. Frames of a mapped volume
+    missing from the map stay uncapped and are counted in the stats.
 
     ``rare_exempt_drops`` limits the rare exemption to those drops - in practice
     the TRAIN split. The point of the exemption is more TRAINING frames for
@@ -956,7 +964,10 @@ def select_frames_per_drop(
         "under_budget": 0,
         "extras_uncapped": 0,
         "rare_exempt": 0,
+        "extra_deployments_capped": 0,
+        "extra_frames_unmapped": 0,
     }
+    extra_deployments = extra_deployments or {}
 
     for drop_id in sorted(drops):
         drop_lbl_dir = species_labels_dir / drop_id
@@ -969,7 +980,7 @@ def select_frames_per_drop(
         background: List[str] = []
         exempt_here = rare_exempt_drops is None or drop_id in rare_exempt_drops
         for txt in drop_lbl_dir.glob("*.txt"):
-            cls_ids = set(_iter_class_ids(txt))
+            cls_ids = set(iter_class_ids(txt))
             if not cls_ids:
                 background.append(txt.stem)
             elif exempt_here and cls_ids & rare_class_ids:
@@ -982,26 +993,27 @@ def select_frames_per_drop(
             background_by_drop[drop_id] = background
         stats["rare_exempt"] += len(rare)
 
-        if drop_id in extras_set:
+        if drop_id in extras_set and drop_id in extra_deployments:
+            source = extra_deployments[drop_id]
+            groups: Dict[str, Tuple[List[str], List[str], List[str]]] = {}
+            kept = set()
+            for bucket, stems in enumerate((rare, interesting, dominant_only)):
+                for stem in stems:
+                    dep = source.get(stem)
+                    if dep is None:
+                        kept.add(stem)
+                        stats["extra_frames_unmapped"] += 1
+                        continue
+                    groups.setdefault(dep, ([], [], []))[bucket].append(stem)
+            for dep in sorted(groups):
+                r, i, d = (sorted(x) for x in groups[dep])
+                kept |= _cap_frames(r, i, d, cap, rng, stats)
+                stats["extra_deployments_capped"] += 1
+        elif drop_id in extras_set:
             kept = set(rare) | set(interesting) | set(dominant_only)
             stats["extras_uncapped"] += 1
         else:
-            total = len(interesting) + len(dominant_only)
-            if total <= cap:
-                kept = set(rare) | set(interesting) | set(dominant_only)
-                stats["under_budget"] += 1
-            elif len(interesting) >= cap:
-                kept = set(rare) | set(rng.sample(interesting, cap))
-                stats["dom_dropped"] += len(dominant_only)
-                stats["interesting_sampled"] += 1
-            else:
-                budget = cap - len(interesting)
-                kept = (
-                    set(rare)
-                    | set(interesting)
-                    | set(rng.sample(dominant_only, budget))
-                )
-                stats["dom_dropped"] += len(dominant_only) - budget
+            kept = _cap_frames(rare, interesting, dominant_only, cap, rng, stats)
 
         frame_filter[drop_id] = kept
 
@@ -1046,7 +1058,7 @@ def assemble_yolo_dataset(
     Returns:
         Path to the species data.yaml.
     """
-    species_dir = output_dir / "species"
+    species_dir = output_dir / config.training_dataset_dir.name
 
     # Wipe previous split output so re-runs don't accumulate stale files (e.g.
     # files from drops that have since been removed from the train/val/test
@@ -1099,7 +1111,7 @@ def assemble_yolo_dataset(
             if not d.is_dir():
                 continue
             for txt in d.glob("*.txt"):
-                for cid in set(_iter_class_ids(txt)):
+                for cid in set(iter_class_ids(txt)):
                     frames_per_class[cid] = frames_per_class.get(cid, 0) + 1
         # Bucket classes ('fish', 'bait') are never "rare species", whatever
         # their frame count. Both are widespread - 'fish' is the catch-all that
@@ -1137,7 +1149,15 @@ def assemble_yolo_dataset(
         cap=cap,
         rng=rng,
         rare_exempt_drops=set(train_drops),
+        extra_deployments=config.training_extra_frame_deployments,
     )
+    if _stats["extra_deployments_capped"]:
+        logging.info(
+            f"assemble_yolo_dataset: curated volumes capped per source deployment: "
+            f"{_stats['extra_deployments_capped']} deployment(s); "
+            f"{_stats['extra_frames_unmapped']} frame(s) not in "
+            f"{config.training_extra_frame_deployments_file.name} stayed uncapped"
+        )
     n_dom_dropped = _stats["dom_dropped"]
     n_interesting_sampled = _stats["interesting_sampled"]
     n_under_budget = _stats["under_budget"]
@@ -1210,7 +1230,7 @@ def assemble_yolo_dataset(
         )
 
     species_yaml = generate_data_yaml(class_names, species_dir)
-    _write_sidecar_class_map(class_names, species_dir, source_class_map_path)
+    write_sidecar_class_map(class_names, species_dir, source_class_map_path)
 
     print_assembled_summary(
         species_dir=species_dir,
@@ -1224,105 +1244,6 @@ def assemble_yolo_dataset(
     return species_yaml
 
 
-def apply_post_assembly_floor(
-    species_dir: Path,
-    min_images: int,
-    fallback_species: str = "fish",
-) -> Tuple[Set[str], List[str]]:
-    """Merge classes with too few train images into `fallback_species`.
-
-    Counts distinct frames-with-species in `species_dir/labels/train/` and
-    merges any class below `min_images` into `fallback_species` by rewriting all
-    .txt files in train/val/test to remap the weak class IDs to the fallback ID.
-
-    `data.yaml` is deliberately left ALONE. The weak class keeps its name and its
-    id and simply ends up with no instances. Removing the name and renumbering
-    the survivors contiguously (what this used to do) meant one species dipping
-    below the floor renumbered every class after it, so two checkpoints stopped
-    being comparable and a production model could not be evaluated against a
-    newer dataset. Holding the seat costs nothing: Ultralytics averages mAP over
-    classes that have val instances, so an empty class is not counted at all,
-    and the species reclaims its slot unchanged once its data grows back.
-
-    Image count (not box count) is the metric because variety of visual contexts
-    is what makes a class learnable, a school of 50 fish in 5 frames gives the
-    model 5 contexts; 1 fish in 200 frames gives it 200. This runs *after* the
-    per-drop cap and train/val/test split, so the count reflects exactly what
-    the model will actually train on.
-
-    Hardcoded exemptions (never merged, even when below threshold):
-      - `fallback_species` itself (we'd have nowhere to redirect to)
-      - "bait", domain-critical: the bait box is visible in every frame and
-        must stay a separate class so MaxN inference can exclude it from fish
-        counts. Merging into fish would inflate every drop's MaxN by ~1.
-
-    Returns (merged_names, class_names). `merged_names` is the set of species
-    folded into `fallback_species`; `class_names` is the class list, which is
-    now unchanged by this function and returned only so callers do not have to
-    re-read data.yaml.
-    """
-    data_yaml_path = species_dir / "data.yaml"
-    if not data_yaml_path.exists():
-        return set(), []
-
-    with open(data_yaml_path) as f:
-        data = yaml.safe_load(f)
-    class_names: List[str] = list(data.get("names", []))
-    if fallback_species not in class_names:
-        logging.warning(
-            f"apply_post_assembly_floor: '{fallback_species}' not in {data_yaml_path} "
-            f"names, skipping post-assembly floor"
-        )
-        return set(), class_names
-    fish_id = class_names.index(fallback_species)
-
-    train_label_dir = species_dir / "labels" / "train"
-    image_counts: Dict[int, int] = {}
-    for txt in train_label_dir.glob("*.txt"):
-        ids_in_frame = set(_iter_class_ids(txt))
-        for cid in ids_in_frame:
-            image_counts[cid] = image_counts.get(cid, 0) + 1
-
-    never_floor_ids = {fish_id}
-    if "bait" in class_names:
-        never_floor_ids.add(class_names.index("bait"))
-    weak_ids = {
-        cid
-        for cid in range(len(class_names))
-        if image_counts.get(cid, 0) < min_images and cid not in never_floor_ids
-    }
-    if not weak_ids:
-        logging.info(
-            f"apply_post_assembly_floor: no classes below {min_images} train images"
-        )
-        return set(), class_names
-
-    weak_names = sorted(class_names[cid] for cid in weak_ids)
-    logging.info(
-        f"apply_post_assembly_floor: merging {weak_names} into '{fallback_species}' "
-        f"(below {min_images} train images each)"
-    )
-
-    # Only the weak ids move, and only to fish. Every other id keeps its value,
-    # which is what makes the class list stable across runs.
-    for split in ("train", "val", "test"):
-        split_dir = species_dir / "labels" / split
-        if not split_dir.is_dir():
-            continue
-        for txt in split_dir.glob("*.txt"):
-            new_lines = []
-            for line in txt.read_text().splitlines():
-                parts = line.strip().split()
-                if len(parts) != 5:
-                    continue
-                old_id = int(parts[0])
-                new_id = fish_id if old_id in weak_ids else old_id
-                new_lines.append(f"{new_id} " + " ".join(parts[1:]))
-            txt.write_text("\n".join(new_lines))
-
-    return set(weak_names), class_names
-
-
 def prune_unpinned_empty_classes(
     species_dir: Path,
     roster_size: int,
@@ -1332,7 +1253,7 @@ def prune_unpinned_empty_classes(
     `order_training_classes` appends every species present in the annotation
     vocabulary but absent from `training.class_order`, so the class list ends in
     a tail of unpinned extras. Almost all of them are rare by definition and
-    `apply_post_assembly_floor` immediately merges them into 'fish', leaving
+    the rollup immediately merges them into 'fish', leaving
     named classes with zero instances: run 20260823_031610 shipped 50 names for
     18 classes that had any data, eight of which had no bounding box anywhere in
     the corpus (MaxN sightings with no frame annotations).
@@ -1355,9 +1276,7 @@ def prune_unpinned_empty_classes(
     if not data_yaml_path.exists():
         return [], []
 
-    with open(data_yaml_path) as f:
-        data = yaml.safe_load(f)
-    class_names: List[str] = list(data.get("names", []))
+    class_names: List[str] = read_class_names(data_yaml_path)
     if len(class_names) <= roster_size:
         return [], class_names
 
@@ -1365,12 +1284,12 @@ def prune_unpinned_empty_classes(
     # trainable but its labels still reference the id, so pruning it would
     # silently mislabel them.
     used: Set[int] = set()
-    for split in ("train", "val", "test"):
+    for split in SPLITS:
         split_dir = species_dir / "labels" / split
         if not split_dir.is_dir():
             continue
         for txt in split_dir.glob("*.txt"):
-            used.update(_iter_class_ids(txt))
+            used.update(iter_class_ids(txt))
 
     prune_ids = {cid for cid in range(roster_size, len(class_names)) if cid not in used}
     if not prune_ids:
@@ -1395,24 +1314,15 @@ def prune_unpinned_empty_classes(
             f"prune_unpinned_empty_classes: {len(shifted)} surviving extra(s) "
             f"renumbered: {moves}"
         )
-        for split in ("train", "val", "test"):
+        for split in SPLITS:
             split_dir = species_dir / "labels" / split
             if not split_dir.is_dir():
                 continue
             for txt in split_dir.glob("*.txt"):
-                new_lines = []
-                for line in txt.read_text().splitlines():
-                    parts = line.strip().split()
-                    if len(parts) != 5:
-                        continue
-                    new_lines.append(
-                        f"{id_remap[int(parts[0])]} " + " ".join(parts[1:])
-                    )
-                txt.write_text("\n".join(new_lines))
+                # id_remap covers every surviving class, so an id outside it
+                # is a label the class list cannot name: fail, do not guess.
+                remap_label_file(txt, id_remap, missing="raise")
 
-    data["names"] = new_names
-    data["nc"] = len(new_names)
-    with open(data_yaml_path, "w") as f:
-        yaml.safe_dump(data, f, sort_keys=False)
+    write_class_names(data_yaml_path, new_names)
 
     return pruned_names, new_names

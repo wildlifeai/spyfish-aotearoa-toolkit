@@ -139,7 +139,7 @@ def render(ctx: dict) -> None:
 
     st.divider()
 
-    dated = dep[dep["survey_year"].notna()]
+    dated = dep[dep["survey_season"].notna()]
     left, right = st.columns(2)
     with left:
         # Report home shows the same bars split usable/bad. Here the lost share

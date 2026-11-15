@@ -9,7 +9,6 @@ This module coordinates the full flow:
 """
 
 import logging
-import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -18,10 +17,9 @@ from typing import Optional
 from spyfish.biigle.biigle_to_yolo import biigle_to_yolo, draw_frames_on_images
 from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
+from spyfish.ml.model_meta import model_name_from_run_dir, threshold_sidecar_path
 from spyfish.ml.training.evaluate import run_evaluation_pipeline
 from spyfish.ml.training.prepare_training_data import (
-    _write_sidecar_class_map,
-    apply_post_assembly_floor,
     assemble_yolo_dataset,
     discover_extra_drops,
     flatten_and_remap_labels,
@@ -30,6 +28,13 @@ from spyfish.ml.training.prepare_training_data import (
     print_assembled_summary,
     print_per_drop_species_inventory,
     prune_unpinned_empty_classes,
+    write_sidecar_class_map,
+)
+from spyfish.ml.training.rollup import (
+    apply_rollup,
+    capped_frame_counts,
+    compute_rollup,
+    load_hierarchy,
 )
 from spyfish.ml.training.split_data import (
     apply_frozen_test,
@@ -63,6 +68,10 @@ def _archive_pipeline_model_dir() -> None:
         dest = archive_dir / pt.name
         logging.info(f"Archiving previous production model: {pt} -> {dest}")
         shutil.move(str(pt), str(dest))
+        # The MaxN cutoff belongs to the checkpoint: it is archived with it.
+        sidecar = threshold_sidecar_path(pt)
+        if sidecar.exists():
+            shutil.move(str(sidecar), str(threshold_sidecar_path(dest)))
 
 
 def _derive_promoted_filename(model_path: str, model_type: str) -> str:
@@ -83,16 +92,11 @@ def _derive_promoted_filename(model_path: str, model_type: str) -> str:
     `{model_type}_{now}` so the promoted name still follows the standard.
     """
     try:
-        run_dir_name = Path(model_path).parent.parent.name
-        if run_dir_name and model_type in run_dir_name:
-            # Run dirs from before the standard were `{stamp}_{type}`; keep
-            # the training stamp and put the type first.
-            swapped = re.match(
-                r"^(20\d{6}(?:_\d{6})?)_([a-z][a-z0-9_]*)$", run_dir_name
-            )
-            if swapped:
-                run_dir_name = f"{swapped.group(2)}_{swapped.group(1)}"
-            return f"{config.validate_model_name(run_dir_name)}.pt"
+        # Run dirs from before the standard were `{stamp}_{type}`; keep the
+        # training stamp and put the type first.
+        run_name = model_name_from_run_dir(model_path, swap_legacy=True)
+        if run_name and model_type in run_name:
+            return f"{run_name}.pt"
     except Exception:
         pass
     fallback = f"{model_type}_{datetime.now():%Y%m%d_%H%M%S}"
@@ -118,6 +122,17 @@ def _promote_model_locally(model_path: str, model_type: str):
 
     logging.info(f"Promoting {model_type} model locally: {model_path} -> {dest_path}")
     shutil.copy2(model_path, dest_path)
+    # The cutoff picked on val (evaluate step) is renamed with the weights, so
+    # `resolve_maxn_threshold(pipeline_model_path)` finds it.
+    sidecar = threshold_sidecar_path(model_path)
+    if sidecar.exists():
+        shutil.copy2(sidecar, threshold_sidecar_path(dest_path))
+    else:
+        logging.warning(
+            f"No {sidecar.name} beside {Path(model_path).name}: the promoted model "
+            f"has no MaxN cutoff of its own. Write one with "
+            f"`python -m spyfish.ml.training.threshold --model production`."
+        )
     logging.info(f"✅ {model_type.upper()} model promoted locally as {dest_path.name}.")
     return dest_path
 
@@ -153,9 +168,9 @@ def run_retraining(
     local_training_dir = config.local_training_dir
     images_dir = config.deployment_data_dir
 
-    class_map_path = local_training_dir / "class_map.json"
-    labels_staged_dir = local_training_dir / "labels_staged"
-    species_yaml: Optional[Path] = local_training_dir / "species" / "data.yaml"
+    class_map_path = config.class_map_path
+    labels_staged_dir = config.training_labels_staged_dir
+    species_yaml: Optional[Path] = config.training_data_yaml
 
     if not data_prep:
         # Reuse the existing dataset on disk, skip every walk/extract/flatten step.
@@ -211,15 +226,21 @@ def run_retraining(
     # species happened to have data, which renumbered every class whenever one
     # entered or left (2026-08-21 → 2026-08-22: snapper 10→12, blue cod 11→13).
     # The roster is returned whole, including entries with no data this run, so
-    # the ids hold; the post-assembly floor (step 7b) then decides which species
-    # to merge into 'fish' on actual train image counts after cap + split, and
-    # leaves the merged names in place rather than renumbering around them.
-    all_species = set(species_names) | set(extra_species) | {"fish"}
+    # the ids hold; the rollup (step 7b) then decides which class every taxon
+    # trains as on actual train frame counts after cap + split, and leaves the
+    # merged names in place rather than renumbering around them. Pool nodes get
+    # a seat up front so a pooled taxon always has an id to move to.
+    all_species = (
+        set(species_names)
+        | set(extra_species)
+        | {"fish"}
+        | set(config.training_rollup_pool_nodes)
+    )
     species_names = species_registry().order_training_classes(all_species)
+    hierarchy = load_hierarchy(config.training_hierarchy_file)
 
-    # 3. Flatten + remap class IDs into the unified ordering. Species that
-    #    don't survive the post-assembly floor will be merged into 'fish'
-    #    after assembly via apply_post_assembly_floor.
+    # 3. Flatten + remap class IDs into the unified ordering. Thin species
+    #    are pooled after assembly by the rollup (spyfish/ml/training/rollup.py).
     flatten_and_remap_labels(
         deployment_data_dir=images_dir,
         src_class_map_path=class_map_path,
@@ -291,6 +312,25 @@ def run_retraining(
         # labels via the in-memory species_names, no class_map.json drift.
         all_candidates = set(_trainable_drops) | set(extra_drops)
         candidate_drops = sorted(all_candidates - frozen_test)
+        # Estimate the rollup before the split (capped frames over every
+        # candidate drop) so val is balanced per CLASS, the same vocabulary the
+        # binding rollup in 7b produces. An upper bound: val drops leave train.
+        predicted = compute_rollup(
+            capped_frame_counts(
+                labels_staged_dir,
+                species_names,
+                candidate_drops,
+                config.training_cap_frames_per_drop,
+            ),
+            hierarchy,
+            config.training_floor_min_images,
+            config.training_rollup_pool_nodes,
+            config.training_rollup_keep_separate,
+        )
+        logging.info(
+            f"Pre-split rollup estimate: {len(predicted.classes())} classes; "
+            f"merges {predicted.merged()}"
+        )
         train_drops, val_drops, test_drops = balance_val_drops(
             labels_staged_dir=labels_staged_dir,
             species_names=species_names,
@@ -304,6 +344,7 @@ def run_retraining(
             max_share=config.training_val_balance_max_share,
             min_boxes=config.training_val_min_boxes_per_species,
             floor_min_frames=config.training_floor_min_images,
+            name_map=predicted.mapping,
         )
     else:
         train_drops, val_drops, test_drops = split_data(
@@ -326,14 +367,14 @@ def run_retraining(
         # decoder + data.yaml), skip the slow assembly (image-index walk +
         # symlink + floor). Lets you iterate the val balance cheaply, then pay
         # for one full assembly on the split you actually want.
-        species_dir = local_training_dir / "species"
+        species_dir = config.training_dataset_dir
         species_dir.mkdir(parents=True, exist_ok=True)
         generate_data_yaml(species_names, species_dir)
-        _write_sidecar_class_map(species_names, species_dir, class_map_path)
+        write_sidecar_class_map(species_names, species_dir, class_map_path)
         logging.info(
             "DRY RUN, wrote class_map.json + data.yaml and stopped before "
-            "assembly. Run scripts/wip/suggest_val_drops.py to plan val, then "
-            "re-run --data-prep (without --dry-run) for the full dataset."
+            "assembly. Check the split above, then re-run --data-prep "
+            "(without --dry-run) for the full dataset."
         )
         return {"dry_run_complete": True}
 
@@ -351,41 +392,47 @@ def run_retraining(
         extra_drops=set(extra_drops),
     )
 
-    # 7b. Post-assembly floor, re-merge any class whose actual train image count
-    # (after cap + split) is below class_floor_min_images. The source-level floor
-    # works on pre-cap counts; this catches classes that pass that floor but lose
-    # most of their frames to per-drop capping or splitter quirks. Always runs
-    # when the species dataset was assembled, the data.yaml on disk reflects
-    # what training will see, so the floor needs to run regardless of whether
-    # the user requested species training in this same invocation. Re-prints the
-    # assembled summary so the user sees the final post-floor composition (the
-    # one printed inside assemble_yolo_dataset reflects the pre-floor state).
+    # 7b. Rollup: compute the class every labelled taxon trains as from the
+    # ACTUAL train frame counts (after cap + split), rewrite the labels, and
+    # write species/rollup_map.json, the decision log the snapshot, the test
+    # records and the planning scripts read. Always runs when the species
+    # dataset was assembled: data.yaml on disk must reflect what training will
+    # see whether or not training follows in this invocation. Re-prints the
+    # assembled summary so the user sees the final composition (the one printed
+    # inside assemble_yolo_dataset reflects the pre-rollup state).
     if species_yaml:
         species_dir = species_yaml.parent
-        merged, post_floor_class_names = apply_post_assembly_floor(
+        rollup, post_rollup_class_names = apply_rollup(
             species_dir=species_dir,
-            min_images=config.training_floor_min_images,
+            hierarchy=hierarchy,
+            floor=config.training_floor_min_images,
+            pool_nodes=config.training_rollup_pool_nodes,
+            keep_separate=config.training_rollup_keep_separate,
+            same_animal=config.training_species_canonicalization,
+            hierarchy_path=config.training_hierarchy_file,
         )
-        # 7c. Drop the tail of unpinned classes the floor just emptied. The
+        merged = rollup.merged() if rollup else {}
+        appended = len(post_rollup_class_names) > len(species_names)
+        # 7c. Drop the tail of unpinned classes the rollup just emptied. The
         # roster's own empty entries stay (their ids are frozen on purpose);
         # these are the appended extras, whose ids were never stable anyway, so
         # a zero-instance one is only noise in data.yaml and the detect head.
-        pruned, post_floor_class_names = prune_unpinned_empty_classes(
+        pruned, post_rollup_class_names = prune_unpinned_empty_classes(
             species_dir=species_dir,
             roster_size=len(species_registry().class_order),
         )
-        if pruned:
-            # The sidecar was written during assembly against the pre-prune
+        if pruned or appended:
+            # The sidecar was written during assembly against the pre-rollup
             # list; leave it stale and anything decoding this dataset's labels
-            # later resolves every id past the prune point to the wrong species.
-            _write_sidecar_class_map(
-                post_floor_class_names, species_dir, class_map_path
+            # later resolves every id past that point to the wrong species.
+            write_sidecar_class_map(
+                post_rollup_class_names, species_dir, class_map_path
             )
-        if merged or pruned:
-            logging.info("Re-printing summary after post-assembly floor/prune:")
+        if merged or pruned or appended:
+            logging.info("Re-printing summary after rollup/prune:")
             print_assembled_summary(
                 species_dir=species_dir,
-                class_names=post_floor_class_names,
+                class_names=post_rollup_class_names,
                 train_drops=train_drops,
                 val_drops=val_drops,
                 test_drops=test_drops,

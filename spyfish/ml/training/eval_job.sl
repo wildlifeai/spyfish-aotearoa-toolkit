@@ -17,22 +17,13 @@
 #   python -c "from spyfish.orchestrator.retrain_runner import \
 #     _promote_model_locally; _promote_model_locally('<best.pt>', 'species')"
 
-module purge
-# module load ...   # mirror whatever train_job.sl loads on this cluster
-
-VENV=/nesi/project/wildlife03546/kso_venv_0627/bin/activate
-PROJECT_DIR=/nesi/project/wildlife03546/spyfish-aotearoa-toolkit
-
-source "${VENV}"
-cd "${PROJECT_DIR}"
-
-# Repo-local Ultralytics config, same reason as in train_job.sl: a val call
-# without `project=` must not write into another project's runs_dir. The dir
-# must exist before ultralytics imports, or the env var is silently ignored.
-export YOLO_CONFIG_DIR="${PROJECT_DIR}/.ultralytics"
-mkdir -p "${YOLO_CONFIG_DIR}"
+# Modules, venv, YOLO_CONFIG_DIR, cd into the repo and the END stamp all come
+# from the shared env; submit from the repo root like cpu.sl / gpu.sl.
+source scripts/slurm/_env.sh
 
 BEST=$(ls -d process_files/training/runs/*_species | tail -1)/weights/best.pt
+# Stamp only (not spyfish_start, which announces a run_pipeline.py command).
+spyfish_stamp_start "model=${BEST}"
 echo "Evaluating: ${BEST}"
 
 python -c "
@@ -44,3 +35,4 @@ r = run_evaluation_pipeline(
 )
 print(r)
 "
+spyfish_end

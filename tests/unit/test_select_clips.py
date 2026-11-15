@@ -29,7 +29,7 @@ def _make_detection_df(
                 config.csv_time_seconds_column: t,
                 config.csv_max_interval_column: count,
                 config.csv_confidence_agreement_column: conf,
-                config.csv_scientific_name_column: "Pagrus auratus",
+                config.csv_scientific_name_column: "Chrysophrys auratus",
             }
             for t, count, conf in times_and_counts
         ]
@@ -45,7 +45,7 @@ def test_clip_selector_add_interval():
         config.csv_time_seconds_column: 130.0,
         config.csv_max_interval_column: 5,
         config.csv_confidence_agreement_column: 0.9,
-        config.csv_scientific_name_column: "Pagrus auratus",
+        config.csv_scientific_name_column: "Chrysophrys auratus",
     }
     assert sel.add_interval(row, "MaxN") is True
     assert len(sel.selections_rows) == 1
@@ -57,13 +57,13 @@ def test_clip_selector_deduplicates_same_bucket():
         config.csv_time_seconds_column: 131.0,  # bucket: 130
         config.csv_max_interval_column: 5,
         config.csv_confidence_agreement_column: 0.9,
-        config.csv_scientific_name_column: "Pagrus auratus",
+        config.csv_scientific_name_column: "Chrysophrys auratus",
     }
     row2 = {
         config.csv_time_seconds_column: 135.0,  # same bucket: 130
         config.csv_max_interval_column: 3,
         config.csv_confidence_agreement_column: 0.8,
-        config.csv_scientific_name_column: "Pagrus auratus",
+        config.csv_scientific_name_column: "Chrysophrys auratus",
     }
     assert sel.add_interval(row1, "MaxN") is True
     assert sel.add_interval(row2, "MaxN") is False  # same 10s bucket
@@ -76,13 +76,13 @@ def test_clip_selector_different_buckets():
         config.csv_time_seconds_column: 130.0,  # bucket: 130
         config.csv_max_interval_column: 5,
         config.csv_confidence_agreement_column: 0.9,
-        config.csv_scientific_name_column: "Pagrus auratus",
+        config.csv_scientific_name_column: "Chrysophrys auratus",
     }
     row2 = {
         config.csv_time_seconds_column: 145.0,  # bucket: 140
         config.csv_max_interval_column: 3,
         config.csv_confidence_agreement_column: 0.8,
-        config.csv_scientific_name_column: "Pagrus auratus",
+        config.csv_scientific_name_column: "Chrysophrys auratus",
     }
     assert sel.add_interval(row1, "MaxN") is True
     assert sel.add_interval(row2, "MaxN") is True
@@ -96,7 +96,7 @@ def test_clip_selector_temporal_spacing():
             config.csv_time_seconds_column: 130.0,
             config.csv_max_interval_column: 5,
             config.csv_confidence_agreement_column: 0.9,
-            config.csv_scientific_name_column: "Pagrus auratus",
+            config.csv_scientific_name_column: "Chrysophrys auratus",
         },
         "MaxN",
     )

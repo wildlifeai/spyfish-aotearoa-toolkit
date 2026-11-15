@@ -11,8 +11,8 @@ JSON shape on disk (one entry per class, keyed by class_id as string):
     {
       "0": {
         "class_id": 0,
-        "aphia_id": 127140,
-        "scientific_name": "Pagrus auratus",
+        "aphia_id": 367239,
+        "scientific_name": "Chrysophrys auratus",
         "common_name": "Snapper"
       },
       ...
@@ -111,8 +111,95 @@ def _build_registry_from_labels(labels: List[dict]) -> Dict[str, dict]:
 #   • fish bucket      , catches workflow labels (e.g. 'Fish - Final',
 #                         'To review') that Biigle annotators apply but
 #                         which aren't species. Aliases get routed here.
+#   • alias-only entries (Pseudocaranx georgianus, the Zooniverse choices
+#                         below), the species IS in the tree; the override
+#                         only merges extra aliases onto it, for names the
+#                         tree does not spell. Zooniverse choice keys are
+#                         matched on the normalised common name or alias
+#                         (species.normalise_zoo_choice), so an alias here is
+#                         how a volunteer choice that the tree spells
+#                         differently stops falling into `fish`.
+#   • Mammalia / Aves    , alias-only since 2026-11-05: "Marine Mammals -
+#                         Mammalia" (789236) and "Birds - Aves" (789237) are in
+#                         the tree; the Zooniverse keys MARINEMAMMAL and SEABIRD
+#                         still need the aliases.
 # ──────────────────────────────────────────────────────────────────────
 _MANUAL_OVERRIDES: List[dict] = [
+    # Zooniverse choices (legacy export counts, 2026-11-04) that resolved to
+    # nothing because the tree's common name differs from the workflow's.
+    {
+        "scientific_name": "Chelidonichthys kumu",  # BLUEFINGURNARD, 722
+        "common_name": "Red gurnard",
+        "aphia_id": 218122,
+        "aliases": ["Bluefin gurnard"],
+    },
+    {
+        "scientific_name": "Mullidae",  # GOATFISH, 604: the family, not a guess at one
+        "common_name": "Goatfishes",
+        "aphia_id": 125547,
+        "aliases": ["Goatfish"],
+    },
+    {
+        "scientific_name": "Latris lineata",  # STRIPEDTRUMPETER, 375
+        "common_name": "Trumpeter",
+        "aphia_id": 281280,
+        "aliases": ["Striped trumpeter"],
+    },
+    {
+        # CONGEREEL (234 classifications 2021-2025): the workflow text says the
+        # choice covers both NZ congers, and 217 legacy expert rows in 30 drops
+        # say "Conger sp.", so the genus is the honest home, like Kyphosus sp.
+        # Training pools it into Anguilliformes with the other eels.
+        "scientific_name": "Conger sp.",
+        "common_name": "Conger eels",
+        "aphia_id": 125624,
+        "aliases": ["Conger eel"],
+    },
+    {
+        "scientific_name": "Chromis dispila",  # DEMOISELLE, 142 (Rongokako 2021-22, pre-split key)
+        "common_name": "Two-spot demoiselle",
+        "aphia_id": 1577314,
+        "aliases": ["Demoiselle"],
+    },
+    {
+        # REDANDHALFBANDEDPERCHES, 117: the choice covers H. huntii and the
+        # undescribed half-banded perch, so the genus. Also where the legacy
+        # "Hypoplectrodes sp." rows (14 PKI drops) and the unpublished name
+        # "Hypoplectrodes dimidius" (Tūhua, via the synonyms map) land.
+        "scientific_name": "Hypoplectrodes sp.",
+        "common_name": "Red and half-banded perches",
+        "aphia_id": 269455,
+        "aliases": ["Red and half-banded perches"],
+    },
+    {
+        "scientific_name": "Mammalia",  # MARINEMAMMAL, 87
+        "common_name": "Marine mammals",
+        "aphia_id": 1837,
+        "aliases": ["Marine mammal"],
+    },
+    {
+        "scientific_name": "Aves",  # SEABIRD, 22
+        "common_name": "Seabirds",
+        "aphia_id": 1836,
+        "aliases": ["Seabird"],
+    },
+    {
+        "scientific_name": "Macroctopus maorum",  # OCTOPUS, 8: the only octopus in the tree
+        "common_name": "Common octopus",
+        "aphia_id": 535605,
+        "aliases": ["Octopus"],
+    },
+    {
+        # Zooniverse volunteers pick "TREVALLY". The registry's Zooniverse key
+        # is the common name, which the BIIGLE tree spells "Silver trevally",
+        # so without this alias the choice fell through to the `fish` bucket
+        # (found 2026-11-04). NZ trevally is P. georgianus; P. dentex is an
+        # Atlantic species and a synonym key in species_map_global.yaml.
+        "scientific_name": "Pseudocaranx georgianus",
+        "common_name": "Silver trevally",
+        "aphia_id": 1039991,
+        "aliases": ["Trevally"],
+    },
     {
         "scientific_name": "Kyphosus bigibbus",
         "common_name": "Grey drummer",
@@ -122,6 +209,7 @@ _MANUAL_OVERRIDES: List[dict] = [
         "scientific_name": "Kyphosus sp.",
         "common_name": "Silver and grey drummers",
         "aphia_id": 126015,
+        "aliases": ["Grey and silver drummers"],  # the Zooniverse choice's word order
     },
     {
         "scientific_name": "fish",
@@ -135,6 +223,7 @@ _MANUAL_OVERRIDES: List[dict] = [
             "Fish - Final",
             "Fish: final",
             "Fish: review required",
+            "Fish - review required",  # the label's current name in tree 3375
             "To review",
         ],
     },

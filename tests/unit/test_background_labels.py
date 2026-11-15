@@ -25,6 +25,11 @@ def _drop_dir(tmp_path, reviewed_frames=None, annotated=()):
         pd.DataFrame({"filename": reviewed_frames}).to_csv(
             d / "annotations" / f"{DROP}_biigle_expert_reviewed_frames.csv", index=False
         )
+        # --biigle-sync writes the annotations CSV alongside the list; a list
+        # without it is ignored (volume not synced yet).
+        pd.DataFrame({"filename": [], "label_name": []}).to_csv(
+            d / "annotations" / f"{DROP}_biigle_expert_raw.csv", index=False
+        )
     return d, labels
 
 

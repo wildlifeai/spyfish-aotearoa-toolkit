@@ -54,6 +54,9 @@ _REASON_RULES: tuple[tuple[str, str], ...] = (
     # Blind's recall sample. Both are "picked without a reason", hence one label.
     ("spot_check", r"(Blind|Random detection|(Global )?Empty)\b"),
     ("video_start", r"(Global )?Video Start\b"),
+    # UoA (uoa/scripts/two_stage/hand_count_frames.py): frames from the 6-min
+    # intervals where the observers' hand count recorded a fish.
+    ("manual_count", r"Hand count\b"),
 )
 
 # Reasons seen once and then not again, so the log stays one line per unknown

@@ -49,7 +49,7 @@ from spyfish.biigle.biigle_to_yolo import drop_id_from_frame_filename
 # Same helper the live sync path uses, so a backfilled CSV is byte-identical to
 # one written at sync time. Importing it rather than reimplementing is the point:
 # two ways of deciding "which frames belong to this drop" would drift.
-from spyfish.biigle.sync_annotations import _write_reviewed_frames_csv
+from spyfish.biigle.sync_annotations import write_reviewed_frames_csv
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 
@@ -134,7 +134,7 @@ def main() -> None:
     for vol, drops in sorted(by_volume.items()):
         for drop_id in drops:
             try:
-                n = _write_reviewed_frames_csv(handler, vol, drop_id, cache)
+                n = write_reviewed_frames_csv(handler, vol, drop_id, cache)
             except Exception as e:
                 # One unreachable volume must not abort a 189-drop backfill.
                 logging.warning(f"  {drop_id} (volume {vol}): {type(e).__name__}: {e}")

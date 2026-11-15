@@ -362,6 +362,15 @@ FOOTAGE_STATE_COLORS = {
     "Annotated, archived": DETAIL_COLOURS["Archived, annotated"],
 }
 
+# Survey review: the model's count of a species on a MaxN frame against the
+# recorded MaxN, drawn as a frame around the image. Keyed by the `agreement`
+# column of the export's manifest. The same three as the HTML review report.
+REVIEW_AGREEMENT_COLORS = {
+    "match": "#3CAA3C",
+    "off": "#E0AA00",
+    "none": "#E62828",
+}
+
 # Annotation-depth bands per survey: source colours for work done, then the
 # outstanding states. Keyed by the labels in `charts/surveys.BAND_LABELS`.
 BAND_COLOURS = {

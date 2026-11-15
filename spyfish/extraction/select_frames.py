@@ -25,6 +25,7 @@ import pandas as pd
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.select_clips import _sample
+from spyfish.ml.raw_detections import read_raw_detections
 
 
 def spread_timestamps(
@@ -87,7 +88,11 @@ def per_frame_species_counts(raw_csv: str, min_confidence: float) -> pd.DataFram
     cols = ["time_seconds", "class", "count", "mean_conf", "diag", "elong"]
     if not Path(raw_csv).exists():
         return pd.DataFrame(columns=cols)
-    raw = pd.read_csv(raw_csv)
+    raw = read_raw_detections(raw_csv)
+    # Static junk ("Not a fish?", spyfish/ml/static_boxes.py) chooses no frame:
+    # no MaxN or Uncertain pick of its own. Its boxes still go to BIIGLE on the
+    # frames other buckets choose, because the COCO is built from the full CSV.
+    raw = raw[raw["class"] != config.static_box_label]
     if raw.empty:
         return pd.DataFrame(columns=cols)
     raw = raw[raw["confidence"] >= min_confidence]
@@ -100,16 +105,23 @@ def per_frame_species_counts(raw_csv: str, min_confidence: float) -> pd.DataFram
         _diag=(raw["w"] ** 2 + raw["h"] ** 2) ** 0.5,
         _elong=long_side / short_side,
     )
-    return (
-        raw.groupby(["time_seconds", "class"])
-        .agg(
-            count=("confidence", "size"),
-            mean_conf=("confidence", "mean"),
-            diag=("_diag", "mean"),
-            elong=("_elong", "max"),
-        )
-        .reset_index()
+    aggs = dict(
+        count=("confidence", "size"),
+        mean_conf=("confidence", "mean"),
+        diag=("_diag", "mean"),
+        elong=("_elong", "max"),
     )
+    if "clf_confidence" in raw.columns:
+        # Two-stage CSV: a box is only as certain as BOTH models are of it
+        # (detection score x BioCLIP's top probability). A box BioCLIP did not
+        # classify (too small) counts on its detection score alone. Feeds the
+        # Uncertain bucket only; `mean_conf` keeps its meaning downstream.
+        raw = raw.assign(
+            _certainty=raw["confidence"]
+            * pd.to_numeric(raw["clf_confidence"], errors="coerce").fillna(1.0)
+        )
+        aggs["certainty"] = ("_certainty", "mean")
+    return raw.groupby(["time_seconds", "class"]).agg(**aggs).reset_index()
 
 
 def collapse_peaks(peaks: list, counts: pd.DataFrame, spacing: float) -> list:
@@ -362,18 +374,22 @@ def _select_frames_with_strategy(
     for species in frame_df[config.csv_scientific_name_column].unique():
         sp_df = frame_df[frame_df[config.csv_scientific_name_column] == species]
 
-        # Rank by LOW confidence, count as tie-break. NOT by
+        # Rank by LOW confidence, count as tie-break. With the second stage on,
+        # "confidence" is `certainty` (detection x BioCLIP): the frames where
+        # both models were unsure go to the expert (Kalindi, 2026-11-12). NOT by
         # `count / confidence` (ConfusionScore). That score measured 0.982
         # correlated with raw count and only 0.133 with confidence, so it
         # picked the busiest frames, a second MaxN bucket rather than an
         # uncertainty one. The agreement column carries mean model confidence
         # on the ML path and volunteer agreement on the citsci path; low
         # means uncertain in both.
+        conf_col = (
+            "certainty"
+            if "certainty" in sp_df.columns
+            else config.csv_confidence_agreement_column
+        )
         ranked_conf = sp_df.sort_values(
-            [
-                config.csv_confidence_agreement_column,
-                config.csv_max_interval_column,
-            ],
+            [conf_col, config.csv_max_interval_column],
             ascending=[True, False],
         )
 
@@ -720,7 +736,8 @@ def _ml_peak_selections(
     if not Path(raw_csv_path).exists():
         return pd.DataFrame(columns=columns)
 
-    raw = pd.read_csv(raw_csv_path)
+    raw = read_raw_detections(raw_csv_path)
+    raw = raw[raw["class"] != config.static_box_label]  # chooses no frame, see above
     min_conf = config.ml_peak_min_confidence
     raw = raw[raw["confidence"] >= min_conf]
     if raw.empty:

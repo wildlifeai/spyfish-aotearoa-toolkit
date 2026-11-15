@@ -15,13 +15,12 @@ END="${END:-1755}"                              # segment end, seconds
 STRIDE="${STRIDE:-1}"                          # 1 = every frame (full/smooth/real-time); 3-5 = lighter, fewer frames (output fps scaled so playback stays real-time)
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
-module purge
-module load Python/3.10.5-gimkl-2022a
-module load FFmpeg/5.1.1-GCC-11.3.0
-module load CUDA/11.8.0
-source /nesi/project/wildlife03546/kso_venv_0627/bin/activate
-cd /nesi/project/wildlife03546/spyfish-aotearoa-toolkit
+# Modules, venv, YOLO_CONFIG_DIR, cd into the repo and the END stamp all come
+# from the shared env; submit from the repo root like cpu.sl / gpu.sl.
+source scripts/slurm/_env.sh
 
+# Own START stamp (not spyfish_start, which announces a run_pipeline.py command).
+echo "START $(date '+%F %T') job=${SLURM_JOB_ID:-none} host=$(hostname) drop=${DROP}" >&2
 echo "Annotating ${DROP} [${START}s–${END}s], stride=${STRIDE}"
 
 python - "$DROP" "$START" "$END" "$STRIDE" <<'PY'
@@ -95,3 +94,4 @@ print(f"DONE: {written[0]} annotated frames -> {out_path.resolve()} ({size_mb:.1
 PY
 
 echo "Annotation complete"
+spyfish_end

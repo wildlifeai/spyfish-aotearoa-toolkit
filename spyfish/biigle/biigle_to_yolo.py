@@ -185,10 +185,15 @@ _WORKFLOW_LABEL_SKIP = {
     "Nothing here",
     "Scale bar",
     "Can't annotate (e.g. bad visibility)",
+    # Model-only boxes put up for an expert check (scripts/two_stage/
+    # upload_model_only_for_review.py). Unreviewed, a box is a guess, not a
+    # fish: it must never train. "To review" cannot serve here because experts
+    # have used it on real fish awaiting an ID, and it trains as `fish`.
+    "ML: check",
 }
 
 
-def _is_workflow_label(name: str) -> bool:
+def is_workflow_label(name: str) -> bool:
     """True if a label is an admin/workflow marker that should be skipped from training."""
     if name in _WORKFLOW_LABEL_SKIP:
         return True
@@ -251,7 +256,7 @@ def convert_annotations_to_yolo(
     """
     # Drop workflow/admin annotations entirely (don't even route to fish bucket).
     n_pre = len(df)
-    skip_mask = df["label_name"].astype(str).map(_is_workflow_label)
+    skip_mask = df["label_name"].astype(str).map(is_workflow_label)
     if skip_mask.any():
         skipped_labels = sorted(df.loc[skip_mask, "label_name"].astype(str).unique())
         logging.info(
@@ -474,6 +479,20 @@ def draw_frames_on_images(
 # ---------------------------------------------------------------------------
 
 
+def _read_raw_csv(path: Path) -> pd.DataFrame:
+    """A raw BIIGLE report CSV, or an empty frame when the file has no rows.
+
+    ``--biigle-sync`` writes the report of a reviewed-but-empty volume as-is
+    (no rows, possibly no header) so the reviewed-frames list next to it is
+    trusted; pandas raises on a headerless empty file, and that drop's
+    negatives are the whole point of the file.
+    """
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
 def _merge_annotation_sources(
     drop_dir: Path, srcs: Dict[str, Path]
 ) -> List[Tuple[str, pd.DataFrame, Path]]:
@@ -487,12 +506,29 @@ def _merge_annotation_sources(
     one animal is never boxed twice; that is logged, since it means the two
     samplers overlapped.
     """
-    expert = pd.read_csv(srcs["expert"]) if "expert" in srcs else None
-    training = pd.read_csv(srcs["training"]) if "training" in srcs else None
+    expert = _read_raw_csv(srcs["expert"]) if "expert" in srcs else None
+    training = _read_raw_csv(srcs["training"]) if "training" in srcs else None
     if expert is not None and training is not None and "filename" in training.columns:
-        overlap = set(expert.get("filename", pd.Series(dtype=str)).astype(str))
-        clash = training["filename"].astype(str).isin(overlap)
-        if clash.any():
+        # Compared by file STEM: labels are written per stem, and the two
+        # volumes spell the same frame differently (training volumes use the
+        # nested `{drop}/frames/{name}.jpg`, expert reviews the bare name).
+        # Comparing full strings missed those, both were converted, and the
+        # training .txt written second overwrote the expert's labels.
+        def _stems(col: pd.Series) -> pd.Series:
+            return col.astype(str).map(lambda f: Path(f).stem)
+
+        overlap = set(_stems(expert.get("filename", pd.Series(dtype=str))))
+        clash = _stems(training["filename"]).isin(overlap)
+        if len(training) and clash.all():  # .all() is vacuously True on no rows
+            # Same volume downloaded twice: `download-project` on the DONE
+            # project writes per-drop expert volumes under the training suffix.
+            # The expert copy is the one --biigle-sync maintains, so keep that.
+            logging.info(
+                f"  {drop_dir.name}: training_raw is a second copy of the expert "
+                f"volume ({int(clash.sum())} frames); using the expert copy only."
+            )
+            training = None
+        elif clash.any():
             logging.warning(
                 f"  {drop_dir.name}: {training.loc[clash, 'filename'].nunique()} frame(s) "
                 f"are in both the expert and the training volume; using the expert's "
@@ -502,7 +538,7 @@ def _merge_annotation_sources(
     out = []
     if expert is not None:
         out.append(("expert_raw", expert, drop_dir / "frames"))
-    if training is not None:
+    if training is not None and not training.empty:
         out.append(("training_raw", training, drop_dir / "training_frames"))
     return out
 
@@ -610,12 +646,27 @@ def _write_background_labels(drop_dir: Path, labels_dir: Path) -> int:
     Returns the number of background labels written.
     """
     names: List[str] = []
-    for suffix in (
-        config.biigle_expert_reviewed_frames_suffix,
-        config.biigle_training_reviewed_frames_suffix,
+    ann_dir = drop_dir / "annotations"
+    for suffix, raw_suffix in (
+        (config.biigle_expert_reviewed_frames_suffix, config.biigle_expert_raw_suffix),
+        (
+            config.biigle_training_reviewed_frames_suffix,
+            config.biigle_training_raw_suffix,
+        ),
     ):
-        reviewed_frames_path = drop_dir / "annotations" / f"{drop_dir.name}{suffix}"
+        reviewed_frames_path = ann_dir / f"{drop_dir.name}{suffix}"
         if not reviewed_frames_path.exists():
+            continue
+        # A reviewed list is only trustworthy next to its volume's annotations.
+        # The expert raw CSV is written by --biigle-sync once the volume is
+        # DONE; a list without it (e.g. backfilled for an expert_uploaded
+        # volume still in review) names frames nobody has looked at, and
+        # calling those empty would teach the model that fish are background.
+        if not (ann_dir / f"{drop_dir.name}{raw_suffix}").exists():
+            logging.info(
+                f"  {drop_dir.name}: {reviewed_frames_path.name} has no matching "
+                f"annotations CSV yet (volume not synced), not used for negatives"
+            )
             continue
         try:
             names += pd.read_csv(reviewed_frames_path)["filename"].astype(str).tolist()

@@ -147,7 +147,7 @@ def render_funnel(df: pd.DataFrame, compact: bool = False) -> None:
 # two segments there is nothing to crowd.
 SPLITS = {
     "usable_bad": {
-        "title": "Deployments per year",
+        "title": "Deployments per season",
         "column": lambda df: df["is_bad_deployment"]
         .fillna(0)
         .astype(bool)
@@ -158,7 +158,7 @@ SPLITS = {
         "min_label_pct": 0,
     },
     "ingest_status": {
-        "title": "Deployments per year, by ingest status",
+        "title": "Deployments per season, by ingest status",
         "column": lambda df: df[IngestStatus.COLUMN].fillna(IngestStatus.REMOVED),
         # Usable at the bottom, then by how fixable the loss is: a validation
         # or metadata error sits directly on the usable share because it can be
@@ -210,7 +210,7 @@ def render_deployments_per_year(
 
     per_year = (
         dated.assign(_split=spec["column"](dated))
-        .groupby([dated["survey_year"].astype(int), "_split"])["drop_id"]
+        .groupby([dated["survey_season"].astype(int), "_split"])["drop_id"]
         .nunique()
         .unstack(fill_value=0)
     )
@@ -297,6 +297,7 @@ SECTION_STATUS_ORDER = [
             MlStatus.PENDING,
             MlStatus.READY,
             MlStatus.RUNNING,
+            MlStatus.INFERRED,
             MlStatus.COMPLETE,
             MlStatus.ERROR,
             MlStatus.SKIPPED,
@@ -430,7 +431,7 @@ def render_deployment_browser(dep: pd.DataFrame) -> None:
     """Filter down to specific deployments and see their status across sections."""
     section("Find a deployment")
     st.caption(
-        "Status filters are on top of the year and MPA filters at the top of "
+        "Status filters are on top of the season and MPA filters at the top of "
         "the page."
     )
 

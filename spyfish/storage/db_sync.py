@@ -128,6 +128,23 @@ def sync_annotations() -> bool:
         filters += ["--include", f"{pattern}.jpeg"]
         filters += ["--include", f"{pattern}.png"]
 
+    # The slate frame sits in the drop folder itself ({drop}_slate.jpg), not in
+    # a subfolder. The runner-ups in {drop}_slate_candidates/ are named by rank
+    # and second, so this does not pick them up: they can be cut again.
+    filters += ["--include", f"*/*{config.slate_frame_suffix}"]
+
+    # The Survey review's MaxN frames and their manifest ({drop}/review/).
+    # Only files named as review frames, so anything else left in a folder
+    # called review/ stays local.
+    filters += [
+        "--include",
+        f"*/{config.review_dir_name}/*{config.review_frame_marker}*.jpg",
+    ]
+    filters += [
+        "--include",
+        f"*/{config.review_dir_name}/{config.review_manifest_name}",
+    ]
+
     # NOTE: training/ outputs are intentionally NOT synced here.
     # The directory contains a mix of useful artifacts (model weights, metrics,
     # data.yaml) and noise (YOLO debug-image dumps, tensorboard event files,

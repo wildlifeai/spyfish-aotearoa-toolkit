@@ -52,7 +52,9 @@ def _substrate_df():
             # Same area as the polygon once the shoelace auto-closes the ring.
             _row(9002, "Reef", "LineString", [500, 0, 1000, 0, 1000, 500, 500, 500]),
             # Fish-SIZE LineString — species tree label, NOT substrate. Excluded.
-            _row(477416, "Snapper - Pagrus auratus", "LineString", [10, 10, 200, 10]),
+            _row(
+                477416, "Snapper - Chrysophrys auratus", "LineString", [10, 10, 200, 10]
+            ),
             # Scale bar size line — also excluded.
             _row(531298, "Scale bar", "LineString", [0, 0, 100, 0]),
         ]
@@ -115,7 +117,7 @@ def test_process_substrate_empty_when_no_substrate():
         [
             _row(
                 477416,
-                "Snapper - Pagrus auratus",
+                "Snapper - Chrysophrys auratus",
                 "Rectangle",
                 [0, 0, 10, 0, 10, 10, 0, 10],
             )

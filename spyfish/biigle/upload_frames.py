@@ -9,6 +9,8 @@ Two-step workflow:
 import json
 import logging
 import math
+import os
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -22,7 +24,49 @@ from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
 from spyfish.storage.s3_handler import S3Handler
 
+# ── What one run already knows ───────────────────────────────────────────────
+
+
+class UploadRun:
+    """What one upload run has already asked BIIGLE, so a survey's drops do not
+    each ask again.
+
+    Holds a project's volume list: `find_or_create_volume_and_add_frames` reads
+    it once per run instead of once per drop (40 drops of one survey were 40
+    identical GETs). The list is dropped whenever this run creates a volume, so
+    the next drop fetches a fresh one and finds it.
+
+    Volumes created, moved or deleted by someone else during the run are not
+    seen until the next run. A deleted one fails loudly (adding files to it
+    raises); nothing is silently written to the wrong place.
+    """
+
+    def __init__(self) -> None:
+        self._volumes: Dict[int, list] = {}
+
+    def volumes(self, project_id: int, handler: BiigleHandler) -> list:
+        if project_id not in self._volumes:
+            self._volumes[project_id] = handler.get_volumes(project_id)
+        return self._volumes[project_id]
+
+    def forget_volumes(self, project_id: int) -> None:
+        self._volumes.pop(project_id, None)
+
+
+# The survey-pooled entry points are called once per drop by loops that live in
+# other modules, each loop being one process (`--biigle-upload --survey-volume`,
+# the training-frame extraction). With no `run` passed they share this one, so
+# those loops get the saving without having to thread an object through.
+_PROCESS_RUN = UploadRun()
+
+
 # ── Step 1: S3 upload ────────────────────────────────────────────────────────
+
+
+def _listing_prefix(keys: list) -> str:
+    """The deepest S3 folder that holds every one of `keys`."""
+    common = os.path.commonprefix(keys)
+    return common[: common.rfind("/") + 1]
 
 
 def upload_frames_to_s3(
@@ -64,9 +108,8 @@ def upload_frames_to_s3(
         return []
 
     s3_prefix = s3_frames_prefix.rstrip("/") + "/"
-    existing_keys = s3.get_file_paths_set_from_s3(prefix=s3_prefix)
 
-    skipped = 0
+    targets = []
     for local_path in frame_paths:
         p = Path(local_path)
         if not p.exists():
@@ -86,7 +129,21 @@ def upload_frames_to_s3(
                 )
                 name = p.name
 
-        s3_key = s3_prefix + name
+        targets.append((p, name, s3_prefix + name))
+
+    # List only the folder these frames go to. For a survey-level prefix that is
+    # {survey}/{drop}/frames/, not the whole survey tree: listing the tree once
+    # per drop paged through every other drop's frames, clips and annotations
+    # each time. Frames spread over several folders widen it to their common
+    # parent, at worst the prefix itself.
+    existing_keys = (
+        s3.get_file_paths_set_from_s3(prefix=_listing_prefix([t[2] for t in targets]))
+        if targets
+        else set()
+    )
+
+    skipped = 0
+    for p, name, s3_key in targets:
         if s3_key in existing_keys:
             logging.debug(f"  Already on S3, skipping: {name}")
             uploaded.append(name)
@@ -113,6 +170,7 @@ def find_or_create_volume_and_add_frames(
     file_names: list[str],
     project_id: Optional[int] = None,
     media_type: str = "image",
+    run: Optional[UploadRun] = None,
 ) -> Tuple[int, Dict[str, int]]:
     """Land `file_names` into the Biigle volume named `volume_name`, creating
     the volume if it doesn't exist.
@@ -134,6 +192,9 @@ def find_or_create_volume_and_add_frames(
         file_names: Basenames to ensure are in the volume.
         project_id: Defaults to `config.biigle_project_id`.
         media_type: "image" or "video". Default "image".
+        run: The run's `UploadRun`. Its volume list is used instead of a fresh
+            GET, and dropped again if a volume is created here. None fetches
+            the list for this call alone.
 
     Returns:
         ``(volume_id, filename_to_biigle_id)``. The map covers the files we
@@ -153,8 +214,9 @@ def find_or_create_volume_and_add_frames(
     handler = BiigleHandler()
     project_id = project_id or config.biigle_project_id
 
+    run = run if run is not None else UploadRun()
     matches = [
-        v for v in handler.get_volumes(project_id) if v.get("name") == volume_name
+        v for v in run.volumes(project_id, handler) if v.get("name") == volume_name
     ]
 
     if not matches:
@@ -168,6 +230,7 @@ def find_or_create_volume_and_add_frames(
             project_id=project_id,
             media_type=media_type,
         )
+        run.forget_volumes(project_id)
         # On creation we don't get image IDs back, the caller's annotation
         # step will fall back to one get_volume_images call. That fetch is
         # bounded (just-this-drop's files) since the volume is brand-new,
@@ -212,6 +275,7 @@ def find_or_create_volume_and_add_frames(
             project_id=project_id,
             media_type=media_type,
         )
+        run.forget_volumes(project_id)
         return int(info["id"]), {}
 
     volume_id = int(compatible[0]["id"])
@@ -367,6 +431,12 @@ def resolve_species_label_id(
     return config.default_fish_label_id
 
 
+class _WholeVolumeMap(dict):
+    """Basename → image ID for EVERY image of a volume, from one /filenames
+    fetch. A name missing from it is not registered in the volume, so there is
+    nothing a second fetch could add."""
+
+
 def _resolve_image_ids(
     volume_id: int,
     needed_names: set,
@@ -378,8 +448,12 @@ def _resolve_image_ids(
     The caller (typically `find_or_create_volume_and_add_frames`) can pre-supply
     this from `add_files_to_volume`'s response, which costs zero extra Biigle
     calls. Falls back to a full image-list fetch only when the map is missing
-    or doesn't cover every filename needed.
+    or doesn't cover every filename needed. What that fetch returns is a
+    `_WholeVolumeMap`, which is handed straight back when passed in again.
     """
+    if isinstance(filename_to_biigle_id, _WholeVolumeMap):
+        return filename_to_biigle_id
+
     if filename_to_biigle_id is not None:
         filename_to_biigle_id = _by_basename(filename_to_biigle_id, volume_id)
         if needed_names.issubset(filename_to_biigle_id):
@@ -396,12 +470,74 @@ def _resolve_image_ids(
         )
 
     volume_images = handler.get_volume_images(volume_id)
-    return _by_basename(
-        {img["filename"]: int(img["id"]) for img in volume_images}, volume_id
+    return _WholeVolumeMap(
+        _by_basename(
+            {img["filename"]: int(img["id"]) for img in volume_images}, volume_id
+        )
     )
 
 
+def _image_ids_for_drop(
+    volume_id: int,
+    coco: dict,
+    frames_df: pd.DataFrame,
+    filename_to_biigle_id: Optional[dict] = None,
+) -> Optional[dict]:
+    """One image-ID map for a drop's box upload AND its image labels.
+
+    Both steps need filename → image ID, and each used to resolve it alone, so
+    a volume whose IDs were not already known (every new one) had its
+    /filenames fetched twice in a row. Resolved here once, for the names either
+    step will ask for, and passed to both. No fetch when neither step has
+    anything to send.
+    """
+    needed: set = set()
+    if coco.get("annotations"):
+        needed |= {_basename(img["file_name"]) for img in coco.get("images", [])}
+    if config.selection_reason_label_ids and "FramePath" in frames_df.columns:
+        needed |= {_basename(p) for p in frames_df["FramePath"].dropna() if p}
+    if not needed:
+        return filename_to_biigle_id
+    return _resolve_image_ids(volume_id, needed, filename_to_biigle_id, BiigleHandler())
+
+
 # ── Step 3: Annotation Upload ────────────────────────────────────────────────
+
+
+def save_upload_record(
+    drop_id: str, volume_id: int, coco: dict, result: dict, target: str = ""
+) -> Path:
+    """Write the dated record of what was just uploaded for ``drop_id``.
+
+    Holds the COCO exactly as sent and BIIGLE's returned annotations (their
+    ids), so a later re-extraction that rewrites the working COCO cannot erase
+    what the expert actually reviewed: boxes the expert deleted are only
+    knowable against this. The name is new on every upload and an existing
+    file is never replaced; the end-of-run sync (``annotations/*.json``)
+    carries it to S3.
+    """
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    path = config.get_biigle_upload_record_path(drop_id, volume_id, stamp, target)
+    n = 1
+    while path.exists():  # two uploads within one second: never overwrite, number it
+        path = path.with_name(f"{path.stem}_{n}.json")
+        n += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "drop_id": drop_id,
+                "volume_id": int(volume_id),
+                "uploaded_at": stamp,
+                "target": target,
+                "coco": coco,
+                "biigle_annotations": (result or {}).get("details", []),
+            },
+            indent=1,
+        )
+    )
+    logging.info(f"{drop_id}: upload record {path.name}")
+    return path
 
 
 def upload_coco_annotations_to_biigle(
@@ -422,7 +558,7 @@ def upload_coco_annotations_to_biigle(
         filename_to_biigle_id: Optional pre-supplied ``{filename: biigle_image_id}``
             map. When supplied AND it covers every filename referenced in
             ``coco_data["images"]``, the per-volume image fetch is skipped,
-            saving a 20-thread parallel GET burst that scales with the
+            saving a parallel GET burst that scales with the
             volume's image count and dominates rate-limit consumption in
             survey-level batch runs. Falls back to the full fetch when
             the map is absent or incomplete.
@@ -521,7 +657,8 @@ def upload_coco_annotations_to_biigle(
         biigle_annotations.append(
             {
                 "image_id": biigle_img_id,
-                "shape_id": 5,  # 5 = Rectangle
+                "shape": 5,  # 5 = Rectangle; BIIGLE's bulk endpoint now requires `shape`
+                "shape_id": 5,  # the old name, for servers before the rename
                 "points": points,
                 "label_id": assigned_label_id,
                 "confidence": float(ann.get("score", 1.0)),
@@ -745,16 +882,22 @@ def upload_frames_to_biigle(
 
     # Step 4: Upload COCO bounding box annotations to the new volume
     if volume_id:
-        upload_coco_annotations_to_biigle(volume_id, coco)
+        image_ids = _image_ids_for_drop(volume_id, coco, frames_df)
+        result = upload_coco_annotations_to_biigle(
+            volume_id, coco, filename_to_biigle_id=image_ids
+        )
+        save_upload_record(drop_id, volume_id, coco, result)
         # Step 5: Tell the expert why each frame is in front of them. Runs after
         # the annotations so a labelling problem cannot cost us the boxes.
-        attach_selection_reason_labels(volume_id, frames_df)
+        attach_selection_reason_labels(
+            volume_id, frames_df, filename_to_biigle_id=image_ids
+        )
 
     return volume_info
 
 
 def upload_frames_to_expert_survey_volume(
-    drop_id: str, frames_df: pd.DataFrame
+    drop_id: str, frames_df: pd.DataFrame, run: Optional[UploadRun] = None
 ) -> dict:
     """Expert-review upload pooled into ONE Biigle volume per survey.
 
@@ -767,7 +910,11 @@ def upload_frames_to_expert_survey_volume(
     ``deployment_data/{survey}/{drop}/frames/x.jpg`` is named
     ``{drop}/frames/x.jpg`` in the volume, which is what lets the sync route
     a shared volume's annotations back to each deployment by filename.
+
+    Called once per drop, so the project's volume list comes from `run` (the
+    process-wide one when None): one GET for the survey, not one per drop.
     """
+    run = run if run is not None else _PROCESS_RUN
     survey_id = config.get_survey_id_from_drop(drop_id)
 
     coco_json_path = config.get_coco_annotations_path(drop_id)
@@ -801,6 +948,7 @@ def upload_frames_to_expert_survey_volume(
         s3_frames_prefix=s3_prefix,
         file_names=file_names,
         media_type="image",
+        run=run,
     )
 
     # The COCO's image entries carry bare basenames while the shared volume
@@ -808,8 +956,14 @@ def upload_frames_to_expert_survey_volume(
     # survey (each starts with its drop_id), so a basename-keyed map bridges
     # the two.
     base_map = {Path(name).name: vid for name, vid in filename_to_id.items()}
-    upload_coco_annotations_to_biigle(volume_id, coco, filename_to_biigle_id=base_map)
-    attach_selection_reason_labels(volume_id, frames_df, filename_to_biigle_id=base_map)
+    image_ids = _image_ids_for_drop(volume_id, coco, frames_df, base_map)
+    result = upload_coco_annotations_to_biigle(
+        volume_id, coco, filename_to_biigle_id=image_ids
+    )
+    save_upload_record(drop_id, volume_id, coco, result)
+    attach_selection_reason_labels(
+        volume_id, frames_df, filename_to_biigle_id=image_ids
+    )
 
     db = DatabaseManager()
     db.update_biigle_volume_id(drop_id, volume_id)
@@ -819,13 +973,17 @@ def upload_frames_to_expert_survey_volume(
     return {"id": volume_id, "name": volume_name}
 
 
-def upload_to_survey_volume(drop_id: str, frame_paths: list, coco: dict) -> int:
+def upload_to_survey_volume(
+    drop_id: str, frame_paths: list, coco: dict, run: Optional[UploadRun] = None
+) -> int:
     """Upload a drop's frames + COCO to its SURVEY-level Biigle volume.
 
     The only part of this module that is genuinely training-specific: a
     survey-pooled volume and prefix rather than the per-drop ones the expert
-    path uses. Everything before it is shared.
+    path uses. Everything before it is shared. `run` as in
+    `upload_frames_to_expert_survey_volume`.
     """
+    run = run if run is not None else _PROCESS_RUN
     survey_id = config.get_survey_id_from_drop(drop_id)
     s3_prefix = config.get_training_frames_s3_prefix(survey_id)
     frames_df = pd.DataFrame({"FramePath": [str(p) for p in frame_paths]})
@@ -845,9 +1003,11 @@ def upload_to_survey_volume(drop_id: str, frame_paths: list, coco: dict) -> int:
         s3_frames_prefix=s3_prefix,
         file_names=file_names,
         media_type="image",
+        run=run,
     )
-    upload_coco_annotations_to_biigle(
+    result = upload_coco_annotations_to_biigle(
         volume_id, coco, filename_to_biigle_id=filename_to_id
     )
+    save_upload_record(drop_id, volume_id, coco, result, target="training")
     logging.info(f"{drop_id}: frames in Biigle volume {volume_id} ({volume_name})")
     return volume_id

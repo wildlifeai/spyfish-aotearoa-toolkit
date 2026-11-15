@@ -96,7 +96,7 @@ def trend_measure(trend_src: pd.DataFrame, map_sci: str | None) -> pd.DataFrame:
     cell holding only absences reads 0; `protection_trend` fills surveyed
     cells with no row at all with 0 as well.
     """
-    keys = ["survey_year", "protection"]
+    keys = ["survey_season", "protection"]
     if map_sci:
         subject = trend_src[trend_src["scientific_name"] == map_sci]
         return subject.groupby(keys)["maxn"].sum().reset_index(name="total")
@@ -112,7 +112,7 @@ def protection_trend(
 ) -> tuple[pd.DataFrame, list, pd.DataFrame]:
     """The populations trend: (trend, classes, effort with `protection`).
 
-    `trend` has one row per (survey_year, protection) over every year in the
+    `trend` has one row per (survey_season, protection) over every year in the
     surveyed range, with `value` and `analysed`. Empty when no deployment is
     dated. `classes` is the lines
     in drawing order; the effort frame is returned so the caller can describe
@@ -123,10 +123,10 @@ def protection_trend(
         trend_effort["protection_status"], by_status
     )
     effort_by_year = effort_per(
-        trend_effort.dropna(subset=["survey_year"]), ["survey_year", "protection"]
+        trend_effort.dropna(subset=["survey_season"]), ["survey_season", "protection"]
     )
 
-    trend_src = df_context.dropna(subset=["survey_year"]).copy()
+    trend_src = df_context.dropna(subset=["survey_season"]).copy()
     trend_src["protection"] = trend_protection(
         trend_src["protection_status"], by_status
     )
@@ -135,7 +135,7 @@ def protection_trend(
     # A complete year × protection grid, so years with no survey show as a gap in the
     # line rather than being closed up, a compressed axis silently implies continuous
     # monitoring that did not happen.
-    years_present = sorted(effort_by_year["survey_year"].dropna().unique())
+    years_present = sorted(effort_by_year["survey_season"].dropna().unique())
     # Which lines the grid holds: the two sides, or every status with either a
     # measurement or effort — a status surveyed but never sighted still gets a
     # line of real zeros rather than vanishing.
@@ -154,10 +154,10 @@ def protection_trend(
     full_years = range(int(min(years_present)), int(max(years_present)) + 1)
     grid = pd.MultiIndex.from_product(
         [list(full_years), classes],
-        names=["survey_year", "protection"],
+        names=["survey_season", "protection"],
     ).to_frame(index=False)
-    trend = grid.merge(measured, on=["survey_year", "protection"], how="left").merge(
-        effort_by_year, on=["survey_year", "protection"], how="left"
+    trend = grid.merge(measured, on=["survey_season", "protection"], how="left").merge(
+        effort_by_year, on=["survey_season", "protection"], how="left"
     )
     if map_sci:
         # Only years that were actually surveyed get a value; a surveyed year with
@@ -297,7 +297,7 @@ def reserve_trend_rows(frame: pd.DataFrame) -> pd.DataFrame:
     same as one where every drop was busy.
     """
     return frame[
-        frame["survey_year"].notna()
+        frame["survey_season"].notna()
         & frame["reserve_code"].notna()
         & (frame["reserve_code"] != "")
     ].copy()
@@ -314,11 +314,11 @@ def split_sides(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     (58% inside) read "Marine Reserve" — the same kind of place, labelled
     oppositely, and liable to flip when the year filter moved.
 
-    Adds `_side` and casts `survey_year` to int. The count is the annotation
+    Adds `_side` and casts `survey_season` to int. The count is the annotation
     rows dropped for a partial regime; unrecorded protection drops silently.
     """
     frame = frame.copy()
-    frame["survey_year"] = frame["survey_year"].astype(int)
+    frame["survey_season"] = frame["survey_season"].astype(int)
     frame = frame.assign(_side=protection_group(frame["protection_status"]))
     partial = int((frame["_side"] == OTHER_PROTECTION).sum())
     return frame[frame["_side"].isin([PROTECTED, UNPROTECTED])], partial
@@ -340,7 +340,7 @@ def _agg_selected_maxn(grp, species_list):
 def reserve_trend_series(
     sided: pd.DataFrame, metric: str, species: list | None = None
 ) -> pd.DataFrame:
-    """Per (reserve_code, survey_year, Side) value of `metric`, as `metric`.
+    """Per (reserve_code, survey_season, Side) value of `metric`, as `metric`.
 
     Richness is mean distinct real species per deployment, from the shared
     `data.richness_rollup` with the cell's own deployments as the effort, so
@@ -353,7 +353,7 @@ def reserve_trend_series(
     side) cell, absence records included, so a deployment that saw nothing
     counts as 0. `sided` comes from `split_sides`.
     """
-    keys = ["reserve_code", "survey_year", "_side"]
+    keys = ["reserve_code", "survey_season", "_side"]
     if metric == RICHNESS_METRIC:
         rolled = richness_rollup(sided, sided, by=keys)
         series = (
@@ -374,19 +374,19 @@ def reserve_trend_series(
 def linear_trends(series: pd.DataFrame, min_years: int) -> pd.DataFrame:
     """One row per (MPA, Side): fitted slope and a direction label.
 
-    A straight-line fit of `metric` on `survey_year`. Stable means the slope is
+    A straight-line fit of `metric` on `survey_season`. Stable means the slope is
     within 5% of the series mean per year. Fewer than `min_years` distinct
     years gets no slope and reads "insufficient data". Steepest rise first.
     """
     trend_rows = []
     for (reserve, side), grp in series.groupby(["reserve_code", "Side"]):
-        grp = grp.dropna(subset=["metric"]).sort_values("survey_year")
-        n_years = grp["survey_year"].nunique()
+        grp = grp.dropna(subset=["metric"]).sort_values("survey_season")
+        n_years = grp["survey_season"].nunique()
         prot = side
 
         if n_years < min_years:
-            first_year = int(grp["survey_year"].min()) if not grp.empty else None
-            latest_year = int(grp["survey_year"].max()) if not grp.empty else None
+            first_year = int(grp["survey_season"].min()) if not grp.empty else None
+            latest_year = int(grp["survey_season"].max()) if not grp.empty else None
             first_metric = (
                 round(float(grp["metric"].iloc[0]), 2) if not grp.empty else None
             )
@@ -408,7 +408,7 @@ def linear_trends(series: pd.DataFrame, min_years: int) -> pd.DataFrame:
             )
             continue
 
-        slope, _ = np.polyfit(grp["survey_year"].values, grp["metric"].values, 1)
+        slope, _ = np.polyfit(grp["survey_season"].values, grp["metric"].values, 1)
         # Stability threshold: 5% of the mean of the metric (per-year basis)
         eps = 0.05 * abs(grp["metric"].mean()) if grp["metric"].mean() else 0
         if slope > eps:
@@ -425,8 +425,8 @@ def linear_trends(series: pd.DataFrame, min_years: int) -> pd.DataFrame:
                 "n_years": int(n_years),
                 "slope": round(float(slope), 3),
                 "direction": direction,
-                "first_year": int(grp["survey_year"].min()),
-                "latest_year": int(grp["survey_year"].max()),
+                "first_year": int(grp["survey_season"].min()),
+                "latest_year": int(grp["survey_season"].max()),
                 "first_metric": round(float(grp["metric"].iloc[0]), 2),
                 "latest_metric": round(float(grp["metric"].iloc[-1]), 2),
             }

@@ -218,7 +218,7 @@ def process_zooniverse_clips(maxn_csv_path, output_selections_path, drop_id):
 
 def main(drop_id):
     logging.info(f"Running Zooniverse extraction for Drop ID: {drop_id}")
-    model_name = Path(config.pipeline_model_path).stem
+    model_name = config.pipeline_model_name
 
     input_maxn = str(config.get_maxn_csv_path(drop_id, model_name))
     output_selections = str(config.get_selections_csv_path(drop_id))

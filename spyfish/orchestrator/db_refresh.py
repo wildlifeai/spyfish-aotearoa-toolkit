@@ -118,20 +118,47 @@ def refresh_ml(db: DatabaseManager, model_name: str) -> int:
 # ── Pass 2. Zooniverse ───────────────────────────────────────────────────────
 
 
-def refresh_zooniverse(db: DatabaseManager) -> int:
+def _subject_set_listing():
+    """A loader for the Panoptes subject-set listing: fetched on first call, kept after.
+
+    One login and one paged listing of every source project's subject sets
+    (`subject_completion_from_api`) answers both Zooniverse passes of a
+    refresh, however many drops they ask about. Nothing is requested until a
+    pass actually needs it.
+    """
+    from spyfish.zooniverse.parse_classifications import (
+        connect_to_zooniverse,
+        subject_completion_from_api,
+    )
+
+    fetched = []
+
+    def load():
+        if not fetched:
+            connect_to_zooniverse()
+            fetched.append(subject_completion_from_api())
+        return fetched[0]
+
+    return load
+
+
+def refresh_zooniverse(db: DatabaseManager, subject_sets=None) -> int:
     """
     For ok drops not yet citsci_complete:
       - Zooniverse MaxN CSV on disk → ingest + citsci_complete (no API call).
       - No local CSV → one batch Panoptes API call; mark citsci_clips_uploaded
         for fully-retired drops so --zooniverse-sync fetches classifications.
 
+    `subject_sets` is a `_subject_set_listing()` loader shared with the
+    validation pass, so one refresh lists the subject sets once.
+
     Returns count of drops updated.
     """
     from spyfish.zooniverse.parse_classifications import (
-        connect_to_zooniverse,
         ingest_zooniverse_annotations,
-        subject_completion_from_api,
     )
+
+    subject_sets = subject_sets or _subject_set_listing()
 
     drops = _ok_drops_not_at(
         db, "citsci_status", [CitSciStatus.COMPLETE, CitSciStatus.SKIPPED]
@@ -162,8 +189,7 @@ def refresh_zooniverse(db: DatabaseManager) -> int:
     logging.info(
         f"  zoo: {len(needs_api)} drop(s) have no local MaxN CSV, checking Panoptes API..."
     )
-    connect_to_zooniverse()
-    completion = subject_completion_from_api()
+    completion = subject_sets()
 
     if completion is None or completion.empty:
         logging.warning("  zoo: Panoptes returned no subject sets, skipping API pass.")
@@ -315,25 +341,28 @@ def refresh_biigle(db: DatabaseManager) -> int:
 # ── Pass 4. Zooniverse validation sets ───────────────────────────────────────
 
 
-def refresh_zooniverse_validation(db: DatabaseManager) -> int:
+def refresh_zooniverse_validation(db: DatabaseManager, subject_sets=None) -> int:
     """zoo_frames_status / zoo_crops_status: a set on Zooniverse means uploaded.
 
     A database restored from S3, or one machine uploading while another holds
     the DB, can say `pending` for a drop whose `vframes_{drop}` or
     `crops_{drop}` set already exists. Left alone, the next run of that stage
     finds the set, compares it with a manifest it may not have, and raises.
-    One metadata query per candidate drop; drops already at uploaded,
-    complete or skipped are not asked about.
 
-    Never advances to COMPLETE: that needs the retirement check the validation
-    sync-back will do, and it is not built yet.
+    One subject-set listing for the whole pass (`subject_sets`, a
+    `_subject_set_listing()` loader, shared with the clips pass), matched to
+    the candidate drops in memory: never one query per drop. The subject
+    count is the set's own `set_member_subjects_count`. Drops already at
+    uploaded, complete or skipped are not candidates, and with no candidates
+    nothing is requested.
+
+    Never advances to COMPLETE: that is --zooniverse-validation-sync's job, and
+    it needs the answers, not just the set.
     """
-    from spyfish.zooniverse.upload import (
-        CROP_KIND,
-        VALIDATION_FRAME_KIND,
-        existing_subject_count,
-    )
+    from spyfish.zooniverse.upload import CROP_KIND, VALIDATION_FRAME_KIND
 
+    subject_sets = subject_sets or _subject_set_listing()
+    counts = None  # {(set type, drop_id): subjects}, built on the first candidate
     updated = 0
     for status, kind in (
         (ZooFramesStatus, VALIDATION_FRAME_KIND),
@@ -344,7 +373,9 @@ def refresh_zooniverse_validation(db: DatabaseManager) -> int:
             settled.append(status.SKIPPED)
         for row in _ok_drops_not_at(db, status.COLUMN, settled):
             drop_id = row["drop_id"]
-            count = existing_subject_count(kind, drop_id)
+            if counts is None:
+                counts = _upload_project_set_counts(subject_sets())
+            count = counts.get((kind.set_name_prefix.rstrip("_"), drop_id))
             if not count:
                 continue
             db.update_section_status(drop_id, status.COLUMN, status.UPLOADED)
@@ -354,6 +385,35 @@ def refresh_zooniverse_validation(db: DatabaseManager) -> int:
             )
             updated += 1
     return updated
+
+
+def _upload_project_set_counts(completion) -> dict:
+    """``{(set type, drop_id): subject count}`` for the upload project's sets.
+
+    Only the upload project's sets count: the stages create `vframes_` and
+    `crops_` sets there and nowhere else. Two sets with one name keep the
+    larger count.
+    """
+    project_id = config.zooniverse_project_id
+    if project_id not in config.zooniverse_source_project_ids:
+        # The listing covers the source projects only; without the upload
+        # project in it every drop would look like it has no set.
+        raise ValueError(
+            f"zooniverse.project_id {project_id} is not in "
+            "zooniverse.source_project_ids, so its subject sets are not listed."
+        )
+    counts: dict = {}
+    if completion is None or completion.empty:
+        return counts
+    mine = completion[
+        (completion["project_id"] == project_id) & completion["drop_id"].notna()
+    ]
+    for set_type, drop_id, total in zip(
+        mine["subject_set_type"], mine["drop_id"], mine["total"]
+    ):
+        key = (set_type, drop_id)
+        counts[key] = max(int(total), counts.get(key, 0))
+    return counts
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -373,8 +433,10 @@ def run_db_refresh(
     from spyfish.log_config import log_header
 
     db = DatabaseManager()
-    model_name = Path(config.pipeline_model_path).stem
+    model_name = config.pipeline_model_name
     total = 0
+    # Listed at most once per refresh, by whichever Zooniverse pass asks first.
+    subject_sets = _subject_set_listing()
 
     if ml:
         log_header("DB Refresh. ML")
@@ -384,7 +446,7 @@ def run_db_refresh(
 
     if zooniverse:
         log_header("DB Refresh. Zooniverse")
-        n = refresh_zooniverse(db)
+        n = refresh_zooniverse(db, subject_sets)
         logging.info(f"Zooniverse pass: {n} drop(s) updated.")
         total += n
 
@@ -396,7 +458,7 @@ def run_db_refresh(
 
     if zooniverse_validation:
         log_header("DB Refresh. Zooniverse validation sets")
-        n = refresh_zooniverse_validation(db)
+        n = refresh_zooniverse_validation(db, subject_sets)
         logging.info(f"Zooniverse validation pass: {n} drop(s) updated.")
         total += n
 

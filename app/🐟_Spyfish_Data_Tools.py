@@ -112,6 +112,7 @@ VIEW_ICONS = {
     "Operations home": "🔄",
     "MPA": "🛡️",
     "Surveys": "🗓️",
+    "Survey review": "🖼️",
     "Sites": "📍",
     "Deployments": "📺",
     "Annotations": "✏️",

@@ -29,7 +29,7 @@ rng = random.Random(42)
 # Scientific names must match the sample BUV Species.csv so registry lookups work.
 # Weights skew toward the indicator species so reserve-effect charts have signal.
 SPECIES_POOL = [
-    ("Pagrus auratus", 5),
+    ("Chrysophrys auratus", 5),
     ("Parapercis colias", 5),
     ("Jasus edwardsii", 3),
     ("Notolabrus celidotus", 3),

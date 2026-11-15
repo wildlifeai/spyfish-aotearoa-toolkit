@@ -196,15 +196,40 @@ def style(
     return fig
 
 
-def year_axis(fig: go.Figure) -> go.Figure:
-    """Year ticks as plain full numbers on the x-axis.
+# Seasons a year axis can label flat before the labels are turned upright.
+MAX_FLAT_SEASON_TICKS = 6
 
-    Year columns are ints, so Plotly treats the axis as continuous: on a wide
-    span it thins the ticks to every fifth or tenth year (a 15-year chart read
-    as holding two years), and its locale formatting can render 2024 as
-    "2,024". One tick per year, bare digits.
+
+def year_axis(fig: go.Figure) -> go.Figure:
+    """One x-axis tick per survey season, labelled `2026/27`.
+
+    Season columns are ints, so Plotly treats the axis as continuous: on a wide
+    span it thins the ticks to every fifth or tenth (a 15-season chart read as
+    holding two), and its locale formatting can render 2024 as "2,024". Every
+    season from the first to the last in the figure gets its own tick, and the
+    hover reads the same label.
     """
-    fig.update_xaxes(dtick=1, tickformat="d")
+    import pandas as pd
+    from ecology_data import season_label
+
+    seasons = [
+        int(x)
+        for trace in fig.data
+        if trace.x is not None
+        for x in trace.x
+        if pd.notna(x)
+    ]
+    if not seasons:
+        return fig
+    span = list(range(min(seasons), max(seasons) + 1))
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=span,
+        ticktext=[season_label(season) for season in span],
+        # `2010/11` is seven characters: flat, a long span runs the labels into
+        # each other. Upright past a handful of seasons.
+        tickangle=-90 if len(span) > MAX_FLAT_SEASON_TICKS else 0,
+    )
     return fig
 
 

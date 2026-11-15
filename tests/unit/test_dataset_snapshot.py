@@ -12,7 +12,9 @@ def _workspace(tmp_path):
     (src / "images" / "train").mkdir(parents=True)
     (src / "images" / "val").mkdir(parents=True)
     (src / "data.yaml").write_text(
-        yaml.safe_dump({"nc": 2, "names": ["fish", "Pagrus auratus"]}, sort_keys=False)
+        yaml.safe_dump(
+            {"nc": 2, "names": ["fish", "Chrysophrys auratus"]}, sort_keys=False
+        )
     )
     (src / "class_map.json").write_text('{"0": {"scientific_name": "fish"}}')
     stem = "KSF_20240124_BUV_KSF_085_01__frame_10.000s"
@@ -34,7 +36,7 @@ def test_snapshot_written_into_a_run_dir_that_has_no_weights_yet(tmp_path):
     assert snap == run_dir / "dataset"
     assert yaml.safe_load((snap / "data.yaml").read_text())["names"] == [
         "fish",
-        "Pagrus auratus",
+        "Chrysophrys auratus",
     ]
     assert (snap / "class_map.json").exists()
     assert (snap / "labels" / "train").glob("*.txt")
@@ -60,7 +62,7 @@ def test_snapshot_captures_the_dataset_at_call_time(tmp_path):
 
     assert yaml.safe_load((snap / "data.yaml").read_text())["names"] == [
         "fish",
-        "Pagrus auratus",
+        "Chrysophrys auratus",
     ]
     assert list((snap / "labels" / "train").glob("*.txt"))
 

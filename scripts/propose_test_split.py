@@ -24,6 +24,11 @@ import pandas as pd  # noqa: E402
 from spyfish.config.species import species_registry  # noqa: E402
 from spyfish.config.wrapper import config  # noqa: E402
 from spyfish.ml.training.prepare_training_data import canonicalize_species  # noqa: E402
+from spyfish.ml.training.rollup import (  # noqa: E402
+    ROLLUP_MAP_FILENAME,
+    read_rollup_map,
+)
+from spyfish.ml.training.yolo_labels import SPLITS  # noqa: E402
 
 SKIP_LABELS = {
     "Bait",
@@ -54,9 +59,21 @@ reg = species_registry()
 # ── Load and canonicalise to training classes ──────────────────────────────
 L = pd.read_csv(out / "biigle_label_by_drop.csv")
 L = L[~L.label_name.isin(SKIP_LABELS) & (L.n_frames > 0)].copy()
-L["cls"] = L.label_name.map(
-    lambda n: "(empty)" if n == "(empty frame)" else canonicalize_species(n)
-)
+# Taxa are grouped the way the last data prep trained them (rollup_map.json),
+# so stratification is over model classes, not labels; without a data prep on
+# disk every taxon is its own class.
+_rollup = read_rollup_map(config.training_dataset_dir / ROLLUP_MAP_FILENAME)
+_rollup_map = _rollup["map"] if _rollup else {}
+
+
+def to_class(label: str) -> str:
+    if label == "(empty frame)":
+        return "(empty)"
+    taxon = canonicalize_species(label)
+    return _rollup_map.get(taxon, taxon)
+
+
+L["cls"] = L.label_name.map(to_class)
 L = L[~L.cls.isin(config.training_excluded_species)]
 L = L[~L.drop_id.isin(config.training_excluded_drops)]
 
@@ -313,7 +330,7 @@ rows = pd.DataFrame(
         "reason": ["; ".join(reason[d]) for d in drops],
         "reserve": [reserve[d] for d in drops],
         "survey": [
-            "_".join(d.split("_")[:3]) if has_location[d] else "" for d in drops
+            config.get_survey_id_from_drop(d) if has_location[d] else "" for d in drops
         ],
         "depth_m": [meta.depth.get(d) for d in drops],
         "depth_band": [band[d] for d in drops],
@@ -334,10 +351,7 @@ rows.to_csv(out / "proposed_split.csv", index=False)
 
 cov = []
 for c in sorted(n_drops, key=lambda c: n_drops[c]):
-    per = {
-        s: [d for d in drops if split[d] == s and c in by_drop[d]]
-        for s in ("train", "val", "test")
-    }
+    per = {s: [d for d in drops if split[d] == s and c in by_drop[d]] for s in SPLITS}
     cov.append(
         {
             "class": common(c),

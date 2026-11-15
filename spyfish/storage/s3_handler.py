@@ -469,7 +469,14 @@ class S3Handler:
         """
         results: Union[Set[str], List[Dict[str, Any]]] = set() if keys_only else []
         paginator = self.s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+        # RestoreStatus rides along on the listing (one request per 1,000 keys),
+        # so "archived but readable right now" is known for every object without
+        # a head_object each. Objects never restored simply lack the field.
+        for page in paginator.paginate(
+            Bucket=self.bucket,
+            Prefix=prefix,
+            OptionalObjectAttributes=["RestoreStatus"],
+        ):
             for obj in page.get("Contents", []):
                 if not suffixes or obj["Key"].lower().endswith(tuple(suffixes)):
                     if keys_only:
@@ -662,6 +669,34 @@ class S3Handler:
             "storage_class": response.get("StorageClass", "STANDARD"),
             "restore": response.get("Restore"),
         }
+
+    @staticmethod
+    def effective_storage_class(obj: Dict[str, Any]) -> str:
+        """The storage class that matters to the pipeline: can it be read NOW?
+
+        Takes one entry from ``get_objects_from_s3(keys_only=False)``. A
+        DEEP_ARCHIVE object with a finished restore has a readable temporary
+        copy until ``RestoreExpiryDate``, and for every downstream decision
+        (download it? mark it present?) that makes it STANDARD for the moment.
+        Everything else returns its own class, with the listing's omission of
+        StorageClass for standard objects normalised to "STANDARD".
+
+        ``RestoreStatus`` is only present when the listing was made with
+        ``OptionalObjectAttributes=["RestoreStatus"]`` and the object has ever
+        had a restore requested, so it is read defensively.
+        """
+        storage_class = obj.get("StorageClass", "STANDARD")
+        status = obj.get("RestoreStatus") or {}
+        if status.get("IsRestoreInProgress"):
+            return storage_class
+        expiry = status.get("RestoreExpiryDate")
+        if expiry is not None:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=datetime.timezone.utc)
+            if expiry > now:
+                return "STANDARD"
+        return storage_class
 
     def is_restored(self, key: str) -> bool:
         """True while an archived object has a readable temporary copy.

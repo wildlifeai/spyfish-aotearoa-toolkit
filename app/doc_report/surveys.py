@@ -11,7 +11,7 @@ on S3, wiring them in is a possible future enhancement.
 
 import plotly.express as px
 import streamlit as st
-from ecology_data import NO_SHAREPOINT_RECORD  # noqa: E402
+from ecology_data import NO_SHAREPOINT_RECORD, season_label  # noqa: E402
 from theme import SINGLE_SERIES
 
 from spyfish.config.base import IngestStatus, VideoPresence
@@ -38,7 +38,7 @@ def render(ctx: dict) -> None:
         ]
     )
 
-    dated = dep[dep["survey_year"].notna()]
+    dated = dep[dep["survey_season"].notna()]
 
     # ── Headline counts ──────────────────────────────────────────────────────
     # Widest thing first: MPAs contain sites, sites hold deployments, and
@@ -56,8 +56,9 @@ def render(ctx: dict) -> None:
     kpis[3].metric("Deployments", f"{dep['drop_id'].nunique():,}")
     if not dated.empty:
         kpis[4].metric(
-            "Survey years",
-            f"{int(dated['survey_year'].min())}–{int(dated['survey_year'].max())}",
+            "Survey seasons",
+            f"{season_label(dated['survey_season'].min())}–"
+            f"{season_label(dated['survey_season'].max())}",
         )
 
     # Per-survey averages, copied from the Deployment Management page's Survey
@@ -117,7 +118,7 @@ def render(ctx: dict) -> None:
     section("Survey activity")
     st.caption(
         "Counts what is in the database, not what was planned. Deployments per "
-        "year is on Report home, split usable against bad, and on Operations "
+        "season is on Report home, split usable against bad, and on Operations "
         "home, split by ingest status."
     )
 
@@ -126,16 +127,16 @@ def render(ctx: dict) -> None:
         return
 
     per_year = (
-        dated.groupby(dated["survey_year"].astype(int))
+        dated.groupby(dated["survey_season"].astype(int))
         .agg(Deployments=("drop_id", "nunique"), Surveys=("survey_id", "nunique"))
         .reset_index()
-        .rename(columns={"survey_year": "Year"})
+        .rename(columns={"survey_season": "Survey season"})
     )
 
-    # Surveys per year only. Deployments per year belongs to the two views that
+    # Surveys per season only. Deployments per season belongs to the two views that
     # already draw it; this is the one view that counts surveys.
-    st.markdown("**Surveys per year**")
-    fig = px.bar(per_year, x="Year", y="Surveys", text="Surveys")
+    st.markdown("**Surveys per season**")
+    fig = px.bar(per_year, x="Survey season", y="Surveys", text="Surveys")
     fig.update_traces(
         marker_color=SINGLE_SERIES, textposition="outside", cliponaxis=False
     )
@@ -182,7 +183,7 @@ def render(ctx: dict) -> None:
         )
         .groupby("survey_id")
         .agg(
-            Year=("survey_year", "first"),
+            Year=("survey_season", "first"),
             Deployments=("drop_id", "nunique"),
             Sites=("site_id", "nunique"),
             Ingested=(IngestStatus.COLUMN, lambda s: (s == IngestStatus.OK).sum()),
@@ -202,7 +203,7 @@ def render(ctx: dict) -> None:
         .rename(columns={"survey_id": "Survey"})
         .sort_values("Year", ascending=False)
     )
-    table["Year"] = table["Year"].astype("Int64")
+    table["Season"] = table["Year"].map(season_label)
     # Percentages are stored 0-100, not 0-1. `ProgressColumn`'s `format` is
     # a printf applied to the raw value, so "%.0f%%" on a 0-1 fraction
     # prints "0%" for everything under half and "1%" for a full bar.
@@ -231,7 +232,7 @@ def render(ctx: dict) -> None:
         height=420,
         column_order=[
             "Survey",
-            "Year",
+            "Season",
             "Sites",
             "Deployments",
             "Ingested",

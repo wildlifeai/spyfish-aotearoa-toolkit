@@ -1,4 +1,7 @@
 #!/bin/bash -e
+# SUPERSEDED (2026-11-03) by scripts/slurm/cpu.sl and gpu.sl: same resources,
+# but the command is passed on the sbatch line instead of uncommented here.
+# Kept until the new files have run once.
 #SBATCH --job-name=spyfish
 #SBATCH --account=wildlife03546
 #SBATCH --partition=genoa
@@ -51,5 +54,9 @@ mkdir -p slurm_logs
 export YOLO_CONFIG_DIR="${PROJECT_DIR}/.ultralytics"
 mkdir -p "${YOLO_CONFIG_DIR}"
 
+# Start/end stamps go to stderr: INFO logging goes to .out, WARNING and above
+# to .err (log_config.py), so an .err holding only these two lines is a clean run.
+echo "START $(date '+%F %T') job=${SLURM_JOB_ID:-none} host=$(hostname) cmd=${CMD}" >&2
 echo "Running: ${CMD}"
 eval "${CMD}"
+echo "END   $(date '+%F %T') job=${SLURM_JOB_ID:-none}" >&2

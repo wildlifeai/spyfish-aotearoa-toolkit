@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import pandas as pd
 
 from spyfish.config.wrapper import config
+from spyfish.ml.training.yolo_labels import iter_class_ids
 
 # ---------------------------------------------------------------------------
 # Core split algorithm
@@ -33,21 +34,23 @@ def split_drops_by_survey(
     drop_ids: List[str],
     train_pct: float = 0.80,
     val_pct: float = 0.10,
-    test_pct: float = 0.10,
     force_train_drops: Optional[set] = None,
     seed: int = 42,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
-    Assign each DropID to train, val, or test, stratified by survey.
+    Assign each DropID to train or val, stratified by survey.
+
+    Test is never drawn here: it comes only from the frozen list
+    (training.test_drops_file, applied by apply_frozen_test), because a test
+    set re-drawn every run makes test scores incomparable between models.
 
     Per-survey donation rule (n = drops in survey):
       - val_take  = max(1, ceil(n * val_pct))   if n >= 2 and val_pct > 0
-      - test_take = max(1, ceil(n * test_pct))  if n >= 3 and test_pct > 0
-      - train_take = n - val_take - test_take   (always >= 1; donations are
-        clipped if they would empty train)
+      - train_take = n - val_take   (always >= 1; val is clipped if it would
+        empty train)
 
     The min-1 floor means any survey large enough to qualify contributes at
-    least one drop to val (and to test, when enabled), so small surveys
+    least one drop to val, so small surveys
     aren't silently dropped from evaluation. Singleton surveys go entirely
     to train, losing the only drop to val would mean a species seen there
     would never be in train.
@@ -62,16 +65,14 @@ def split_drops_by_survey(
     Args:
         drop_ids: List of all drop IDs.
         train_pct: Target fraction (summary printout only, derived from
-            val_pct/test_pct in the actual algorithm).
+            val_pct in the actual algorithm).
         val_pct: Per-survey fraction donated to val.
-        test_pct: Per-survey fraction donated to test (0 disables test).
         seed: Random seed for reproducibility.
 
     Returns:
-        (train_drops, val_drops, test_drops)
+        (train_drops, val_drops, []): test is always empty here.
     """
     rng = random.Random(seed)
-    include_test = test_pct > 0
     force_train = set(force_train_drops or set())
 
     # Pull forced drops out of the survey-grouped pool first; they bypass the
@@ -110,20 +111,10 @@ def split_drops_by_survey(
         n = len(drops)
 
         val_take = max(1, math.ceil(n * val_pct)) if n >= 2 and val_pct > 0 else 0
-        test_take = max(1, math.ceil(n * test_pct)) if include_test and n >= 3 else 0
-
-        # Always leave at least 1 drop in train. Trim test first, then val.
-        overflow = (val_take + test_take) - (n - 1)
-        if overflow > 0:
-            trim_test = min(overflow, test_take)
-            test_take -= trim_test
-            overflow -= trim_test
-            if overflow > 0:
-                val_take = max(0, val_take - overflow)
+        val_take = min(val_take, n - 1)  # always leave at least 1 drop in train
 
         val_drops.extend(drops[:val_take])
-        test_drops.extend(drops[val_take : val_take + test_take])
-        train_drops.extend(drops[val_take + test_take :])
+        train_drops.extend(drops[val_take:])
 
     total = len(train_drops) + len(val_drops) + len(test_drops)
     logging.info(
@@ -131,7 +122,6 @@ def split_drops_by_survey(
         f"  Total drops: {total}\n"
         f"  Train:       {len(train_drops)} ({len(train_drops) / total:.0%}), target {train_pct:.0%}\n"
         f"  Val:         {len(val_drops)}  ({len(val_drops) / total:.0%}), target {val_pct:.0%}\n"
-        f"  Test:        {len(test_drops)} ({len(test_drops) / total:.0%}), target {test_pct:.0%}\n"
         f"====================\n"
     )
 
@@ -179,9 +169,17 @@ def write_split_txt(
 
 
 def _per_drop_species_counts(
-    labels_staged_dir: Path, species_names: List[str], drops: Set[str]
+    labels_staged_dir: Path,
+    species_names: List[str],
+    drops: Set[str],
+    name_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, Counter], Counter]:
     """``({drop: Counter(species -> box_count)}, Counter(species -> frame_count))``.
+
+    ``name_map`` (taxon -> training class, the pre-split rollup estimate) makes
+    the counts per CLASS rather than per labelled taxon, so a pool such as
+    Anguilliformes is balanced as one thing and not as morays and congers
+    separately.
 
     Decodes staged-label class IDs straight through ``species_names`` (index ==
     ID, the same unified ordering ``flatten_and_remap_labels`` wrote), no
@@ -203,15 +201,10 @@ def _per_drop_species_counts(
         c: Counter = Counter()
         for txt in d.glob("*.txt"):
             in_frame = set()
-            for line in txt.read_text().splitlines():
-                parts = line.split()
-                if not parts:
-                    continue
-                try:
-                    cid = int(parts[0])
-                except ValueError:
-                    continue
+            for cid in iter_class_ids(txt):
                 name = id_to_name.get(cid)
+                if name and name_map:
+                    name = name_map.get(name, name)
                 if name:
                     c[name] += 1
                     in_frame.add(name)
@@ -233,6 +226,7 @@ def balance_val_drops(
     max_share: float = 1.0,
     min_boxes: int = 0,
     floor_min_frames: int = 0,
+    name_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Greedy species-balanced val selection (the in-pipeline suggester).
 
@@ -262,15 +256,19 @@ def balance_val_drops(
     feasible drop is left, emptying train to satisfy one rare class.
 
     ``floor_min_frames`` (``class_floor_min_images``) stops the floor being
-    spent on species that will not survive to be classes. ``apply_post_assembly_floor``
-    merges anything under that many train frames into 'fish' AFTER assembly, so
+    spent on species that will not survive to be classes. The rollup
+    (``rollup.py``) pools anything under that many train frames AFTER assembly, so
     lifting the val target for, say, Notolabrus fucicola (24 frames) only pulls
     drops out of train for a class that is about to be deleted. 0 disables the
     check and lifts every species.
+
+    ``name_map`` is the pre-split rollup estimate (``rollup.compute_rollup`` on
+    capped frame counts): taxa are balanced as the class they will train as, so
+    the balancer and the post-assembly rollup agree on what a class is.
     """
     force_train = set(force_train or set())
     per_drop, frames_per_species = _per_drop_species_counts(
-        labels_staged_dir, species_names, set(candidate_drops)
+        labels_staged_dir, species_names, set(candidate_drops), name_map
     )
 
     total: Counter = Counter()
@@ -305,8 +303,8 @@ def balance_val_drops(
         if skipped:
             logging.info(
                 f"balance_val_drops: floor NOT lifted for {len(skipped)} species "
-                f"under {floor_min_frames} frames (they merge into 'fish' at the "
-                f"post-assembly floor): {skipped}"
+                f"under {floor_min_frames} frames (the rollup pools them after "
+                f"assembly): {skipped}"
             )
         if lifted:
             moves = {
@@ -467,7 +465,6 @@ def split_data(
     """
     train_pct = config.training_train_pct
     val_pct = config.training_val_pct
-    test_pct = config.training_test_pct
 
     maxn_drops = balanced_df["DropID"].unique().tolist()
     if len(maxn_drops) == 0 and not extra_drop_ids:
@@ -478,7 +475,6 @@ def split_data(
         all_drop_ids,
         train_pct=train_pct,
         val_pct=val_pct,
-        test_pct=test_pct,
         force_train_drops=force_train_drops_from_volumes(
             config.training_force_train_biigle_volumes
         ),

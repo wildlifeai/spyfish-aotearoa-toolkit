@@ -1,4 +1,5 @@
 import logging
+import sys
 from datetime import datetime as dt
 from pathlib import Path
 
@@ -48,10 +49,22 @@ if config.log_output == "file":
         force=True,
     )
 else:
-    # Default to console output
+    # Console output, split by level so SLURM's two files mean something:
+    # INFO (the run narrative) goes to stdout -> the .out file; WARNING and
+    # above go to stderr -> the .err file, next to uncaught tracebacks and
+    # slurmstepd's own messages (time limit, OOM). A healthy run therefore
+    # leaves an empty .err. In a terminal both streams print to the same
+    # screen, so interactive runs still show everything.
+    # (Python's default handler sends EVERY level to stderr, which is why the
+    # .err file used to hold the whole log and .out only progress bars.)
+    _stdout_handler = logging.StreamHandler(sys.stdout)
+    _stdout_handler.addFilter(lambda record: record.levelno < logging.WARNING)
+    _stderr_handler = logging.StreamHandler(sys.stderr)
+    _stderr_handler.setLevel(logging.WARNING)
     logging.basicConfig(
         level="INFO",
         format=format_string,
+        handlers=[_stdout_handler, _stderr_handler],
         force=True,
     )
 

@@ -9,8 +9,11 @@ Provides functionality to interact with the Biigle API:
 
 import io
 import logging
+import threading
 import time
 import zipfile
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
@@ -23,17 +26,105 @@ ResourceType = Literal["volumes", "projects"]
 MAX_DEPTH = 2
 
 
+class BiigleRateLimitError(HTTPError):
+    """BIIGLE kept answering 429 after the bounded waits; stop, do not retry.
+
+    An HTTPError carrying the 429 response, so handlers that look at
+    `e.response.status_code` keep working. Once raised, every later BIIGLE
+    request in this process raises it again without being sent (see
+    `_RateLimit`): the account was locked on 2026-10-16 by code that carried
+    on after a 429.
+    """
+
+
+class _RateLimit:
+    """Process-wide 429 state, shared by every handler and every thread.
+
+    `resume_at` is the moment (time.monotonic) before which no request may
+    start: one 429 pauses all threads for the server's Retry-After, not only
+    the thread that received it. `gave_up` holds the 429 response that used up
+    the retries; from then on nothing is sent for the rest of the process.
+    """
+
+    lock = threading.Lock()
+    resume_at = 0.0
+    gave_up: Any = None
+
+    @classmethod
+    def reset(cls) -> None:
+        """Clear the state (tests; a long-lived session after the limit lifts)."""
+        with cls.lock:
+            cls.resume_at = 0.0
+            cls.gave_up = None
+
+
+def _retry_after_secs(response: Any) -> Optional[float]:
+    """Seconds the 429's Retry-After header asks for, None if absent/unreadable.
+
+    The header is either a number of seconds or an HTTP date.
+    """
+    raw = (getattr(response, "headers", None) or {}).get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        when = parsedate_to_datetime(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
 class _ApiWithTimeout(Api):
-    """Thin subclass that injects a timeout into every request.
+    """Thin subclass that injects a timeout and 429 handling into every request.
 
     The vendored biigle_api.py must not be modified (upstream file). This
     subclass overrides call() to set a default timeout so no request can hang
     indefinitely. Callers can still override per-request by passing timeout=N.
+
+    A 429 is waited out for as long as its Retry-After says (or
+    `fallback_wait` when the header is missing) and the request is sent again,
+    at most `max_retries` times. A 429 means the request was not processed, so
+    resending is safe for POSTs too. Still 429 after that, or a Retry-After
+    longer than `max_wait`, raises `BiigleRateLimitError` and ends BIIGLE
+    traffic for the process. No other status is retried.
     """
 
-    def __init__(self, *args: Any, timeout: int = 30, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        timeout: int = 30,
+        max_retries: int = 0,
+        fallback_wait: float = 60.0,
+        max_wait: float = 300.0,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._timeout = timeout
+        self._max_retries = max_retries
+        self._fallback_wait = fallback_wait
+        self._max_wait = max_wait
+
+    @staticmethod
+    def _wait_until_allowed(url: str) -> None:
+        """Sleep through a pause another request's 429 set; raise once given up."""
+        while True:
+            with _RateLimit.lock:
+                if _RateLimit.gave_up is not None:
+                    raise BiigleRateLimitError(
+                        f"BIIGLE rate limit (429) was hit earlier in this run and "
+                        f"the retries are used up; not sending {url}. Wait before "
+                        "running again.",
+                        response=_RateLimit.gave_up,
+                    )
+                delay = _RateLimit.resume_at - time.monotonic()
+            if delay <= 0:
+                return
+            time.sleep(delay)
 
     def call(
         self,
@@ -44,7 +135,45 @@ class _ApiWithTimeout(Api):
         **kwargs: Any,
     ) -> Any:
         kwargs.setdefault("timeout", self._timeout)
-        return super().call(method, url, raise_for_status, *args, **kwargs)
+        attempt = 0
+        while True:
+            self._wait_until_allowed(url)
+            try:
+                response = super().call(method, url, raise_for_status, *args, **kwargs)
+            except HTTPError as e:
+                if e.response is None or e.response.status_code != 429:
+                    raise
+                response = e.response
+            if response.status_code != 429:
+                return response
+
+            asked = _retry_after_secs(response)
+            wait = self._fallback_wait if asked is None else asked
+            if attempt >= self._max_retries or wait > self._max_wait:
+                with _RateLimit.lock:
+                    _RateLimit.gave_up = response
+                raise BiigleRateLimitError(
+                    f"BIIGLE rate limit (429) on {url}: "
+                    + (
+                        f"Retry-After {wait:.0f}s is over the "
+                        f"{self._max_wait:.0f}s this run will wait"
+                        if wait > self._max_wait
+                        else f"still limited after {attempt} wait(s)"
+                    )
+                    + ". No further BIIGLE requests will be sent by this run.",
+                    response=response,
+                )
+            attempt += 1
+            with _RateLimit.lock:
+                _RateLimit.resume_at = max(
+                    _RateLimit.resume_at, time.monotonic() + wait
+                )
+            logging.warning(
+                f"BIIGLE rate limit (429) on {url}: pausing all BIIGLE requests "
+                f"{wait:.0f}s "
+                + ("(Retry-After)" if asked is not None else "(no Retry-After header)")
+                + f", retry {attempt}/{self._max_retries}."
+            )
 
 
 class BiigleHandler:
@@ -59,7 +188,12 @@ class BiigleHandler:
         self.token = token or config.token
         try:
             self.api = _ApiWithTimeout(
-                self.email, self.token, timeout=config.request_timeout_secs
+                self.email,
+                self.token,
+                timeout=config.request_timeout_secs,
+                max_retries=config.rate_limit_max_retries,
+                fallback_wait=config.rate_limit_fallback_wait_secs,
+                max_wait=config.rate_limit_max_wait_secs,
             )
         except Exception as e:
             raise Exception(f"Failed to initialize BIIGLE API: {e}") from e
@@ -266,6 +400,8 @@ class BiigleHandler:
                         )
 
                     return best_match["id"]
+            except BiigleRateLimitError:
+                raise  # polling on would only add requests to a limited account
             except Exception as e:
                 logging.warning(
                     f"Attempt {attempt}/{max_tries}: failed to list volumes, {e}"
@@ -356,7 +492,8 @@ class BiigleHandler:
                 json={
                     "name": tree_name,
                     "description": tree_description,
-                    "visibility_id": 2,  # Private
+                    "visibility": 2,  # Private; BIIGLE renamed visibility_id -> visibility
+                    "visibility_id": 2,  # older servers
                     "project_id": project_id,
                 },
             )
@@ -422,7 +559,10 @@ class BiigleHandler:
         if type_id is None:
             type_id = config.annotation_report_type_video
         resp = self.api.post(
-            f"{resource}/{resource_id}/reports", json={"type_id": type_id}
+            f"{resource}/{resource_id}/reports",
+            # BIIGLE renamed type_id -> type when reports moved into core
+            # (2026-10); send both so old and new servers accept it
+            json={"type": type_id, "type_id": type_id},
         )
         resp.raise_for_status()
         report_id = resp.json()["id"]
@@ -568,37 +708,61 @@ class BiigleHandler:
 
     def get_volume_images(self, volume_id: int) -> List[Dict[str, Any]]:
         """
-        Get the full information for all images in a volume by first getting the list of file IDs,
-        then fetching each image's details concurrently.
-        Returns list of {"id": int, "filename": str, ...}
+        Every image of a volume as ``{"id": int, "filename": str}``.
+
+        One request: GET /api/v1/volumes/{id}/filenames returns the whole
+        id -> filename map. The previous approach (``/files`` for the ids, then
+        one ``/images/{id}`` per image) cost a request per image, hit BIIGLE's
+        rate limit (429) on a 79-volume backfill, and silently dropped every
+        image whose request failed. Falls back to that per-image path only if
+        the endpoint is missing, and then raises rather than return a list with
+        holes: callers write "frames the expert was shown" from this, and a
+        short list is wrong data, not partial data.
         """
-        import concurrent.futures
+        import requests
 
         try:
-            file_ids = self.get_volume_file_ids(volume_id)
-            if not file_ids:
-                return []
-
-            def _fetch_img(fid: int):
-                try:
-                    return self.api.get(f"images/{fid}").json()
-                except Exception as e:
-                    logging.warning(f"Could not fetch image {fid}: {e}")
-                    return None
-
-            images = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                for img in executor.map(_fetch_img, file_ids):
-                    if img:
-                        images.append(img)
-
-            logging.info(
-                f"Retrieved {len(images)} images concurrently for volume {volume_id}."
-            )
+            response = self.api.get(f"volumes/{volume_id}/filenames")
+            mapping = response.json()
+            images = [{"id": int(i), "filename": f} for i, f in mapping.items()]
+            logging.info(f"Volume {volume_id}: {len(images)} filename(s).")
             return images
-        except Exception as e:
-            logging.error(f"Failed to get images for volume {volume_id}: {e}")
-            raise
+        except requests.exceptions.HTTPError as e:
+            if e.response is None or e.response.status_code != 404:
+                logging.error(f"Failed to get filenames for volume {volume_id}: {e}")
+                raise
+        logging.warning(
+            f"Volume {volume_id}: /filenames unavailable, falling back to one "
+            f"request per image."
+        )
+        return self._get_volume_images_per_image(volume_id)
+
+    def _get_volume_images_per_image(self, volume_id: int) -> List[Dict[str, Any]]:
+        """Per-image fallback for get_volume_images; raises if any image fails."""
+        import concurrent.futures
+
+        file_ids = self.get_volume_file_ids(volume_id)
+        if not file_ids:
+            return []
+        failed: List[int] = []
+
+        def _fetch_img(fid: int):
+            try:
+                return self.api.get(f"images/{fid}").json()
+            except Exception as e:
+                logging.warning(f"Could not fetch image {fid}: {e}")
+                failed.append(fid)
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            images = [img for img in executor.map(_fetch_img, file_ids) if img]
+        if failed:
+            raise RuntimeError(
+                f"Volume {volume_id}: {len(failed)} of {len(file_ids)} image "
+                f"lookup(s) failed; refusing to return an incomplete list."
+            )
+        logging.info(f"Retrieved {len(images)} images for volume {volume_id}.")
+        return images
 
     def get_video_labels(self, video_id: int) -> List[Dict[str, Any]]:
         """
@@ -686,12 +850,17 @@ class BiigleHandler:
         case and is reported by Biigle as an error; the caller counts those
         separately rather than pre-fetching every image's labels, which would
         double the request count to prevent a harmless no-op.
+
+        The one failure that IS raised is `BiigleRateLimitError`: a hint is not
+        worth another request to an account that is being rate limited.
         """
         try:
             response = self.api.post(
                 f"images/{image_id}/labels", json={"label_id": int(label_id)}
             )
             return response.json()
+        except BiigleRateLimitError:
+            raise
         except Exception as e:
             logging.warning(
                 f"Could not attach label {label_id} to image {image_id}: {e}"
@@ -699,24 +868,39 @@ class BiigleHandler:
             return None
 
     def attach_image_labels(self, pairs: List[Tuple[int, int]]) -> int:
-        """Attach many whole-image labels concurrently. Returns the success count.
+        """Attach many whole-image labels. Returns the success count.
 
         Biigle has no bulk image-label endpoint (unlike annotations, which take
-        an array), so this is genuinely one request per pair. Threaded at the
-        same width as `get_volume_images`, which already pays a per-image cost
-        in this same upload path, so the wall-clock addition is seconds.
+        an array), so this is genuinely one request per pair. They go out on
+        `biigle.image_label_workers` threads: a few, because a drop is only
+        some tens of pairs and a wide burst is what a rate limit punishes.
+
+        Raises `BiigleRateLimitError` if BIIGLE stays at 429 after the bounded
+        waits. Pairs not yet sent are then never sent.
         """
         if not pairs:
             return 0
 
         import concurrent.futures
 
-        logging.info(f"Attaching {len(pairs)} whole-image label(s) concurrently...")
+        workers = config.image_label_workers
+        logging.info(
+            f"Attaching {len(pairs)} whole-image label(s) on {workers} thread(s)..."
+        )
+        stop = threading.Event()
+
+        def _attach(pair: Tuple[int, int]) -> Optional[dict]:
+            if stop.is_set():
+                return None
+            try:
+                return self.attach_image_label(pair[0], pair[1])
+            except BiigleRateLimitError:
+                stop.set()
+                raise
+
         attached = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-            results = executor.map(
-                lambda pair: self.attach_image_label(pair[0], pair[1]), pairs
-            )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            results = executor.map(_attach, pairs)
             for result in results:
                 if result is not None:
                     attached += 1
@@ -811,7 +995,7 @@ class BiigleHandler:
         [
             {
                 "image_id": 12345,
-                "shape_id": 5,          # 5 = Rectangle
+                "shape": 5,             # 5 = Rectangle (BIIGLE renamed shape_id -> shape)
                 "points": [x1, y1, x2, y1, x2, y2, x1, y2], # 8 points flat mapped
                 "label_id": 6789,
                 "confidence": 0.85

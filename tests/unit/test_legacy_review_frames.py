@@ -39,20 +39,20 @@ def _plain_labels(monkeypatch):
 
 def test_peak_is_highest_count_earliest_tie():
     rows = _rows(
-        ("Pagrus auratus", 4, 1727.0),
-        ("Pagrus auratus", 6, 1988.0),
-        ("Pagrus auratus", 6, 1898.0),
+        ("Chrysophrys auratus", 4, 1727.0),
+        ("Chrysophrys auratus", 6, 1988.0),
+        ("Chrysophrys auratus", 6, 1898.0),
         ("Parapercis colias", 4, 676.0),
     )
     peaks = legacy_review_moments(rows, n_random=0, seed=DROP)
     assert peaks["kind"].eq(KIND_PEAK).all()
-    snapper = peaks[peaks.scientific_name == "Pagrus auratus"].iloc[0]
+    snapper = peaks[peaks.scientific_name == "Chrysophrys auratus"].iloc[0]
     assert (snapper.max_interval, snapper.time_of_max_seconds) == (6, 1898.0)
     assert len(peaks) == 2
 
 
 def test_random_intervals_are_seeded_and_never_the_peak():
-    rows = _rows(*[("Pagrus auratus", 1, 30.0 * i) for i in range(1, 20)])
+    rows = _rows(*[("Chrysophrys auratus", 1, 30.0 * i) for i in range(1, 20)])
     rows.loc[5, "max_interval"] = 5  # the peak at 180 s
     a = legacy_review_moments(rows, n_random=3, seed=DROP)
     b = legacy_review_moments(rows, n_random=3, seed=DROP)
@@ -110,7 +110,7 @@ def test_writes_clean_frame_once_and_qa_copy_per_model(pipeline_env):
             {
                 "frame": 6,
                 "time_seconds": 2.0,
-                "class": "Pagrus auratus",
+                "class": "Chrysophrys auratus",
                 "confidence": 0.9,
                 "x": 32,
                 "y": 24,
@@ -131,10 +131,10 @@ def test_writes_clean_frame_once_and_qa_copy_per_model(pipeline_env):
     )
     ann = _AnnDb(
         [
-            _legacy("Pagrus auratus", 3, 2.1),
+            _legacy("Chrysophrys auratus", 3, 2.1),
             _legacy(NULL_DEPLOYMENT, 0, None),  # absence row, never a frame
             _legacy(
-                "Pagrus auratus", 9, 2.5, external_id="52605406"
+                "Chrysophrys auratus", 9, 2.5, external_id="52605406"
             ),  # BIIGLE, not legacy
         ]
     )
@@ -143,7 +143,7 @@ def test_writes_clean_frame_once_and_qa_copy_per_model(pipeline_env):
     assert len(first) == 1
     qa = first[0]
     assert qa.parent == config.get_drop_dir(DROP) / "qa_frames" / "legacy" / "model_a"
-    assert "Pagrus_auratus__n3__legacy_maxn" in qa.name
+    assert "Chrysophrys_auratus__n3__legacy_maxn" in qa.name
     # Clean frame carries the RAW frame's second (2.0), the nearest within 0.5 s
     # of the legacy 2.1, so the boxes match the pixels.
     clean = config.get_frames_dir(DROP) / f"{DROP}__frame_0002.000s.jpg"

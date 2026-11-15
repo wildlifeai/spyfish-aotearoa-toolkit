@@ -35,7 +35,10 @@ import pandas as pd
 
 from spyfish.config.wrapper import config
 from spyfish.database.manager import DatabaseManager
-from spyfish.ml.run_inference import get_video_fps, run_yolo_inference
+from spyfish.extraction.render_annotations import best_iou, center_to_corners
+from spyfish.extraction.video_io import get_video_fps
+from spyfish.ml.model_meta import resolve_imgsz
+from spyfish.ml.run_inference import run_yolo_inference
 from spyfish.utils import validate_model_path
 
 # Two boxes on the same animal overlap heavily; a genuinely new animal does not.
@@ -43,20 +46,6 @@ from spyfish.utils import validate_model_path
 # detection "new", so a low-confidence box that merely overlaps an existing one
 # is treated as a duplicate rather than counted as extra recall.
 IOU_MATCH = 0.3
-
-
-def _iou(a, b) -> float:
-    """IoU of two (x, y, w, h) centre-format boxes, as written in the raw CSV."""
-    ax1, ay1 = a[0] - a[2] / 2, a[1] - a[3] / 2
-    ax2, ay2 = a[0] + a[2] / 2, a[1] + a[3] / 2
-    bx1, by1 = b[0] - b[2] / 2, b[1] - b[3] / 2
-    bx2, by2 = b[0] + b[2] / 2, b[1] + b[3] / 2
-    ix, iy = max(0.0, min(ax2, bx2) - max(ax1, bx1)), max(
-        0.0, min(ay2, by2) - max(ay1, by1)
-    )
-    inter = ix * iy
-    union = a[2] * a[3] + b[2] * b[3] - inter
-    return inter / union if union > 0 else 0.0
 
 
 def analyse(low_csv: Path, baseline_conf: float) -> None:
@@ -83,13 +72,16 @@ def analyse(low_csv: Path, baseline_conf: float) -> None:
     # time keeps the comparison to boxes in the same video frame.
     vis_by_t: dict = {}
     for t, g in visible.groupby("time_seconds"):
-        vis_by_t[t] = g[["x", "y", "w", "h"]].to_numpy()
+        # the raw CSV holds centre-format (x, y, w, h) boxes
+        vis_by_t[t] = [
+            center_to_corners(*b) for b in g[["x", "y", "w", "h"]].to_numpy()
+        ]
 
     unmatched_rows = []
     for _, r in hidden.iterrows():
         boxes = vis_by_t.get(r["time_seconds"])
-        box = (r["x"], r["y"], r["w"], r["h"])
-        if boxes is None or max((_iou(box, b) for b in boxes), default=0.0) < IOU_MATCH:
+        box = center_to_corners(r["x"], r["y"], r["w"], r["h"])
+        if boxes is None or best_iou(box, boxes) < IOU_MATCH:
             unmatched_rows.append(r)
 
     unmatched = pd.DataFrame(unmatched_rows)
@@ -185,7 +177,7 @@ def main() -> None:
             video_path,
             str(model_path),
             args.confidence,
-            int(config.imgsz),
+            resolve_imgsz(model_path),
             str(out_csv),
             true_fps,
             vid_stride,

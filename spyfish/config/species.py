@@ -43,7 +43,13 @@ Identity rules
   ``fish`` means "an animal, species unidentified", not errors.
 * **A miss never raises.** Lookups return ``None`` or echo the input back. An
   unmapped species must still yield a usable label rather than killing a render
-  or an upload.
+  or an upload. ``canonical_name``, the gate every row passes on its way into
+  the annotations DB, keeps that contract but logs an ERROR for a name it
+  cannot resolve: the row is kept under its written name so nothing is lost,
+  and the log is the signal to add the label or the synonym.
+* **Synonyms** (``paths.species_synonyms``, the same YAML the legacy workbook
+  extraction applies) are resolved by ``canonical_name`` only. Every other
+  lookup sees registry names as the BIIGLE tree spells them.
 
 The optional path arguments
 ---------------------------
@@ -78,15 +84,24 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
+import yaml
+
+from spyfish.config.base import NULL_DEPLOYMENT
+
+# Longest synonym chain `canonical_name` will follow before calling it a cycle.
+_MAX_SYNONYM_HOPS = 10
 
 
 def normalise_zoo_choice(choice: str) -> str:
     """Normalise a Zooniverse ALL_CAPS choice key for lookup.
 
-    Lowercase, strip whitespace, hyphens and underscores. Must stay aligned
-    with how ``by_zoo_choice`` keys are built below or lookups silently miss.
+    Lowercase; strip whitespace, hyphens, underscores, apostrophes, slashes
+    and dots, since the workflow keys drop them (``SANDAGERSWRASSE`` for
+    "Sandager's wrasse", ``GREENBONEBUTTERFISH`` for "Greenbone/butterfish").
+    Must stay aligned with how ``by_zoo_choice`` keys are built below or
+    lookups silently miss.
     """
-    return re.sub(r"[\s\-_]", "", (choice or "").lower())
+    return re.sub(r"[\s\-_'’/.]", "", (choice or "").lower())
 
 
 @dataclass(frozen=True)
@@ -147,6 +162,13 @@ class SpeciesRegistry:
     by_zoo_choice: dict[str, Species]
     by_any_name: dict[str, Species]  # scientific, "Common - Scientific", aliases
     class_order: tuple[str, ...] = ()  # training.class_order, index == class id
+    synonyms: dict[str, str] = field(default_factory=dict)  # written -> canonical
+    # True when paths.species_synonyms names a file that is not on disk. Readers
+    # (dashboards, uploads, label rendering) carry on without the map; the one
+    # writer that depends on it, AnnotationDatabaseManager.add_annotations,
+    # refuses to ingest, since an ingest without the map admits every name it
+    # exists to catch.
+    synonyms_missing: bool = False
 
     def get(self, name: str) -> Optional[Species]:
         """Look up by any known name form. ``None`` when unknown."""
@@ -161,6 +183,10 @@ class SpeciesRegistry:
             return None
 
     def from_zoo_choice(self, choice: str) -> Optional[Species]:
+        """Species for a Zooniverse choice key (``"TREVALLY"``), matched on the
+        normalised common name or any class-map alias. The entry it lands on
+        may carry a retired name, so writers pass the result through
+        ``canonical_name`` before storing it."""
         return self.by_zoo_choice.get(normalise_zoo_choice(choice))
 
     def label_for(self, class_name: str) -> str:
@@ -220,6 +246,84 @@ class SpeciesRegistry:
             )
         return roster + extras
 
+    def resolve_name(self, name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+        """``(canonical, problem)`` for a written scientific name.
+
+        ``problem`` is ``None`` when the name resolved, otherwise one sentence
+        saying why it did not; ``canonical`` is then the written name, stripped,
+        so a caller that keeps going keeps the data. Resolution order:
+
+        1. ``None``, blank and ``NULL_DEPLOYMENT`` pass through: an absence
+           row names no species.
+        2. The synonyms map is followed to a fixed point (``Unidentified fish``
+           -> ``Unidentified`` -> ``fish``), so a legacy typo and the WoRMS
+           synonym it was corrected to can both sit in the map.
+        3. The result must be a name the registry knows in any form:
+           scientific, ``"Common - Scientific"`` or alias. That form's
+           scientific name is returned, so ``"Fish: final"`` comes back as
+           ``fish``. If that scientific name is itself a synonym key the
+           chain continues: the BIIGLE tree still carries the label
+           ``"White Trevally - Pseudocaranx dentex"`` beside the current
+           ``"Silver trevally - Pseudocaranx georgianus"``, and both must
+           land on ``Pseudocaranx georgianus``.
+        4. A ``"Common - Scientific"`` label the registry does not know (a
+           tree label whose scientific half is a retired name, such as
+           ``"Snapper - Pagrus auratus"``) continues from its scientific
+           half, which steps 2 and 3 then resolve.
+        """
+        # NaN is how pandas hands over a blank cell; str() would store 'nan'.
+        if name is None or (not isinstance(name, str) and pd.isna(name)):
+            return None, None
+        written = str(name).strip()
+        if not written or written == NULL_DEPLOYMENT:
+            return (written or None), None
+        if not self.by_scientific:
+            return written, (
+                "the species registry is empty (class_map.json missing); reseed "
+                "it with `python -m spyfish.biigle.class_map`"
+            )
+        resolved, seen = written, [written]
+        for _ in range(_MAX_SYNONYM_HOPS):
+            nxt = self.synonyms.get(resolved)
+            if nxt is None:
+                # Not a synonym key. A registry name in another form (label,
+                # alias) steps to its scientific name and looks again, since
+                # that name may be a synonym key in its own right.
+                sp = self.get(resolved)
+                if sp is not None and sp.scientific_name != resolved:
+                    nxt = sp.scientific_name
+                elif sp is None and " - " in resolved:
+                    nxt = resolved.split(" - ", 1)[1].strip()
+            if nxt is None or nxt == resolved:
+                break
+            if nxt in seen:
+                return written, f"synonym cycle {' -> '.join(seen + [nxt])}"
+            seen.append(nxt)
+            resolved = nxt
+        sp = self.get(resolved)
+        if sp is None:
+            via = f" (via synonyms {' -> '.join(seen)})" if len(seen) > 1 else ""
+            return written, (
+                f"not in the species registry ({len(self.by_scientific)} names "
+                f"from class_map.json) and not a key in the synonyms map{via}. "
+                "Add the BIIGLE label and reseed the class map, or map it to a "
+                "registry name in paths.species_synonyms"
+            )
+        return sp.scientific_name, None
+
+    def canonical_name(self, name: Optional[str]) -> Optional[str]:
+        """The registry's scientific name for ``name``, following synonyms.
+
+        ``resolve_name`` with the problem logged as an ERROR and the written
+        name echoed back, so the caller keeps the row. Writers that handle
+        many rows should call ``resolve_name`` once per distinct name and log
+        their own counts instead.
+        """
+        canonical, problem = self.resolve_name(name)
+        if problem:
+            logging.error(f"Unknown species '{canonical}': {problem}")
+        return canonical
+
     def is_species(self, name: str) -> bool:
         """True only for real species. False for buckets and unknown names."""
         sp = self.get(name)
@@ -249,6 +353,17 @@ class SpeciesRegistry:
 
     def zoo_choice_to_scientific(self) -> dict[str, str]:
         return {k: sp.scientific_name for k, sp in self.by_zoo_choice.items()}
+
+    def common_name_map(self) -> dict[str, str]:
+        """scientific → common name for every registry entry, buckets included.
+
+        The lookup table for labelling plots, sheets and reports that hold
+        scientific names: ``names.get(sci, sci)``. For one name use
+        ``label_for``; for ``"Common (Scientific)"`` use ``common_names``.
+        """
+        return {
+            sp.scientific_name: sp.common_name for sp in self.by_scientific.values()
+        }
 
     def common_names(self) -> dict[str, str]:
         """scientific → ``"Common (Scientific)"``, real species only.
@@ -297,20 +412,84 @@ def _load_biigle_label_ids(path: Optional[Path]) -> dict[str, int]:
     return out
 
 
+def _follow_synonyms(name: str, synonyms: dict[str, str]) -> str:
+    """``name`` after following the synonyms map to a fixed point (or giving up
+    on a cycle / over-long chain, returning the name as written)."""
+    resolved, seen = name, {name}
+    for _ in range(_MAX_SYNONYM_HOPS):
+        nxt = synonyms.get(resolved)
+        if nxt is None or nxt == resolved or nxt in seen:
+            break
+        seen.add(nxt)
+        resolved = nxt
+    return resolved
+
+
+def _load_synonyms(path: Optional[Path]) -> dict[str, str]:
+    """``written name -> canonical name`` from the configured YAML.
+
+    A missing file is a WARNING here and ``synonyms_missing`` on the registry:
+    every reader (dashboards, uploads, label rendering) must keep working on
+    a checkout that has not synced the legacy help dir, like it does without
+    class_map.json. The ingest gate (``add_annotations``) is where the map is
+    a hard requirement and raises. A malformed file raises here: that is a
+    broken file, not an absent one.
+    """
+    if path is None:
+        return {}
+    path = Path(path)
+    if not path.exists():
+        logging.warning(
+            f"Species synonyms map not found at {path} (paths.species_synonyms); "
+            "names are resolved without synonyms. Annotation ingest will refuse "
+            "to run until the legacy help dir is synced from S3."
+        )
+        return {}
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} must be a flat `written: canonical` mapping")
+    return {str(k).strip(): str(v).strip() for k, v in raw.items() if v is not None}
+
+
 @lru_cache(maxsize=8)
 def _build_registry(
     class_map_path: Optional[Path],
     labels_path: Optional[Path],
     class_order: tuple[str, ...] = (),
+    synonyms_path: Optional[Path] = None,
 ) -> SpeciesRegistry:
-    """Cached per (path pair, roster), a training run may hold a sidecar open too.
+    """Cached per (path pair, roster, synonyms), a training run may hold a sidecar open too.
 
     ``class_order`` is passed in rather than read from config here so it forms
     part of the cache key: a test that swaps the roster must not be served a
     registry built against the previous one.
     """
     entries = _load_class_map_entries(class_map_path)
+    synonyms = _load_synonyms(synonyms_path)
     label_ids = _load_biigle_label_ids(labels_path)
+    # The tree may still spell a species by a name the synonyms map has
+    # retired ("Snapper - Pagrus auratus" while the registry says Chrysophrys
+    # auratus), so every label is reachable under its canonical name too.
+    # Several labels can fold onto one name (the misspelt "Meuschenia scaber"
+    # AND the lookup-error label "Oligoplites saurus" both mean M. scabra): a
+    # same-genus spelling variant is the rename, the other is a retired label,
+    # so the genus match wins and anything else is reported.
+    folded: dict[str, list[tuple[str, int]]] = {}
+    for written, label_id in label_ids.items():
+        canonical = _follow_synonyms(written, synonyms)
+        if canonical != written and canonical not in label_ids:
+            folded.setdefault(canonical, []).append((written, label_id))
+    for canonical, candidates in folded.items():
+        genus = canonical.split()[0]
+        same_genus = [c for c in candidates if c[0].split()[0] == genus]
+        written, label_id = (same_genus or candidates)[0]
+        if len(candidates) > 1:
+            logging.warning(
+                f"{len(candidates)} BIIGLE labels fold onto {canonical!r} via the "
+                f"synonyms map: {candidates}. Using label {label_id} "
+                f"({written!r})" + ("" if same_genus else ", no same-genus candidate")
+            )
+        label_ids[canonical] = label_id
     training_ids = {name: i for i, name in enumerate(class_order)}
 
     by_scientific: dict[str, Species] = {}
@@ -346,6 +525,14 @@ def _build_registry(
         for alias in aliases:
             by_any_name[alias] = sp
 
+    # Zooniverse choice keys are the common names, as the BIIGLE tree spells
+    # them. The volunteer workflow does not follow BIIGLE renames (the tree says
+    # "Silver trevally", volunteers pick "TREVALLY"), so an alias on the class
+    # map entry answers for the choice too. Common names win on a collision.
+    for sp in by_scientific.values():
+        for alias in sp.aliases:
+            by_zoo_choice.setdefault(normalise_zoo_choice(alias), sp)
+
     # Roster entries the class map has never heard of. They are real training
     # classes regardless, so give them a record rather than leaving a hole the
     # registry cannot answer for. This fires when a label has been added to the
@@ -380,7 +567,13 @@ def _build_registry(
             f"BIIGLE label ids, {len(class_order)} with frozen training ids."
         )
     return SpeciesRegistry(
-        by_scientific, by_class_id, by_zoo_choice, by_any_name, tuple(class_order)
+        by_scientific,
+        by_class_id,
+        by_zoo_choice,
+        by_any_name,
+        tuple(class_order),
+        synonyms,
+        synonyms_missing=bool(synonyms_path) and not Path(synonyms_path).exists(),
     )
 
 
@@ -388,12 +581,14 @@ def species_registry(
     class_map_path: Optional[Path] = None,
     labels_path: Optional[Path] = None,
     class_order: Optional[tuple[str, ...]] = None,
+    synonyms_path: Optional[Path] = None,
 ) -> SpeciesRegistry:
     """The species registry, cached.
 
-    All three inputs default to the configured ones. Pass ``class_map_path``
-    only to decode against a per-drop sidecar, see the module docstring;
-    ``class_order`` only from a test that needs a different roster.
+    All inputs default to the configured ones. Pass ``class_map_path`` only to
+    decode against a per-drop sidecar, see the module docstring;
+    ``class_order`` and ``synonyms_path`` only from a test that needs a
+    different roster or map.
     """
     from spyfish.config.wrapper import config
 
@@ -403,4 +598,8 @@ def species_registry(
         labels_path = config.species_labels_csv_path
     if class_order is None:
         class_order = config.training_class_order
-    return _build_registry(Path(class_map_path), Path(labels_path), tuple(class_order))
+    if synonyms_path is None:
+        synonyms_path = config.species_synonyms_path
+    return _build_registry(
+        Path(class_map_path), Path(labels_path), tuple(class_order), Path(synonyms_path)
+    )

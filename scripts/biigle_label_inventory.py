@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd  # noqa: E402
 
-from spyfish.biigle.biigle_to_yolo import _is_workflow_label  # noqa: E402
+from spyfish.biigle.biigle_to_yolo import is_workflow_label  # noqa: E402
 from spyfish.config.wrapper import config  # noqa: E402
 
 root = config.deployment_data_dir
@@ -35,7 +35,7 @@ for src in ("expert", "training"):
         parts.append(df)
         drop_dirs[f.parent.parent.name] = f.parent.parent
 ann = pd.concat(parts, ignore_index=True)
-ann = ann[~ann["label_name"].astype(str).map(_is_workflow_label)]
+ann = ann[~ann["label_name"].astype(str).map(is_workflow_label)]
 
 # Background frames: an empty YOLO .txt in the drop's labels/ dir is a
 # reviewed frame with no animal (written by biigle_to_yolo for both sources).

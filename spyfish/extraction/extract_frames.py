@@ -25,6 +25,7 @@ import pandas as pd
 import piexif
 
 from spyfish.config.wrapper import config
+from spyfish.ml.raw_detections import read_raw_detections
 from spyfish.utils import generate_frame_filename
 
 # ── ffmpeg frame extraction ──────────────────────────────────────────────────
@@ -107,6 +108,56 @@ def read_frame_from_cap(
     if rotation:
         frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
     return frame
+
+
+class VideoOpenError(RuntimeError):
+    """cv2 could not open a video. Its own type so a caller of
+    `iter_raw_frames` can tell it from a failure inside its own loop body."""
+
+
+def iter_raw_frames(video_path, df: pd.DataFrame, max_read_ahead: int = 0):
+    """Yield ``(frame_index, frame, rows)`` for every frame a raw CSV names.
+
+    ``df`` holds raw-CSV rows (``frame``, ``time_seconds``, ...). Frames come
+    in ascending ``frame`` order, each with the rows on it and the image
+    rotated as the container says, the pixels `read_frame_from_cap` returns.
+    ``frame`` is None where the read failed; the caller decides what that
+    means for its rows.
+
+    By default every frame is reached by a seek. With ``max_read_ahead`` a
+    frame up to that many frames past the last one returned is reached by
+    decoding forward instead: a seek lands on the previous keyframe and
+    decodes forward anyway, so for the short gaps between sampled frames
+    reading on is never slower.
+
+    The video is opened on the first iteration (VideoOpenError if it cannot
+    be) and released when the generator finishes or is closed.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise VideoOpenError(f"cv2 could not open {video_path}")
+    try:
+        rotation = read_video_rotation(cap)
+        pos = -1  # index of the frame the capture last returned
+        for frame_idx, rows in df.groupby("frame", sort=True):
+            frame_idx = int(frame_idx)
+            gap = None if pos is None else frame_idx - pos
+            if gap is not None and 0 < gap <= max_read_ahead:
+                ok = all(cap.grab() for _ in range(gap - 1))
+                ret, frame = cap.read() if ok else (False, None)
+                if ret and rotation:
+                    frame = cv2.rotate(frame, _ROTATION_MAP[rotation])
+                frame = frame if ret else None
+            else:
+                t = float(rows["time_seconds"].iloc[0])
+                frame = read_frame_from_cap(cap, t, frame_idx, rotation)
+            # After a failed read the position is unknown: None forces the
+            # next frame to seek. (-1 means "at the start", and would read
+            # forward from wherever the capture stands.)
+            pos = frame_idx if frame is not None else None
+            yield frame_idx, frame, rows
+    finally:
+        cap.release()
 
 
 def write_frame_jpeg(frame, out_path: Path) -> None:
@@ -267,7 +318,9 @@ def build_coco_from_raw_csv(
         COCO dict ready for json.dump().
     """
     raw_df = (
-        pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+        read_raw_detections(raw_csv_path)
+        if os.path.exists(raw_csv_path)
+        else pd.DataFrame()
     )
 
     categories: dict[str, int] = {}
@@ -427,7 +480,9 @@ def extract_frames_from_selections(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw_df = (
-        pd.read_csv(raw_csv_path) if os.path.exists(raw_csv_path) else pd.DataFrame()
+        read_raw_detections(raw_csv_path)
+        if os.path.exists(raw_csv_path)
+        else pd.DataFrame()
     )
 
     # Open the video once and reuse the cap for every frame in this drop,

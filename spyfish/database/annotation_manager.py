@@ -8,8 +8,28 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from spyfish.config.base import NULL_DEPLOYMENT
+from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
 from spyfish.database.connection import connect_readonly
+from spyfish.database.manager import SchemaInitCache
+
+
+def require_species_synonyms() -> None:
+    """Raise when the synonyms map is absent.
+
+    Readers tolerate a missing map; the ingest gate does not: running without
+    it would store every synonym as a new species. ``add_annotations`` calls
+    this, and so does every stage that ends in an ingest, before its slow part
+    (MaxN for a survey, an API fetch), so the failure costs seconds.
+    """
+    if species_registry().synonyms_missing:
+        raise FileNotFoundError(
+            "Species synonyms map not found at "
+            f"{config.species_synonyms_path} (paths.species_synonyms); "
+            "refusing to ingest annotations without it. Sync the legacy "
+            "help dir from S3 or point the key at the map."
+        )
+
 
 # ── Provenance: what `external_id` means per source ─────────────────────────
 #
@@ -27,6 +47,10 @@ from spyfish.database.connection import connect_readonly
 # worst, it made `clear_synced_annotations`'s "NOT NULL" test match the legacy
 # rows too: the first BIIGLE sync on a drop with legacy expert data would have
 # deleted the legacy account (found 2026-10-13, before it ever fired).
+# Bump when a new one-off migration is added to init_db, so it runs once on
+# every existing annotations DB (SQLite PRAGMA user_version).
+ANNOTATIONS_SCHEMA_VERSION = 1
+
 LEGACY_EXTERNAL_ID = "legacy"
 # Ownership prefix: every `external_id` the BIIGLE sync writes starts with it,
 # and `clear_synced_annotations` deletes by it. Matched with GLOB, not LIKE,
@@ -139,11 +163,21 @@ class AnnotationDatabaseManager:
     from ML, Expert (Biigle), and Citizen Science sources.
     """
 
+    # Schema init (and its data migrations) runs once per process per
+    # database file, see SchemaInitCache.
+    _schema_cache = SchemaInitCache()
+
     def __init__(self, db_path: Optional[str] = None, read_only: bool = False):
         """Open the annotations database, creating its schema unless ``read_only``.
 
         Readers pass ``read_only=True`` so a missing file raises rather than
         being created empty (see ``spyfish/database/connection.py``).
+
+        ``init_db()`` runs once per process per database file, so a second
+        writable manager on the same file opens no connection and does not
+        repeat the data migrations. Rows this process writes go through
+        ``add_annotations`` and are already in the migrated form; call
+        ``init_db()`` directly to migrate rows that arrived any other way.
         """
         if db_path:
             self.db_path = str(Path(db_path).absolute())
@@ -152,7 +186,7 @@ class AnnotationDatabaseManager:
 
         self.read_only = read_only
         if not read_only:
-            self.init_db()
+            self._schema_cache.run_once(self.db_path, self.init_db)
 
     def get_connection(self):
         """Returns a configured SQLite connection wrapped in contextlib.closing.
@@ -239,6 +273,13 @@ class AnnotationDatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_maxn_peak ON annotations"
                 "(drop_id, annotated_by, scientific_name, max_interval DESC, id ASC)"
             )
+            # One-off data migrations below each scan the whole table (none can
+            # use an index), and a manager is constructed per drop and per stage.
+            # SQLite's user_version records that they have run on this file.
+            cursor.execute("PRAGMA user_version")
+            if cursor.fetchone()[0] >= ANNOTATIONS_SCHEMA_VERSION:
+                conn.commit()
+                return
             # Rows ingested before `_ingest_ml_annotations` wrote 'ml' carry the
             # model name in annotated_by. Move it to external_id so every ML row
             # reads `annotated_by = 'ml'`. Anything that is not one of the three
@@ -256,8 +297,13 @@ class AnnotationDatabaseManager:
                     f"Moved the model name out of annotated_by on {cursor.rowcount} "
                     "legacy ML row(s)"
                 )
-            self._migrate_biigle_external_ids(cursor)
+            biigle_checked = self._migrate_biigle_external_ids(cursor)
             self._normalise_model_names(cursor)
+            # The BIIGLE migration needs the pipeline DB beside this one; until
+            # it has been able to run, leave the version unset so a later open
+            # (with the pipeline DB present) still does it.
+            if biigle_checked:
+                cursor.execute(f"PRAGMA user_version = {ANNOTATIONS_SCHEMA_VERSION}")
             conn.commit()
 
     def _normalise_model_names(self, cursor) -> None:
@@ -288,7 +334,7 @@ class AnnotationDatabaseManager:
                 f"Renamed model {name!r} -> {canonical!r} on {cursor.rowcount} ML row(s)"
             )
 
-    def _migrate_biigle_external_ids(self, cursor) -> None:
+    def _migrate_biigle_external_ids(self, cursor) -> bool:
         """Rewrite per-box BIIGLE annotation ids to the volume-scoped source key.
 
         Expert rows synced before 2026-10-13 hold a bare numeric annotation id
@@ -297,14 +343,17 @@ class AnnotationDatabaseManager:
         the id across; a drop the pipeline DB does not know keeps the BIIGLE
         prefix with no volume, which still marks it as BIIGLE-owned for
         `clear_synced_annotations`. Idempotent: only bare numeric ids match.
+
+        Returns False when the pipeline DB is not there to check against, so
+        the caller does not mark the migrations done.
         """
         pipeline_db = Path(config.db_path)
         if not pipeline_db.exists() or str(pipeline_db) == self.db_path:
-            return
+            return False
         numeric = "annotated_by = 'expert' AND external_id GLOB '[0-9]*'"
         cursor.execute(f"SELECT COUNT(*) FROM annotations WHERE {numeric}")
         if cursor.fetchone()[0] == 0:
-            return
+            return True
         cursor.execute("ATTACH DATABASE ? AS pipeline", (str(pipeline_db),))
         try:
             cursor.execute(
@@ -338,13 +387,43 @@ class AnnotationDatabaseManager:
             f"Rewrote BIIGLE annotation ids to volume keys on {moved} expert row(s)"
             + (f"; {orphaned} row(s) had no volume on record" if orphaned else "")
         )
+        return True
 
     def add_annotations(self, annotations: List[Dict[str, Any]]):
-        """Bulk insert annotation records."""
+        """Bulk insert annotation records.
+
+        Every ``scientific_name`` goes through ``SpeciesRegistry.resolve_name``
+        first: synonyms and legacy placeholders are rewritten to registry
+        names (logged at INFO with counts), and a name that resolves to
+        nothing is kept as written and logged at ERROR with its row count.
+        Nothing is dropped and nothing raises; the error log is the signal to
+        add a BIIGLE label or a synonym and re-ingest. This is the single gate
+        for all writers (ML, citsci, BIIGLE, legacy).
+        """
         if not annotations:
             return
+        require_species_synonyms()
+        registry = species_registry()
+        written_names = {a.get("scientific_name") for a in annotations}
+        resolved = {w: registry.resolve_name(w) for w in written_names}
+        counts: Dict[Any, int] = {}
+        for a in annotations:
+            w = a.get("scientific_name")
+            counts[w] = counts.get(w, 0) + 1
+        for w, (name, problem) in sorted(resolved.items(), key=lambda kv: str(kv[0])):
+            if problem:
+                logging.error(
+                    f"Unknown species '{name}' on {counts[w]} row(s), inserted "
+                    f"as written: {problem}"
+                )
+            elif name != w:
+                logging.info(f"Canonicalised '{w}' -> '{name}' on {counts[w]} row(s)")
         annotations = [
-            {**a, "time_of_max_seconds": a.get("time_of_max_seconds")}
+            {
+                **a,
+                "scientific_name": resolved[a.get("scientific_name")][0],
+                "time_of_max_seconds": a.get("time_of_max_seconds"),
+            }
             for a in annotations
         ]
         with self.get_connection() as conn:

@@ -192,7 +192,7 @@ def test_excluded_class_gets_no_row(tmp_path):
     rows = []
     for s in range(9):
         rows += _det(s, "bait", conf=0.9)
-        rows += _det(s, "Pagrus auratus", conf=0.8)
+        rows += _det(s, "Chrysophrys auratus", conf=0.8)
 
     result = _run(
         tmp_path,
@@ -203,7 +203,7 @@ def test_excluded_class_gets_no_row(tmp_path):
     )
     names = set(result[config.csv_scientific_name_column])
     assert "bait" not in names
-    assert _row_for(result, "Pagrus auratus")[config.csv_max_interval_column] == 1
+    assert _row_for(result, "Chrysophrys auratus")[config.csv_max_interval_column] == 1
 
 
 def test_every_class_keeps_its_own_row(tmp_path):
@@ -212,14 +212,14 @@ def test_every_class_keeps_its_own_row(tmp_path):
     sum, not a pipeline row (decided 2026-08-21, union row deleted)."""
     rows = []
     for s in range(9):
-        rows += _det(s, "Pagrus auratus")
+        rows += _det(s, "Chrysophrys auratus")
         rows += _det(s, "Parapercis colias")
         rows += _det(s, "fish")
 
     result = _run(tmp_path, rows, persistence_seconds=1.0, gap_fill_seconds=0.4)
     per_interval = result[result[config.csv_maxn_time_seconds_column] < 10]
     names = set(per_interval[config.csv_scientific_name_column])
-    assert names == {"Pagrus auratus", "Parapercis colias", "fish"}
+    assert names == {"Chrysophrys auratus", "Parapercis colias", "fish"}
     for name in names:
         assert _row_for(per_interval, name)[config.csv_max_interval_column] == 1
 

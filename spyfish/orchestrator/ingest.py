@@ -6,12 +6,18 @@ from typing import Dict, Optional, Set
 import pandas as pd
 
 from spyfish.config.base import (
+    INGEST_ISSUE,
     IngestStatus,
     MlStatus,
     VideoPresence,
 )
 from spyfish.config.wrapper import config
-from spyfish.database.manager import DatabaseManager, parse_geo_value
+from spyfish.database.manager import (
+    DatabaseManager,
+    _clean_text,
+    parse_geo_value,
+    validation_error_row,
+)
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.validation.data_validator import DataValidator
 
@@ -111,23 +117,13 @@ def check_pending_arrivals(
       - present + DEEP_ARCHIVE, restored → treated as downloadable (below)
       - present + downloadable → video_presence=present, advance ml_status to ready.
 
-    The listing cannot see a restore: a restored object keeps its DEEP_ARCHIVE
-    storage class and only the per-object Restore header says a readable copy
-    exists. So every archived pending drop costs one head_object here. That is
-    a few hundred cheap calls per run against hours of GPU that would otherwise
-    never be reached: 118 SLI videos sat restored for a week (2026-10-09) while
-    this check kept them `archived` and --ml kept skipping them. Note the
-    readable copy expires; a drop advanced here and not processed before then
-    fails at download time, since nothing re-checks a drop once it is ml_ready.
-
-    The presence filter used to be (absent, archived), on the assumption that a
-    drop already marked `present` must have been advanced already. It leaves a
-    dead state: a drop whose video was ALREADY on S3 when it was ingested gets
-    video_presence=present and ml_status=ml_pending, matches neither branch, and
-    is never advanced by anything. 33 drops across five surveys were stuck that
-    way (found 2026-08-23) - permanently invisible to --ml, and reported every
-    run as "not targeted (ml_pending)". S3 is the authority on whether a video
-    exists, so ask it about every pending drop and let the answer decide.
+    Restore state comes from the listing itself: `get_objects_from_s3` asks
+    for `RestoreStatus` and `S3Handler.effective_storage_class` reports a
+    DEEP_ARCHIVE object with a live restored copy as STANDARD, so no per-object
+    head_object is needed (118 SLI videos sat restored for a week in Oct 2026
+    while the class alone kept them `archived`). Note the readable copy
+    expires; a drop advanced here and not processed before then fails at
+    download time, since nothing re-checks a drop once it is ml_ready.
     """
     db = DatabaseManager()
     pending = db.get_deployments_eligible("ml_status", [MlStatus.PENDING])
@@ -138,8 +134,8 @@ def check_pending_arrivals(
 
     logging.info(f"Checking S3 for {len(pending)} pending drops...")
 
-    storage = S3Handler(bucket=config.s3_bucket)
     if known_files is None or media_file_info is None:
+        storage = S3Handler(bucket=config.s3_bucket)
         logging.info(
             f"Downloading master file list from S3 bucket (prefix: {config.media_s3_prefix})..."
         )
@@ -148,7 +144,7 @@ def check_pending_arrivals(
         )
         known_files = {obj["Key"] for obj in media_objects}
         media_file_info = {
-            obj["Key"]: obj.get("StorageClass", "STANDARD") for obj in media_objects
+            obj["Key"]: S3Handler.effective_storage_class(obj) for obj in media_objects
         }
 
     updated_count = 0
@@ -160,20 +156,16 @@ def check_pending_arrivals(
         if not (video_path and video_path in known_files):
             continue
 
+        # `effective_storage_class` already reports a restored DEEP_ARCHIVE
+        # object as STANDARD, so a restored drop falls through to "present".
         storage_class = media_file_info.get(video_path)
         if storage_class == "DEEP_ARCHIVE":
-            if storage.is_restored(video_path):
-                logging.info(
-                    f"{drop_id}: DEEP_ARCHIVE but a restored copy is readable, "
-                    f"treating as present."
+            if current_presence != VideoPresence.ARCHIVED:
+                db.update_deployment_fields(
+                    drop_id, video_presence=VideoPresence.ARCHIVED
                 )
-            else:
-                if current_presence != VideoPresence.ARCHIVED:
-                    db.update_deployment_fields(
-                        drop_id, video_presence=VideoPresence.ARCHIVED
-                    )
-                    logging.info(f"{drop_id}: video in DEEP_ARCHIVE, marked archived.")
-                continue
+                logging.info(f"{drop_id}: video in DEEP_ARCHIVE, marked archived.")
+            continue
 
         logging.info(f"✅ Video confirmed for {drop_id}. Advancing ml_status → ready.")
         db.update_deployment_fields(drop_id, video_presence=VideoPresence.PRESENT)
@@ -274,7 +266,7 @@ def run_ingestion():
     )
     known_files = {obj["Key"] for obj in media_objects}
     media_file_info = {
-        obj["Key"]: obj.get("StorageClass", "STANDARD") for obj in media_objects
+        obj["Key"]: S3Handler.effective_storage_class(obj) for obj in media_objects
     }
 
     csv_path = config.s3_sharepoint_deployment_csv
@@ -374,12 +366,18 @@ def _sync_deployments_to_db(
     validator before we started. Per-row sampling-parse failures are
     tracked locally rather than mutated back into the caller's set, so
     this function stays pure with respect to its inputs.
+
+    Every row is worked out first, then all of them (and their sampling-window
+    validation errors) are written in ONE transaction. All or nothing: a row
+    that fails leaves the deployments table as it was, and the next ingest
+    redoes the lot, which is safe because the upsert is idempotent.
     """
     drop_col = mapping.get("drop_id_column")
     bad_col = mapping.get("is_bad_deployment_column")
     video_col = mapping.get("video_file_link_column")
 
-    new_count = 0
+    deployments: list[dict] = []
+    validation_errors: list[dict] = []
 
     for _, row in deployments_df.iterrows():
         try:
@@ -392,8 +390,12 @@ def _sync_deployments_to_db(
             )
             continue
 
-        video_path = str(row.get(video_col, "")).strip()
-        if not video_path:
+        # A blank VideoFileLink arrives as NaN, and str(NaN) is "nan": until
+        # 2026-11-12 that was stored as the path, so the fallback below never ran
+        # and a video sitting at the standard key was marked absent (SLI 009_02).
+        video_path = _clean_text(row.get(video_col))
+        link_blank = not video_path
+        if link_blank:
             video_path = config.get_video_s3_key(drop_id)
         is_bad_deployment = str(row.get(bad_col, "")).strip() == "True"
 
@@ -421,9 +423,10 @@ def _sync_deployments_to_db(
             sampling_parse_failed = True
 
         sampling_window_errors: list[str] = []
+        sampling_window_issues: list[str] = []  # recorded, not blocking
         if not sampling_parse_failed and not is_bad_deployment:
-            sampling_window_errors = config.validate_sampling_window(
-                drop_id, sampling_start, sampling_end
+            sampling_window_errors, sampling_window_issues = (
+                config.check_sampling_window(drop_id, sampling_start, sampling_end)
             )
 
         # Determine ingest_status from data quality checks.
@@ -443,12 +446,39 @@ def _sync_deployments_to_db(
             ingest_status = IngestStatus.OK
 
         for msg in sampling_window_errors:
-            db.add_validation_error(
-                survey_id=config.get_survey_id_from_drop(drop_id),
-                drop_id=drop_id,
-                error_type=IngestStatus.VALIDATION_ERROR,
-                column_name="sampling_window",
-                error_message=msg,
+            validation_errors.append(
+                validation_error_row(
+                    survey_id=config.get_survey_id_from_drop(drop_id),
+                    drop_id=drop_id,
+                    error_type=IngestStatus.VALIDATION_ERROR,
+                    column_name="sampling_window",
+                    error_message=msg,
+                )
+            )
+        for msg in sampling_window_issues:
+            validation_errors.append(
+                validation_error_row(
+                    survey_id=config.get_survey_id_from_drop(drop_id),
+                    drop_id=drop_id,
+                    error_type=INGEST_ISSUE,
+                    column_name="sampling_window",
+                    error_message=msg,
+                )
+            )
+
+        if link_blank and video_path in known_files:
+            # Found by convention, not by the link: analysed, but SharePoint should say so.
+            validation_errors.append(
+                validation_error_row(
+                    survey_id=config.get_survey_id_from_drop(drop_id),
+                    drop_id=drop_id,
+                    error_type=INGEST_ISSUE,
+                    column_name=video_col,
+                    error_message=(
+                        f"{drop_id}: {video_col} is blank, but the video is on S3 at "
+                        f"the standard key {video_path}. Fill in the link in SharePoint."
+                    ),
+                )
             )
 
         # Determine video_presence from current S3 state.
@@ -467,7 +497,7 @@ def _sync_deployments_to_db(
 
         # Determine initial ml_status. Only applied on INSERT, existing records
         # preserve their section statuses via the ON CONFLICT clause in
-        # add_or_update_deployment. get_deployments_eligible filters ingest_status='ok'
+        # add_or_update_deployments. get_deployments_eligible filters ingest_status='ok'
         # so bad/excluded deployments won't be picked up by processing stages.
         # ml_status starts at 'ready' only when the video is confirmed present
         # and the deployment is in good standing; other sections default to
@@ -477,22 +507,30 @@ def _sync_deployments_to_db(
         else:
             ml_status = MlStatus.PENDING
 
-        db.add_or_update_deployment(
-            drop_id=drop_id,
-            ingest_status=ingest_status,
-            ml_status=ml_status,
-            video_path=video_path,
-            video_presence=video_presence,
-            is_bad_deployment=is_bad_deployment,
-            sampling_start=sampling_start,
-            sampling_end=sampling_end,
-            latitude=parse_geo_value(row.get(config.latitude_column)),
-            longitude=parse_geo_value(row.get(config.longitude_column)),
-            depth=parse_geo_value(row.get(config.depth_column)),
-            nzmhcs_abiotic=parse_nzmhcs_value(row.get(config.nzmhcs_abiotic_column)),
-            nzmhcs_biotic=parse_nzmhcs_value(row.get(config.nzmhcs_biotic_column)),
+        deployments.append(
+            {
+                "drop_id": drop_id,
+                "ingest_status": ingest_status,
+                "ml_status": ml_status,
+                "video_path": video_path,
+                "video_presence": video_presence,
+                "is_bad_deployment": is_bad_deployment,
+                "sampling_start": sampling_start,
+                "sampling_end": sampling_end,
+                "latitude": parse_geo_value(row.get(config.latitude_column)),
+                "longitude": parse_geo_value(row.get(config.longitude_column)),
+                "depth": parse_geo_value(row.get(config.depth_column)),
+                "nzmhcs_abiotic": parse_nzmhcs_value(
+                    row.get(config.nzmhcs_abiotic_column)
+                ),
+                "nzmhcs_biotic": parse_nzmhcs_value(
+                    row.get(config.nzmhcs_biotic_column)
+                ),
+            }
         )
-        new_count += 1
+
+    db.add_or_update_deployments(deployments, validation_errors=validation_errors)
+    new_count = len(deployments)
 
     logging.info(
         f"Ingestion complete. Synchronized {new_count} records into the pipeline database. "

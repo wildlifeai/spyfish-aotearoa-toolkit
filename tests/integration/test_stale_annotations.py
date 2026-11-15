@@ -47,17 +47,17 @@ def _ml_species(ann_db, drop_id: str) -> list:
 
 # Five detections, one per 10-second interval, using two species.
 # All above maxn_confidence_threshold (0.50) so process_maxn produces exactly 5 rows:
-#   (interval=0,  class="Pagrus auratus")
-#   (interval=10, class="Pagrus auratus")
+#   (interval=0,  class="Chrysophrys auratus")
+#   (interval=10, class="Chrysophrys auratus")
 #   (interval=20, class="Notolabrus fucicola")
-#   (interval=30, class="Pagrus auratus")
+#   (interval=30, class="Chrysophrys auratus")
 #   (interval=40, class="Notolabrus fucicola")
 _RAW_DETECTIONS_5 = pd.DataFrame(
     [
         {
             "frame": 1,
             "time_seconds": 0.5,
-            "class": "Pagrus auratus",
+            "class": "Chrysophrys auratus",
             "confidence": 0.80,
             "x": 160,
             "y": 120,
@@ -67,7 +67,7 @@ _RAW_DETECTIONS_5 = pd.DataFrame(
         {
             "frame": 15,
             "time_seconds": 10.5,
-            "class": "Pagrus auratus",
+            "class": "Chrysophrys auratus",
             "confidence": 0.75,
             "x": 160,
             "y": 120,
@@ -87,7 +87,7 @@ _RAW_DETECTIONS_5 = pd.DataFrame(
         {
             "frame": 45,
             "time_seconds": 30.5,
-            "class": "Pagrus auratus",
+            "class": "Chrysophrys auratus",
             "confidence": 0.90,
             "x": 160,
             "y": 120,

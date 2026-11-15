@@ -7,8 +7,12 @@ Covers:
   - get_maxn_summary: MAX(max_interval) per drop × species × source
 """
 
+import sqlite3
+from unittest.mock import patch
+
 import pytest
 
+from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 
 DROP = "KSF_20240124_BUV_KSF_085_01"
@@ -26,7 +30,7 @@ def _seed(ann_db, rows):
 
 def _ann(
     drop_id=DROP,
-    species="Pagrus auratus",
+    species="Chrysophrys auratus",
     max_interval=1,
     annotated_by="ml",
     external_id="yolov8n",
@@ -53,13 +57,13 @@ def test_clear_synced_only_deletes_with_external_id(ann_db):
         ann_db,
         [
             _ann(annotated_by="expert", external_id="biigle_42"),
-            _ann(annotated_by="expert", external_id=None, species="Manual Entry"),
+            _ann(annotated_by="expert", external_id=None, species="Parapercis colias"),
         ],
     )
     ann_db.clear_synced_annotations(DROP, "expert")
     remaining = ann_db.get_annotations_for_drop(DROP, "expert")
     assert len(remaining) == 1
-    assert remaining[0]["scientific_name"] == "Manual Entry"
+    assert remaining[0]["scientific_name"] == "Parapercis colias"
 
 
 def test_clear_synced_does_not_touch_other_sources(ann_db):
@@ -130,14 +134,14 @@ def test_get_maxn_summary_separates_species(ann_db):
     _seed(
         ann_db,
         [
-            _ann(species="Pagrus auratus", max_interval=3),
+            _ann(species="Chrysophrys auratus", max_interval=3),
             _ann(species="Notolabrus fucicola", max_interval=7, time_of_max="00:00:15"),
         ],
     )
     df = ann_db.get_maxn_summary(drop_id=DROP)
     assert len(df) == 2
     species_maxn = dict(zip(df["scientific_name"], df["maxn"]))
-    assert species_maxn["Pagrus auratus"] == 3
+    assert species_maxn["Chrysophrys auratus"] == 3
     assert species_maxn["Notolabrus fucicola"] == 7
 
 
@@ -223,12 +227,17 @@ def test_init_db_renames_stamp_first_model_names(tmp_path):
             "INSERT INTO annotations (drop_id, scientific_name, max_interval, "
             "annotated_by, external_id) VALUES (?, ?, ?, ?, ?)",
             [
-                (DROP, "Pagrus auratus", 2, "ml", "20260429_081503_species"),
-                (DROP, "Pagrus auratus", 3, "ml", "species_20260822_192536"),
-                (DROP, "Pagrus auratus", 1, "expert", "legacy"),
+                (DROP, "Chrysophrys auratus", 2, "ml", "20260429_081503_species"),
+                (DROP, "Chrysophrys auratus", 3, "ml", "species_20260822_192536"),
+                (DROP, "Chrysophrys auratus", 1, "expert", "legacy"),
             ],
         )
-    AnnotationDatabaseManager(db_path=str(path))  # init_db runs the migration
+    # Construction skips init on a file this process already initialised, so
+    # rows put in by raw SQL afterwards are migrated by an explicit init_db().
+    # An existing pre-migration DB: user_version 0, so init_db migrates it.
+    with sqlite3.connect(db.db_path) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    db.init_db()
     with sqlite3.connect(path) as conn:
         rows = conn.execute(
             "SELECT annotated_by, external_id FROM annotations ORDER BY id"
@@ -245,14 +254,17 @@ def test_init_db_moves_an_undated_model_name_out_of_annotated_by(tmp_path):
     import sqlite3
 
     path = tmp_path / "b.db"
-    AnnotationDatabaseManager(db_path=str(path))
+    db = AnnotationDatabaseManager(db_path=str(path))
     with sqlite3.connect(path) as conn:
         conn.execute(
             "INSERT INTO annotations (drop_id, scientific_name, max_interval, "
             "annotated_by, external_id) VALUES (?, ?, ?, ?, NULL)",
-            (DROP, "Pagrus auratus", 2, "my_undated_model"),
+            (DROP, "Chrysophrys auratus", 2, "my_undated_model"),
         )
-    AnnotationDatabaseManager(db_path=str(path))
+    # An existing pre-migration DB: user_version 0, so init_db migrates it.
+    with sqlite3.connect(db.db_path) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    db.init_db()  # explicit: construction skips init on a known file
     with sqlite3.connect(path) as conn:
         row = conn.execute(
             "SELECT annotated_by, external_id FROM annotations"
@@ -272,7 +284,9 @@ def test_maxn_summary_takes_the_newest_model_not_the_larger_count(ann_db):
     )
     df = ann_db.get_maxn_summary(drop_id=DROP)
     assert set(df["external_id"]) == {NEW_MODEL}
-    assert df.set_index("scientific_name")["maxn"].to_dict() == {"Pagrus auratus": 2}
+    assert df.set_index("scientific_name")["maxn"].to_dict() == {
+        "Chrysophrys auratus": 2
+    }
 
 
 def test_maxn_summary_all_models_keeps_one_peak_per_model(ann_db):
@@ -317,7 +331,10 @@ def test_init_moves_a_model_name_out_of_annotated_by(tmp_path):
             _ann(annotated_by="expert", external_id="777"),
         ],
     )
-    AnnotationDatabaseManager(db_path=db_path)  # re-open runs the migration
+    # An existing pre-migration DB: user_version 0, so init_db migrates it.
+    with sqlite3.connect(ann_db.db_path) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    ann_db.init_db()  # explicit: construction skips init on a known file
     rows = {
         r["annotated_by"]: r["external_id"]
         for r in ann_db.get_annotations_for_drop(DROP)
@@ -351,21 +368,21 @@ def test_clear_synced_leaves_legacy_expert_rows(ann_db):
             _ann(
                 annotated_by="expert",
                 external_id=LEGACY_EXTERNAL_ID,
-                species="Legacy fish",
+                species="Notolabrus fucicola",
             ),
             _ann(
                 annotated_by="expert",
                 external_id=biigle_external_id(7),
-                species="Biigle fish",
+                species="Pseudolabrus miles",
             ),
-            _ann(annotated_by="expert", external_id=None, species="Manual Entry"),
+            _ann(annotated_by="expert", external_id=None, species="Parapercis colias"),
         ],
     )
     ann_db.clear_synced_annotations(DROP, "expert")
     remaining = {
         r["scientific_name"] for r in ann_db.get_annotations_for_drop(DROP, "expert")
     }
-    assert remaining == {"Legacy fish", "Manual Entry"}
+    assert remaining == {"Notolabrus fucicola", "Parapercis colias"}
 
 
 def test_maxn_summary_keeps_legacy_and_biigle_expert_peaks_apart(ann_db):
@@ -462,7 +479,11 @@ def test_init_migrates_numeric_biigle_ids_to_volume_keys(tmp_path, monkeypatch):
         first,
         [
             _ann(annotated_by="expert", external_id="123456"),
-            _ann(annotated_by="expert", external_id="legacy", species="Legacy fish"),
+            _ann(
+                annotated_by="expert",
+                external_id="legacy",
+                species="Notolabrus fucicola",
+            ),
             _ann(
                 drop_id="KSF_20240124_BUV_KSF_085_02",
                 annotated_by="expert",
@@ -471,18 +492,22 @@ def test_init_migrates_numeric_biigle_ids_to_volume_keys(tmp_path, monkeypatch):
             _ann(annotated_by="citsci", external_id="1001"),
         ],
     )
-    reopened = AnnotationDatabaseManager(db_path=str(ann_path))  # init_db runs again
+    reopened = AnnotationDatabaseManager(db_path=str(ann_path))
+    # An existing pre-migration DB: user_version 0, so init_db migrates it.
+    with sqlite3.connect(reopened.db_path) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    reopened.init_db()  # construction alone does not re-run it on a known file
     rows = {
         (r["drop_id"], r["scientific_name"], r["annotated_by"]): r["external_id"]
         for r in reopened.get_annotations_for_drop(DROP)
         + reopened.get_annotations_for_drop("KSF_20240124_BUV_KSF_085_02")
     }
-    assert rows[(DROP, "Pagrus auratus", "expert")] == biigle_external_id(4626)
-    assert rows[(DROP, "Legacy fish", "expert")] == "legacy"
-    assert rows[(DROP, "Pagrus auratus", "citsci")] == "1001"
+    assert rows[(DROP, "Chrysophrys auratus", "expert")] == biigle_external_id(4626)
+    assert rows[(DROP, "Notolabrus fucicola", "expert")] == "legacy"
+    assert rows[(DROP, "Chrysophrys auratus", "citsci")] == "1001"
     # a drop the pipeline DB does not know still becomes BIIGLE-owned
     assert rows[
-        ("KSF_20240124_BUV_KSF_085_02", "Pagrus auratus", "expert")
+        ("KSF_20240124_BUV_KSF_085_02", "Chrysophrys auratus", "expert")
     ] == biigle_external_id("unknown")
     # idempotent: a third open changes nothing
     AnnotationDatabaseManager(db_path=str(ann_path))
@@ -491,8 +516,8 @@ def test_init_migrates_numeric_biigle_ids_to_volume_keys(tmp_path, monkeypatch):
         for r in reopened.get_annotations_for_drop(DROP, "expert")
     }
     assert again == {
-        "Pagrus auratus": biigle_external_id(4626),
-        "Legacy fish": "legacy",
+        "Chrysophrys auratus": biigle_external_id(4626),
+        "Notolabrus fucicola": "legacy",
     }
 
 
@@ -536,3 +561,33 @@ def test_clear_synced_annotations_with_a_volume_keeps_the_other_volume(ann_db):
         r["external_id"] for r in ann_db.get_annotations_for_drop(DROP, "expert")
     )
     assert left == [biigle_external_id(222), "legacy"]
+
+
+def test_migrations_run_once_per_database_file(tmp_path):
+    """The one-off migrations scan the whole table; after they have run once
+    the file's user_version says so and a later init_db leaves old-style rows
+    alone (none are written any more, so none should appear)."""
+    import sqlite3
+
+    from spyfish.database.annotation_manager import ANNOTATIONS_SCHEMA_VERSION
+
+    path = tmp_path / "a.db"
+    pipeline = tmp_path / "pipeline.db"
+    sqlite3.connect(pipeline).close()
+    with patch.object(type(config), "db_path", new=str(pipeline)):
+        db = AnnotationDatabaseManager(db_path=str(path))
+        db.init_db()
+        with sqlite3.connect(path) as conn:
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == ANNOTATIONS_SCHEMA_VERSION
+            )
+            conn.execute(
+                "INSERT INTO annotations (drop_id, scientific_name, max_interval, "
+                "annotated_by, external_id) VALUES (?, ?, ?, ?, ?)",
+                (DROP, "Chrysophrys auratus", 2, "ml", "20260429_081503_species"),
+            )
+        db.init_db()
+    with sqlite3.connect(path) as conn:
+        (ext,) = conn.execute("SELECT external_id FROM annotations").fetchone()
+    assert ext == "20260429_081503_species"

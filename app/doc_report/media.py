@@ -70,7 +70,7 @@ def render(ctx: dict) -> None:
         st.warning("No deployments match the current filters.")
         return
 
-    chips(["Footage funnel", "Coverage by year", "Find a deployment", "Export"])
+    chips(["Footage funnel", "Coverage by season", "Find a deployment", "Export"])
 
     presence = dep["video_presence"].fillna("unknown")
     counts = presence.value_counts()
@@ -236,11 +236,11 @@ def render(ctx: dict) -> None:
 
     with right:
         section(
-            "Coverage by year",
+            "Coverage by season",
             help="Same categories as the funnel, with archived split by "
             "whether the deployment already carries annotations.",
         )
-        dated = dep[dep["survey_year"].notna()].copy()
+        dated = dep[dep["survey_season"].notna()].copy()
         if dated.empty:
             st.info("No deployments have a parseable date in their DropID.")
         else:
@@ -254,14 +254,14 @@ def render(ctx: dict) -> None:
                 dated["video_presence"].fillna("unknown"), dated_anno
             )
             by_year = (
-                dated.groupby([dated["survey_year"].astype(int), "State"])
+                dated.groupby([dated["survey_season"].astype(int), "State"])
                 .size()
                 .reset_index(name="Deployments")
-                .rename(columns={"survey_year": "Year"})
+                .rename(columns={"survey_season": "Survey season"})
             )
             fig = px.bar(
                 by_year,
-                x="Year",
+                x="Survey season",
                 y="Deployments",
                 color="State",
                 color_discrete_map=DETAIL_COLOURS,

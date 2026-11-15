@@ -31,6 +31,7 @@ from ecology_data import (  # noqa: E402
     OTHER_PROTECTION,
     PROTECTED,
     UNPROTECTED,
+    season_label,
 )
 from theme import (  # noqa: E402
     GRID_COLOR,
@@ -371,8 +372,8 @@ def render_mpa_populations(
         st.info("No dated observations for this selection.")
     else:
         fig_trend = px.line(
-            trend.sort_values("survey_year"),
-            x="survey_year",
+            trend.sort_values("survey_season"),
+            x="survey_season",
             y="value",
             color="protection",
             markers=True,
@@ -403,8 +404,8 @@ def render_mpa_populations(
         # recorded' line (the legacy imports) reaches further back.
         fig_trend.update_xaxes(
             range=[
-                int(trend["survey_year"].min()) - 0.5,
-                int(trend["survey_year"].max()) + 0.5,
+                int(trend["survey_season"].min()) - 0.5,
+                int(trend["survey_season"].max()) + 0.5,
             ]
         )
         style(
@@ -416,9 +417,9 @@ def render_mpa_populations(
         year_axis(fig_trend)
         st.plotly_chart(fig_trend, use_container_width=True)
         st.caption(
-            "Every year in the range is on the axis. Markers are the years "
+            "Every season in the range is on the axis. Markers are the seasons "
             "actually surveyed for that protection class, the line between "
-            "them bridges unsurveyed years (surveys run on a 1–2 year "
+            "them bridges unsurveyed seasons (surveys run on a 1–2 year "
             "cadence), it does not mean continuous monitoring. Hover for the "
             "number of deployments behind each point."
         )
@@ -427,14 +428,15 @@ def render_mpa_populations(
         # is explained rather than looking broken.
         if by_status:
             nr = trend_effort[trend_effort["protection"] == NOT_RECORDED]
-            nr_years = nr["survey_year"].dropna()
+            nr_years = nr["survey_season"].dropna()
             if not nr.empty and not nr_years.empty:
                 st.info(
                     f"**{nr['drop_id'].nunique():,} deployments have no "
                     "protection status recorded**, their sites are not in "
                     "the SharePoint sites list. Most are legacy imports, "
-                    f"spanning {int(nr_years.min())}–{int(nr_years.max())}; "
-                    "in the earliest years they are the only data, which is "
+                    f"spanning {season_label(nr_years.min())}–"
+                    f"{season_label(nr_years.max())}; "
+                    "in the earliest seasons they are the only data, which is "
                     "why the axis reaches further back than the visible "
                     "lines. Click 'Not recorded' in the legend to see them."
                 )
@@ -759,7 +761,7 @@ def render_reserve_trends(
             indicator_selected = all_species
         else:
             # Filter empty: snapper, the report-wide default.
-            indicator_selected = [s for s in all_species if "Pagrus auratus" in s]
+            indicator_selected = [s for s in all_species if "Chrysophrys auratus" in s]
         if indicator_selected:
             st.caption(
                 "Species: **"
@@ -769,12 +771,12 @@ def render_reserve_trends(
             )
 
     min_years = st.slider(
-        "Minimum years of data per MPA",
+        "Minimum seasons of data per MPA",
         2,
         8,
         3,
         key="rep_trends_min_years",
-        help="MPAs with fewer years are shown but not labelled with a trend direction.",
+        help="MPAs with fewer seasons are shown but not labelled with a trend direction.",
     )
 
     # ── Compute per-(reserve, year) metric ───────────────────────────────────
@@ -819,8 +821,8 @@ def render_reserve_trends(
 
     # ── Line chart ──────────────────────────────────────────────────────────
     fig = px.line(
-        series.sort_values(["reserve_code", "Side", "survey_year"]),
-        x="survey_year",
+        series.sort_values(["reserve_code", "Side", "survey_season"]),
+        x="survey_season",
         y="metric",
         color="reserve_code",
         line_dash="Side",
@@ -828,7 +830,7 @@ def render_reserve_trends(
         markers=True,
         hover_data={"Side": True, "metric": ":.2f"},
         labels={
-            "survey_year": "Survey year",
+            "survey_season": "Survey season",
             "metric": y_title,
             "reserve_code": "MPA",
         },
@@ -849,7 +851,7 @@ def render_reserve_trends(
 
     # ── Honest caveat ───────────────────────────────────────────────────────
     st.caption(
-        "Trend lines fit a simple linear regression per MPA; 3+ years of data "
+        "Trend lines fit a simple linear regression per MPA; 3+ seasons of data "
         "required for a direction label. Real recovery often takes 5–10+ years and "
         "isn't linear, treat short-term trends as hints, not conclusions."
     )
@@ -867,13 +869,16 @@ def render_reserve_trends(
 
     st.markdown("**Per-MPA trend table**")
     st.dataframe(
-        trends_df.rename(
+        trends_df.assign(
+            first_year=trends_df["first_year"].map(season_label),
+            latest_year=trends_df["latest_year"].map(season_label),
+        ).rename(
             columns={
-                "n_years": "Years",
+                "n_years": "Seasons",
                 "slope": "Slope (/yr)",
                 "direction": "Trend",
-                "first_year": "First year",
-                "latest_year": "Latest year",
+                "first_year": "First season",
+                "latest_year": "Latest season",
                 "first_metric": "First value",
                 "latest_metric": "Latest value",
             }

@@ -14,12 +14,10 @@ import yaml
 
 from spyfish.config.species import species_registry
 from spyfish.config.wrapper import config
-from spyfish.ml.training.prepare_training_data import (
-    apply_post_assembly_floor,
-    canonicalize_species,
-)
+from spyfish.ml.training.prepare_training_data import canonicalize_species
+from spyfish.ml.training.rollup import apply_rollup
 
-ROSTER = ("fish", "Pagrus auratus", "Parapercis colias", "Jasus edwardsii", "bait")
+ROSTER = ("fish", "Chrysophrys auratus", "Parapercis colias", "Jasus edwardsii", "bait")
 
 
 def _registry(roster=ROSTER):
@@ -33,7 +31,7 @@ def test_configured_roster_pins_the_indicator_species_low():
     """The ordering is a human-legibility contract, so assert it, not just its shape."""
     order = config.training_class_order
     assert order[0] == "fish"
-    assert order[1] == "Pagrus auratus"  # snapper
+    assert order[1] == "Chrysophrys auratus"  # snapper
     assert order[2] == "Parapercis colias"  # blue cod
     assert order[3] == "Jasus edwardsii"  # rock lobster
     # bait was placed last "on purpose" when the roster ended there, but the
@@ -56,7 +54,7 @@ def test_every_indicator_species_is_on_the_roster():
 
 def test_order_is_the_roster_not_alphabetical():
     ordered = _registry().order_training_classes(
-        {"Jasus edwardsii", "Pagrus auratus", "fish"}
+        {"Jasus edwardsii", "Chrysophrys auratus", "fish"}
     )
     assert ordered == list(ROSTER)
     # Alphabetical would have put "Jasus edwardsii" first and "fish" last.
@@ -86,13 +84,13 @@ def test_adding_a_species_to_the_end_does_not_move_anyone():
 
 def test_training_class_id_is_the_roster_index():
     reg = _registry()
-    assert reg.training_class_id_for("Pagrus auratus") == 1
+    assert reg.training_class_id_for("Chrysophrys auratus") == 1
     assert reg.training_class_id_for("Jasus edwardsii") == 3
 
 
 def test_training_class_id_is_not_the_class_map_id():
     """Two different id spaces for the same animal; conflating them mislabels data."""
-    sp = _registry().by_scientific.get("Pagrus auratus")
+    sp = _registry().by_scientific.get("Chrysophrys auratus")
     assert sp is not None
     assert sp.training_class_id == 1
     # class_map.json sorts on AphiaID, so snapper is nowhere near 1 there.
@@ -139,12 +137,31 @@ def test_canonicalize_resolves_name_form_before_merging_taxa():
     assert canonicalize_species("Chelidonichthys kumu") == "Triglidae"
 
 
+def test_canonicalize_applies_the_synonyms_map():
+    """One animal under two names is the synonyms map's job, not the training
+    merge's: `training.species_canonicalization` no longer lists dentex, and
+    the training class must still be georgianus."""
+    assert canonicalize_species("Pseudocaranx dentex") == "Pseudocaranx georgianus"
+    assert "Pseudocaranx dentex" not in config.training_species_canonicalization
+
+
 def test_canonicalize_passes_unknown_names_through():
     """Unknown names must survive to the unpinned tail, not be silently dropped."""
     assert canonicalize_species("Nonexistent species") == "Nonexistent species"
 
 
-# ── the post-assembly floor ──────────────────────────────────────────────
+# ── the post-assembly rollup (which replaced the floor, 2026-11-10) ──────
+
+HIERARCHY = {
+    "fish": "object",
+    "bait": "object",
+    "Chrysophrys auratus": "Pagrus",
+    "Pagrus": "Sparidae",
+    "Sparidae": "fish",
+    "Parapercis colias": "Parapercis",
+    "Parapercis": "Pinguipedidae",
+    "Pinguipedidae": "fish",
+}
 
 
 def _dataset(tmp_path, class_names, train_labels):
@@ -160,56 +177,51 @@ def _dataset(tmp_path, class_names, train_labels):
     return species_dir
 
 
-def test_floor_merges_weak_classes_into_fish():
+def _apply(species_dir, floor):
+    return apply_rollup(species_dir, HIERARCHY, floor, pool_nodes=(), keep_separate=())
+
+
+def test_floor_merges_weak_classes_into_fish(tmp_path):
     """Sanity: the merge still happens, it is only the renumbering that stopped."""
-    import tempfile
-    from pathlib import Path
+    # class 1 (snapper) appears in 3 frames, class 2 (blue cod) in 1.
+    species_dir = _dataset(
+        tmp_path,
+        ["fish", "Chrysophrys auratus", "Parapercis colias", "bait"],
+        [[1], [1], [1], [2]],
+    )
+    rollup, names = _apply(species_dir, floor=3)
 
-    with tempfile.TemporaryDirectory() as td:
-        # class 1 (snapper) appears in 3 frames, class 2 (blue cod) in 1.
-        species_dir = _dataset(
-            Path(td),
-            ["fish", "Pagrus auratus", "Parapercis colias", "bait"],
-            [[1], [1], [1], [2]],
-        )
-        merged, names = apply_post_assembly_floor(species_dir, min_images=3)
-
-        assert merged == {"Parapercis colias"}
-        weak_frame = (species_dir / "labels" / "train" / "f3.txt").read_text()
-        assert weak_frame.startswith("0 "), "weak class should now be fish (id 0)"
+    assert set(rollup.merged()) == {"Parapercis colias"}
+    weak_frame = (species_dir / "labels" / "train" / "f3.txt").read_text()
+    assert weak_frame.startswith("0 "), "weak class should now be fish (id 0)"
 
 
-def test_floor_leaves_class_ids_and_names_untouched():
+def test_floor_leaves_class_ids_and_names_untouched(tmp_path):
     """The regression this whole file exists for."""
-    import tempfile
-    from pathlib import Path
+    class_names = ["fish", "Chrysophrys auratus", "Parapercis colias", "bait"]
+    species_dir = _dataset(tmp_path, class_names, [[1], [1], [1], [2]])
+    rollup, names = _apply(species_dir, floor=3)
 
-    with tempfile.TemporaryDirectory() as td:
-        class_names = ["fish", "Pagrus auratus", "Parapercis colias", "bait"]
-        species_dir = _dataset(Path(td), class_names, [[1], [1], [1], [2]])
-        merged, names = apply_post_assembly_floor(species_dir, min_images=3)
+    assert (
+        rollup.merged()
+    )  # something was merged, so the old code would have renumbered
+    assert names == class_names, "the rollup must not drop or reorder names"
 
-        assert merged  # something was merged, so the old code would have renumbered
-        assert names == class_names, "the floor must not drop or reorder names"
+    on_disk = yaml.safe_load((species_dir / "data.yaml").read_text())
+    assert on_disk["names"] == class_names
+    assert on_disk["nc"] == len(class_names)
 
-        on_disk = yaml.safe_load((species_dir / "data.yaml").read_text())
-        assert on_disk["names"] == class_names
-        assert on_disk["nc"] == len(class_names)
-
-        # Snapper is still 1 in the rewritten labels, not shifted down to 1-of-3.
-        surviving = (species_dir / "labels" / "train" / "f0.txt").read_text()
-        assert surviving.startswith("1 ")
+    # Snapper is still 1 in the rewritten labels, not shifted down to 1-of-3.
+    surviving = (species_dir / "labels" / "train" / "f0.txt").read_text()
+    assert surviving.startswith("1 ")
 
 
-def test_floor_never_merges_fish_or_bait():
+def test_floor_never_merges_fish_or_bait(tmp_path):
     """bait is in every frame; folding it into fish inflates every drop's MaxN."""
-    import tempfile
-    from pathlib import Path
-
-    with tempfile.TemporaryDirectory() as td:
-        species_dir = _dataset(
-            Path(td), ["fish", "Pagrus auratus", "bait"], [[1], [1], [1], [2]]
-        )
-        merged, _ = apply_post_assembly_floor(species_dir, min_images=3)
-        assert "bait" not in merged
-        assert "fish" not in merged
+    species_dir = _dataset(
+        tmp_path, ["fish", "Chrysophrys auratus", "bait"], [[1], [1], [1], [2]]
+    )
+    rollup, _ = _apply(species_dir, floor=3)
+    assert "bait" not in rollup.merged()
+    assert "fish" not in rollup.merged()
+    assert (species_dir / "labels" / "train" / "f3.txt").read_text().startswith("2 ")

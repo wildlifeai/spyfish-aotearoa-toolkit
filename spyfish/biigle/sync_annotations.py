@@ -442,7 +442,7 @@ def _drop_boundary_pattern(drop_id: str) -> re.Pattern:
     return re.compile(re.escape(drop_id) + r"(?![0-9A-Za-z])")
 
 
-def _rows_for_drop(report: pd.DataFrame, drop_id: str) -> pd.DataFrame:
+def rows_for_drop(report: pd.DataFrame, drop_id: str) -> pd.DataFrame:
     """Rows of a SHARED (survey-pooled) volume report belonging to one drop.
 
     Pooled volume filenames carry the ``{drop}/frames/`` segment and their
@@ -478,7 +478,7 @@ def _volume_has_drop_files(handler, volume_id: int, drop_id: str, cache: dict) -
     return any(pattern.search(name) for name in cache[volume_id])
 
 
-def _write_reviewed_frames_csv(
+def write_reviewed_frames_csv(
     handler, volume_id: int, drop_id: str, cache: dict
 ) -> int:
     """Record every frame of `drop_id` present in `volume_id`, annotated or not.
@@ -583,7 +583,7 @@ def sync_biigle_annotations():
                 report_cache[volume_id] = report
 
             if volume_share_count[volume_id] > 1:
-                report = _rows_for_drop(report, drop_id)
+                report = rows_for_drop(report, drop_id)
                 if report.empty and not _volume_has_drop_files(
                     handler, volume_id, drop_id, volume_files_cache
                 ):
@@ -601,7 +601,16 @@ def sync_biigle_annotations():
                 # that the expert looked at all - without it "saw nothing" and
                 # "never uploaded" are both just a missing file on disk, and
                 # every frame of a genuinely empty drop is a lost negative.
-                _write_reviewed_frames_csv(
+                # The (empty) raw report is written too: biigle_to_yolo trusts
+                # a reviewed list only next to its volume's annotations CSV,
+                # and an empty drop is the case the list exists for.
+                config.get_drop_annotations_dir(drop_id).mkdir(
+                    parents=True, exist_ok=True
+                )
+                report.to_csv(
+                    config.get_biigle_expert_raw_csv_path(drop_id), index=False
+                )
+                write_reviewed_frames_csv(
                     handler, volume_id, drop_id, volume_files_cache
                 )
                 _record_null_deployment(
@@ -618,7 +627,7 @@ def sync_biigle_annotations():
 
             # Negatives: the frames in this volume that the report does NOT
             # mention are frames the expert reviewed and left empty.
-            _write_reviewed_frames_csv(handler, volume_id, drop_id, volume_files_cache)
+            write_reviewed_frames_csv(handler, volume_id, drop_id, volume_files_cache)
 
             _write_substrate_csv(parser, report, drop_id, trees)
 

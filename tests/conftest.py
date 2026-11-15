@@ -25,6 +25,7 @@ Usage in tests:
         assert env.db.get_deployment(DROP_NORMAL)["ml_status"] == MlStatus.READY
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -89,6 +90,8 @@ csv_mapping:
 paths:
   base_dir: "process_files"
   deployment_targets_csv: process_files/deployment_targets.csv
+  zooniverse_workflow_versions: process_files/zooniverse/workflow_versions
+  species_synonyms: process_files/legacy_data_help/species_map_global.yaml
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
@@ -116,17 +119,35 @@ paths:
     base_model: "base_model"
     pipeline_model: "pipeline_model"
     archived_models: "archived_models"
+    classifier: "classifier"
+    bioclip: "bioclip"
+    two_stage: "wip_two_stage"
 
 ml_inference:
   limit_processing: 1
   log_interval_frames: 10
   ml_fps: 3
   imgsz: 640
+  batch_size: 32
+  batch_size_imgsz: 640
   confidence_threshold: 0.25
   maxn_confidence_threshold: 0.50
   maxn_persistence_seconds: 1.0
   maxn_gap_fill_seconds: 0.4
-  maxn_exclude_classes: ["bait"]
+  maxn_exclude_classes: ["bait", "Not a fish?"]
+  classifier:
+    enabled: false
+    backbone: "hf-hub:imageomics/bioclip-2"
+    crop_margin: 0.10
+    min_box_px: 16
+    batch_size: 64
+    preprocess_workers: 0
+    p_min: 0.5
+    fallback_label: fish
+    fallback_to_yolo: true
+    fallback_yolo_min_confidence: 0.5
+    label_map:
+      "other fish": fish
   legacy_review:
     random_intervals: 2
     max_time_delta_seconds: 0.5
@@ -170,6 +191,10 @@ zooniverse:
       crop_image_px: 800
     frames:
       max_width_px: 1920
+    sync:
+      miss_iou: 0.3
+      yes_labels: ["Yes"]
+      no_labels: ["No"]
 
 orchestrator:
   is_test_run: true
@@ -193,18 +218,97 @@ biigle:
   volume_finalize_retry_interval_secs: 0.1
   report_download_max_retries: 3
   report_download_retry_interval_secs: 0.1
+  image_label_workers: 2
+  rate_limit_max_retries: 2
+  rate_limit_fallback_wait_secs: 0.01
+  rate_limit_max_wait_secs: 1
 
 training:
   image_extensions: [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"]
   epochs: 100
   patience: 25
   imgsz: 640
+  augmentation:
+    hsv_h: 0.05
+    hsv_s: 0.8
+    hsv_v: 0.6
+    degrees: 10.0
+    fliplr: 0.5
+    mosaic: 1.0
+    mixup: 0.1
+    bgr: 0.1
+  stability:
+    warmup_epochs: 5.0
+    warmup_bias_lr: 0.0001
+    nbs: 64
+    amp: false
+    box: 5.0
+    cache: disk
+    workers: 8
   train_pct: 0.85
   val_pct: 0.15
-  test_pct: 0.0
   class_floor_pct: 0.02
   local_training_dir: "process_files/training"
   retrain_min_improvement_pct: 2.0
+  threshold_beta: 2.0
+  class_order: ["fish", "Chrysophrys auratus", "Parapercis colias", "bait"]
+  class_floor_min_images: 50
+  hierarchy_file: "process_files/training/hierarchy.json"
+  rollup_pool_nodes: ["Anguilliformes", "Elasmobranchii", "Batoidea"]
+  rollup_keep_separate: ["Cephaloscyllium isabella", "Squalus acanthias"]
+  species_canonicalization:
+    Chelidonichthys kumu: Triglidae
+  classifier:
+    source: biigle_csv
+    min_drops: 2
+    min_crops: 30
+    other_class: "other fish"
+    not_fish_class: "not a fish"
+    exclude_classes: [bait, fish]
+    max_crops_per_drop_species: 300
+    seed: 42
+    folds: 5
+    iou_match: 0.5
+    prior_alpha: 1.0
+    finetune:
+      fold: 3
+      epochs: 6
+      batch: 32
+      unfreeze_blocks: 2
+      lr_encoder: 1.0e-5
+      lr_head: 1.0e-3
+      weight_decay: 0.05
+      label_smoothing: 0.1
+      workers: 0
+      augmentation:
+        rotation_degrees: 180
+        horizontal_flip: true
+        color_jitter: [0.3, 0.3, 0.3, 0.05]
+        blur_probability: 0.3
+        blur_kernel: 5
+        blur_sigma: [0.1, 1.5]
+    hard_negatives:
+      iou_negative: 0.3
+      max_per_drop: 400
+      n_clusters: 16
+    static_boxes:
+      link_distance_box: 0.5
+      link_distance_px: 80
+      link_size_ratio: 1.5
+      max_gap_seconds: 600
+      min_span_seconds: 300
+      min_boxes: 20
+      max_spread_px: 25
+      max_size_spread: 0.15
+      crops_per_track: 5
+      crop_min_iou: 0.7
+      not_a_fish_flag: false
+      label: "Not a fish?"
+      flag_below: 0.0
+      score_conf_mean: 0.4272
+      score_conf_std: 0.1119
+      score_rate_mean: -2.0704
+      score_rate_std: 1.5555
 
 validation_patterns:
   drop_id:   "^[A-Z]{3}_\\\\d{8}_BUV_[A-Z]{3}_\\\\d{3}_\\\\d{2}$"
@@ -300,7 +404,7 @@ RAW_ML_DETECTIONS: dict[str, pd.DataFrame] = {
             {
                 "frame": 10,
                 "time_seconds": 4.0,
-                "class": "Pagrus auratus",
+                "class": "Chrysophrys auratus",
                 "confidence": 0.85,
                 "x": 160,
                 "y": 120,
@@ -310,7 +414,7 @@ RAW_ML_DETECTIONS: dict[str, pd.DataFrame] = {
             {
                 "frame": 10,
                 "time_seconds": 4.0,
-                "class": "Pagrus auratus",
+                "class": "Chrysophrys auratus",
                 "confidence": 0.90,
                 "x": 200,
                 "y": 120,
@@ -320,7 +424,7 @@ RAW_ML_DETECTIONS: dict[str, pd.DataFrame] = {
             {
                 "frame": 25,
                 "time_seconds": 10.0,
-                "class": "Pagrus auratus",
+                "class": "Chrysophrys auratus",
                 "confidence": 0.95,
                 "x": 160,
                 "y": 120,
@@ -330,7 +434,7 @@ RAW_ML_DETECTIONS: dict[str, pd.DataFrame] = {
             {
                 "frame": 37,
                 "time_seconds": 14.8,
-                "class": "Pagrus auratus",
+                "class": "Chrysophrys auratus",
                 "confidence": 0.72,
                 "x": 160,
                 "y": 120,
@@ -350,7 +454,7 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
         [
             {
                 "DropID": DROP_NORMAL,
-                "ScientificName": "Pagrus auratus",
+                "ScientificName": "Chrysophrys auratus",
                 "TimeOfMax": "00:00:04.000",  # seconds_to_time(4.0)
                 "MaxInterval": 2,
                 "AnnotatedBy": "ml",
@@ -361,7 +465,7 @@ EXPECTED_MAXN: dict[str, pd.DataFrame] = {
             },
             {
                 "DropID": DROP_NORMAL,
-                "ScientificName": "Pagrus auratus",
+                "ScientificName": "Chrysophrys auratus",
                 "TimeOfMax": "00:00:10.000",  # seconds_to_time(10.0)
                 "MaxInterval": 1,
                 "AnnotatedBy": "ml",
@@ -393,7 +497,7 @@ _ML_COMPLETE_MAXN_ROWS = [
     },
     {
         "DropID": DROP_ML_COMPLETE,
-        "ScientificName": "Pagrus auratus",
+        "ScientificName": "Chrysophrys auratus",
         "TimeOfMax": "00:00:15.000",
         "MaxInterval": 2,
         "AnnotatedBy": "ml",
@@ -443,6 +547,79 @@ class PipelineEnv:
     model_name: str = MODEL_NAME
 
 
+# ── Species registry for the test env ─────────────────────────────────────────
+
+TEST_SPECIES = [
+    ("Chrysophrys auratus", "Snapper", 367239),
+    ("Parapercis colias", "Blue cod", 281789),
+    ("Notolabrus fucicola", "Banded wrasse", 281788),
+    ("Notolabrus celidotus", "Spotty", 281786),
+    ("Pseudolabrus miles", "Scarlet wrasse", 281791),
+    ("Pseudocaranx georgianus", "Silver trevally", 1039991),
+    # WoRMS spelling; the AphiaID is the old record's so the fixture's class ids keep their order.
+    ("Meuschenia scabra", "Smooth leatherjacket", 277614),
+]
+TEST_SYNONYMS = {
+    # The seeded MaxN CSV writes the pre-revision leatherjacket name, so the
+    # fixture itself exercises a rename on insert.
+    "Parika scaber": "Meuschenia scabra",
+    "Pseudocaranx dentex": "Pseudocaranx georgianus",
+    "Pagrus auratus": "Chrysophrys auratus",
+    "Unidentified fish": "Unidentified",
+    "Unidentified": "fish",
+    "Sp1": "fish",
+}
+
+
+def write_test_species_registry(
+    root, species=TEST_SPECIES, synonyms=TEST_SYNONYMS, aliases=None
+):
+    """Write class_map.json + the synonyms YAML under ``root`` (= project root).
+
+    Mirrors the shape ``spyfish.biigle.class_map`` writes: species sorted on
+    AphiaID, then the two bucket classes with their BIIGLE aliases.
+    ``aliases`` is ``{scientific_name: [alias, ...]}`` for a species entry,
+    the way ``_MANUAL_OVERRIDES`` merges them onto a tree label.
+    """
+    entries = {}
+    for i, (sci, common, aphia) in enumerate(sorted(species, key=lambda s: s[2])):
+        entries[str(i)] = {
+            "class_id": i,
+            "aphia_id": aphia,
+            "scientific_name": sci,
+            "common_name": common,
+        }
+        if aliases and sci in aliases:
+            entries[str(i)]["aliases"] = sorted(aliases[sci])
+    n = len(entries)
+    entries[str(n)] = {
+        "class_id": n,
+        "aphia_id": None,
+        "scientific_name": "fish",
+        "common_name": "fish",
+        "aliases": [
+            "Fish - Final",
+            "Fish: final",
+            "Fish: review required",
+            "To review",
+        ],
+    }
+    entries[str(n + 1)] = {
+        "class_id": n + 1,
+        "aphia_id": None,
+        "scientific_name": "bait",
+        "common_name": "bait",
+        "aliases": ["Bait", "Bait box"],
+    }
+    class_map = config.class_map_path
+    class_map.parent.mkdir(parents=True, exist_ok=True)
+    class_map.write_text(json.dumps(entries, indent=2))
+    syn = config.species_synonyms_path
+    syn.parent.mkdir(parents=True, exist_ok=True)
+    syn.write_text(yaml.safe_dump(dict(synonyms)))
+    return class_map, syn
+
+
 # ── Integration fixture ───────────────────────────────────────────────────────
 
 
@@ -490,6 +667,12 @@ def pipeline_env(tmp_path, monkeypatch):
     (tmp_path / "process_files" / "db").mkdir(parents=True)
     for drop_id in [DROP_NORMAL, DROP_STUCK, DROP_ML_COMPLETE]:
         config.get_drop_annotations_dir(drop_id).mkdir(parents=True)
+
+    # ── 3b. Species registry + synonyms map ───────────────────────────────
+    # add_annotations canonicalises every scientific name against the registry
+    # and raises on an unknown one, so the env needs a class map naming the
+    # species the tests write, plus the synonyms map the gate reads.
+    write_test_species_registry(tmp_path)
 
     # ── 4. Create databases ───────────────────────────────────────────────
     # Paths now resolve inside tmp_path thanks to the monkeypatch above.

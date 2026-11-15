@@ -23,6 +23,7 @@ from ecology_data import (
     UNPROTECTED,
     UNRECORDED_PROTECTION,
     protection_group,
+    season_label,
 )
 from theme import (
     ABUNDANCE_SCALE,
@@ -152,12 +153,12 @@ def render_protection_effect_ci(
 
     stratum_choice = st.radio(
         "Compare inside against outside within",
-        ["Each MPA", "Each MPA and survey year"],
+        ["Each MPA", "Each MPA and survey season"],
         horizontal=True,
         key="species_ci_stratum",
         help="Inside and outside are only compared where they share the "
         "chosen context, so a difference between places (or seasons) cannot "
-        "arrive looking like a difference from protection. Adding the year "
+        "arrive looking like a difference from protection. Adding the season "
         "controls more and compares less: contexts without both sides drop "
         "out.",
     )
@@ -169,7 +170,7 @@ def render_protection_effect_ci(
         frame[stratum_col] = (
             frame["reserve_code"].astype(str)
             + " "
-            + frame["survey_year"].astype("Int64").astype(str)
+            + frame["survey_season"].astype("Int64").astype(str)
         )
 
     # Indicator species the data actually holds; the rest of the config list
@@ -274,7 +275,7 @@ def render_protection_effect_ci(
             "Areas": st.column_config.NumberColumn(
                 "Areas",
                 format="%d",
-                help="MPAs (or MPA-years) with at least two deployments on "
+                help="MPAs (or MPA-seasons) with at least two deployments on "
                 "both sides. Others are left out.",
             ),
         },
@@ -886,14 +887,14 @@ def render_species_over_time(
     """
     section("Species over time")
     st.caption(
-        "Abundance for chosen species by survey year, inside an MPA against "
+        "Abundance for chosen species by survey season, inside an MPA against "
         "outside. Pick species with the sidebar **Species** filter."
     )
 
     real = real_species(per_species)
-    real = real[real["survey_year"].notna()]
+    real = real[real["survey_season"].notna()]
     if real.empty:
-        st.info("No species annotations with a survey year.")
+        st.info("No species annotations with a survey date.")
         return None, False
     # Unknown protection becomes its own group rather than vanishing: the
     # legacy imports live at sites the SharePoint sites list does not know,
@@ -947,23 +948,23 @@ def render_species_over_time(
     # Same fill as `real` above: an unknown-protection deployment counts in
     # the Unknown line's denominator, not in nobody's.
     denom_src = per_species_all if per_species_all is not None else per_species
-    classified = denom_src[denom_src["survey_year"].notna()].assign(
+    classified = denom_src[denom_src["survey_season"].notna()].assign(
         Group=lambda f: f["Group"].fillna(UNRECORDED_PROTECTION)
     )
     deps_per_year = effort_per(
-        classified.assign(Year=classified["survey_year"].astype("Int64")),
+        classified.assign(Year=classified["survey_season"].astype("Int64")),
         ["Year", "Group"],
         "deployments",
     )
 
     totals = (
-        picked.groupby([picked["survey_year"].astype("Int64"), "Species", "Group"])
+        picked.groupby([picked["survey_season"].astype("Int64"), "Species", "Group"])
         .agg(
             total=("maxn", "sum"),
             seen=("drop_id", "nunique"),
         )
         .reset_index()
-        .rename(columns={"survey_year": "Year"})
+        .rename(columns={"survey_season": "Year"})
         .merge(deps_per_year, on=["Year", "Group"], how="left")
     )
     if totals.empty:
@@ -989,6 +990,7 @@ def render_species_over_time(
                 totals,
                 x="Year",
                 y=metric,
+                labels={"Year": "Survey season"},
                 color="Species",
                 line_dash="Group",
                 markers=True,
@@ -1038,14 +1040,15 @@ def render_species_over_time(
     ].nunique()
     if unknown_drops:
         u_years = classified.loc[
-            classified["Group"] == UNRECORDED_PROTECTION, "survey_year"
+            classified["Group"] == UNRECORDED_PROTECTION, "survey_season"
         ]
         st.info(
             f"**{unknown_drops:,} deployments in this selection have no "
             "protection status**: their sites are not in the SharePoint sites "
             "list, which is where protection metadata lives. Most are legacy "
-            f"imports, they span {int(u_years.min())}–{int(u_years.max())} "
-            "and are the only data in the earliest years, which is why the "
+            f"imports, they span {season_label(u_years.min())}–"
+            f"{season_label(u_years.max())} "
+            "and are the only data in the earliest seasons, which is why the "
             "axis reaches further back than the visible lines. Click "
             f"'{UNRECORDED_PROTECTION}' in the legend to see them; once the sites "
             "gain SharePoint records they move onto their proper side "
@@ -1070,13 +1073,13 @@ def render_yearly_trend(df: pd.DataFrame, species_filter: list | None = None) ->
     one; with several picked, or none, a selectbox picks among them, opening
     on snapper.
     """
-    section("Year trend")
+    section("Season trend")
     st.caption(
-        "Mean peak MaxN per site per survey year. "
-        "Surveys are 1–2 year cadence, not seasonal."
+        "Mean peak MaxN per site per survey season. "
+        "Sites are resurveyed every 1–2 seasons, not within one."
     )
 
-    df = df[df["scientific_name"].notna() & df["survey_year"].notna()]
+    df = df[df["scientific_name"].notna() & df["survey_season"].notna()]
     all_species = sorted(df["display_name"].dropna().unique())
     if not all_species:
         st.warning("No species data after filters.")
@@ -1088,10 +1091,10 @@ def render_yearly_trend(df: pd.DataFrame, species_filter: list | None = None) ->
         species = all_species[0]
         st.caption(f"Species: **{species}**, from the sidebar Species filter.")
     else:
-        # Default to Snapper (Pagrus auratus), iconic NZ BUV species with rich
-        # historical data, falling back to Blue cod, then alphabetical first.
+        # Default to Snapper (Chrysophrys auratus), iconic NZ BUV species with
+        # rich historical data, falling back to Blue cod, then alphabetical first.
         default_idx = 0
-        for preferred in ("Pagrus auratus", "Parapercis colias"):
+        for preferred in ("Chrysophrys auratus", "Parapercis colias"):
             for i, name in enumerate(all_species):
                 if preferred in name:
                     default_idx = i
@@ -1105,7 +1108,7 @@ def render_yearly_trend(df: pd.DataFrame, species_filter: list | None = None) ->
     df = df[df["display_name"] == species]
 
     trend = (
-        df.groupby(["site_id", "survey_year", "protection_status"], dropna=False)[
+        df.groupby(["site_id", "survey_season", "protection_status"], dropna=False)[
             "maxn"
         ]
         .mean()
@@ -1113,15 +1116,15 @@ def render_yearly_trend(df: pd.DataFrame, species_filter: list | None = None) ->
         .rename(columns={"maxn": "mean_maxn"})
     )
     trend["mean_maxn"] = trend["mean_maxn"].round(2)
-    trend["survey_year"] = trend["survey_year"].astype(int)
+    trend["survey_season"] = trend["survey_season"].astype(int)
 
     if trend.empty:
         st.warning(f"No data for {species}.")
         return
 
     fig = px.line(
-        trend.sort_values("survey_year"),
-        x="survey_year",
+        trend.sort_values("survey_season"),
+        x="survey_season",
         y="mean_maxn",
         color="site_id",
         line_dash="protection_status",
@@ -1133,7 +1136,7 @@ def render_yearly_trend(df: pd.DataFrame, species_filter: list | None = None) ->
         markers=True,
         hover_data={"protection_status": True, "mean_maxn": True},
         labels={
-            "survey_year": "Survey year",
+            "survey_season": "Survey season",
             "mean_maxn": f"Mean MaxN, {species}",
             "site_id": "Site",
             "protection_status": "Protection",
@@ -1151,7 +1154,7 @@ def render_yearly_trend(df: pd.DataFrame, species_filter: list | None = None) ->
 
     with st.expander("Data"):
         st.dataframe(
-            trend.sort_values(["site_id", "survey_year"]),
+            trend.sort_values(["site_id", "survey_season"]),
             hide_index=True,
             column_config={"site_id": st.column_config.TextColumn("Site", pinned=True)},
         )

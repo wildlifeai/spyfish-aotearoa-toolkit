@@ -65,8 +65,7 @@ def require_ml_raw_csv(drop_id: str) -> Path:
     `process_maxn` and status advance, so a drop could end up holding
     detections but no MaxN and no `ml_complete`.
     """
-    model_path = config.pipeline_model_path
-    raw_csv = config.get_raw_csv_path(drop_id, model_path.stem)
+    raw_csv = config.get_raw_csv_path(drop_id, config.pipeline_model_name)
     if raw_csv.exists():
         return raw_csv
 
@@ -89,7 +88,7 @@ def _per_frame_csv_name(drop_id: str) -> str:
     full-video one. Without the version a re-run would silently reuse the
     previous model's boxes.
     """
-    return f"{drop_id}_{config.pipeline_model_path.stem}_raw.csv"
+    return config.get_raw_csv_path(drop_id, config.pipeline_model_name).name
 
 
 # ── Inference ────────────────────────────────────────────────────────────────

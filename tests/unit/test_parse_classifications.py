@@ -38,7 +38,7 @@ def test_parse_annotation_species_with_count_and_timestamp():
     ann = {
         "value": [
             {
-                "choice": "Pagrus auratus",
+                "choice": "Chrysophrys auratus",
                 "answers": {
                     "HOWMANYINDIVIDUALSARETHEREATTHISTIMESTAMP": "3",
                     "WHATISTHEEARLIESTPOINTTHATYOUSEETHEMOSTINDIVIDUALSOFTHISSPECIES": "5S",
@@ -48,7 +48,7 @@ def test_parse_annotation_species_with_count_and_timestamp():
     }
     rows = _parse_annotation(ann)
     assert len(rows) == 1
-    assert rows[0]["species"] == "Pagrus auratus"
+    assert rows[0]["species"] == "Chrysophrys auratus"
     assert rows[0]["count"] == 3
     assert rows[0]["annotation_seconds"] == 5.0
     assert rows[0]["is_nothing_here"] is False
@@ -59,7 +59,7 @@ def test_parse_annotation_bucket_count():
     ann = {
         "value": [
             {
-                "choice": "Pagrus auratus",
+                "choice": "Chrysophrys auratus",
                 "answers": {
                     "HOWMANYINDIVIDUALSARETHEREATTHISTIMESTAMP": "2030",
                 },
@@ -216,17 +216,17 @@ def test_blank_submissions_excluded_from_aggregation():
 
 
 def test_parse_annotation_skips_non_dict_values():
-    ann = {"value": ["garbage", 42, None, {"choice": "Pagrus auratus"}]}
+    ann = {"value": ["garbage", 42, None, {"choice": "Chrysophrys auratus"}]}
     rows = _parse_annotation(ann)
     assert len(rows) == 1
-    assert rows[0]["species"] == "Pagrus auratus"
+    assert rows[0]["species"] == "Chrysophrys auratus"
 
 
 def test_parse_annotation_multiple_species():
     ann = {
         "value": [
             {
-                "choice": "Pagrus auratus",
+                "choice": "Chrysophrys auratus",
                 "answers": {"HOWMANYINDIVIDUALSARETHEREATTHISTIMESTAMP": "2"},
             },
             {
@@ -237,7 +237,10 @@ def test_parse_annotation_multiple_species():
     }
     rows = _parse_annotation(ann)
     assert len(rows) == 2
-    assert {r["species"] for r in rows} == {"Pagrus auratus", "Notolabrus fucicola"}
+    assert {r["species"] for r in rows} == {
+        "Chrysophrys auratus",
+        "Notolabrus fucicola",
+    }
 
 
 # ── _extract_subject_metadata ────────────────────────────────────────────────
@@ -316,7 +319,7 @@ def _make_classification(
             {
                 "value": [
                     {
-                        "choice": "Pagrus auratus",
+                        "choice": "Chrysophrys auratus",
                         "answers": {
                             "HOWMANYINDIVIDUALSARETHEREATTHISTIMESTAMP": "2",
                             "WHATISTHEEARLIESTPOINTTHATYOUSEETHEMOSTINDIVIDUALSOFTHISSPECIES": "3S",
@@ -348,7 +351,7 @@ def test_parse_classifications_single_species():
     raw = [_make_classification()]
     df = parse_classifications(raw)
     assert len(df) == 1
-    assert df.iloc[0]["species"] == "Pagrus auratus"
+    assert df.iloc[0]["species"] == "Chrysophrys auratus"
     assert df.iloc[0]["count"] == 2
     assert df.iloc[0]["annotation_seconds"] == 3.0
     assert df.iloc[0]["absolute_seconds"] == 450.0 + 3.0  # upl + annotation
@@ -380,7 +383,7 @@ def test_parse_classifications_frame_uses_upl_seconds_directly():
                 {
                     "value": [
                         {
-                            "choice": "Pagrus auratus",
+                            "choice": "Chrysophrys auratus",
                             "answers": {
                                 "HOWMANYINDIVIDUALSARETHEREATTHISTIMESTAMP": "1",
                             },
@@ -433,7 +436,7 @@ def test_parse_classifications_warns_on_missing_canonical_keys(caplog):
 def _make_parsed_rows(
     subject_id="subj_1",
     drop_id="KSF_20240124_BUV_KSF_085_01",
-    species="Pagrus auratus",
+    species="Chrysophrys auratus",
     n_classifiers=5,
     n_species_votes=3,
     n_nothing_votes=2,

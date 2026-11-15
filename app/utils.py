@@ -92,16 +92,21 @@ def check_password(secret_key: str = "APP_PASSWORD", *, label: str = "Password")
     ``APP_PASSWORD``, and two gates on one page cannot collide on widget IDs.
 
     Secrets are read from ``.streamlit/secrets.toml`` **relative to the working
-    directory Streamlit was launched from**, run the app from ``app/`` or
+    directory Streamlit was launched from**: ``app/`` for the DOC app,
+    ``uoa/app/`` for the UoA app; launched anywhere else
     ``st.secrets`` will be empty and every gate silently stays locked.
     """
     state_key = f"_pw_ok_{secret_key}"
     if not st.session_state.get(state_key, False):
-        expected = st.secrets.get(secret_key)
+        try:
+            expected = st.secrets.get(secret_key)
+        except FileNotFoundError:  # no secrets.toml at all
+            expected = None
         if expected is None:
             st.error(
                 f"`{secret_key}` is not set in `.streamlit/secrets.toml`, or the app "
-                "was launched from the wrong directory, run it from `app/`."
+                "was launched from the wrong folder: the DOC app runs from `app/`, "
+                "the UoA app from `uoa/app/`."
             )
             return False
         password = st.text_input(label, type="password", key=f"_pw_in_{secret_key}")

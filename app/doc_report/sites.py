@@ -56,7 +56,7 @@ def render(ctx: dict | None = None) -> None:
             "Site detail",
             "Site map",
             "Leaderboard",
-            "Year trend",
+            "Season trend",
             "Click to filter",
         ]
     )

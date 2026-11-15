@@ -3,7 +3,8 @@ train.py. Train the species YOLO detection model for Spyfish Aotearoa.
 
 Adapted from yolov12_comparison/train_models.py, with:
   - S3 download of base model weights if not cached locally
-  - Water/underwater augmentation params
+  - Augmentation and stability params from config.yaml
+    (training.augmentation / training.stability)
   - Per-model output to process_files/training/{timestamp}/
   - Upload of trained weights to S3 after training
 
@@ -24,35 +25,14 @@ from typing import Optional
 import yaml
 
 from spyfish.config.wrapper import config
+from spyfish.ml.training.rollup import ROLLUP_MAP_FILENAME
+from spyfish.ml.training.yolo_labels import SPLITS
 from spyfish.utils import validate_model_path
 
-# Water/underwater augmentation params (validated in yolov12_comparison experiments)
-WATER_AUG_PARAMS = {
-    "hsv_h": 0.05,  # hue variance for blue/green shifts
-    "hsv_s": 0.8,  # saturation variance for murky vs clear water
-    "hsv_v": 0.6,  # value variance for lighting depth changes
-    "degrees": 10.0,  # slight rotation
-    "fliplr": 0.5,  # horizontal flips
-    "mosaic": 1.0,  # combine 4 images
-    "mixup": 0.1,  # slight mixup for overlapping
-    "bgr": 0.1,  # 10% chance to swap BGR channels
-}
-
-# Stability params to prevent NaN during training (validated in yolov12_comparison)
-STABILITY_PARAMS = {
-    "warmup_epochs": 5.0,
-    "warmup_bias_lr": 0.0001,
-    "nbs": 64,
-    "amp": False,  # Disable AMP, fp16 causes NaN on some underwater datasets
-    "box": 5.0,  # Lower bounding box loss penalty (default 7.5)
-    # Cache decoded images to DISK, not RAM. cache=True (RAM) OOM-kills under
-    # SLURM: Ultralytics sizes the RAM cache from psutil, which reports the whole
-    # node's memory (100s of GB) rather than the job's cgroup limit (--mem), so it
-    # caches to RAM and blows past the limit. 'disk' is fast across epochs with
-    # bounded RAM. (2026-06-03: was True → OOM-killed at --mem=32G.)
-    "cache": "disk",
-    "workers": 8,  # parallel dataloader processes for epoch 1's disk reads
-}
+# Augmentation and stability arguments live in config.yaml (training.augmentation,
+# training.stability) so the WIP detector job and any other trainer pass the
+# identical recipe. Until 2026-11-10 they were two dicts here, and the detector
+# script, written from config.yaml, trained without them.
 
 # Class-imbalance handling lives here, not in prepare_training_data.py.
 # Trim/oversample were removed, they were destructive (oversample copies whole
@@ -185,8 +165,8 @@ def train_model(
         "optimizer": config.training_optimizer,
         "lr0": config.training_lr0,
         "dropout": config.training_dropout,
-        **WATER_AUG_PARAMS,
-        **STABILITY_PARAMS,
+        **config.training_augmentation,
+        **config.training_stability,
     }
     if extra_params:
         params.update(extra_params)
@@ -226,6 +206,7 @@ def freeze_dataset_snapshot(data_yaml: Path, run_dir: Path) -> Optional[Path]:
     "what was this .pt trained on?". Captures the lean essentials only:
       - ``data.yaml`` (resolved class list)
       - ``class_map.json`` sidecar (if present next to data.yaml)
+      - ``rollup_map.json`` (which class each labelled taxon trained as, and why)
       - the label ``.txt`` files for each split (tiny; the annotations themselves)
       - ``{split}.txt`` lists of image filenames per split
 
@@ -243,8 +224,11 @@ def freeze_dataset_snapshot(data_yaml: Path, run_dir: Path) -> Optional[Path]:
         sidecar = src_dir / "class_map.json"
         if sidecar.exists():
             shutil.copy2(sidecar, snap / "class_map.json")
+        rollup_map = src_dir / ROLLUP_MAP_FILENAME
+        if rollup_map.exists():
+            shutil.copy2(rollup_map, snap / ROLLUP_MAP_FILENAME)
 
-        for split in ("train", "val", "test"):
+        for split in SPLITS:
             lbl_src = src_dir / "labels" / split
             img_src = src_dir / "images" / split
             if lbl_src.is_dir():
@@ -285,12 +269,12 @@ def run_training_pipeline(species_data_yaml: str) -> dict:
     # Type first, stamp last: the run dir name becomes the promoted file name
     # and so the model name in the annotations DB (validation_patterns.model_name).
     run_name = config.validate_model_name(f"species_{timestamp}")
-    run_dir = local_training_dir / "runs" / run_name
+    run_dir = config.training_runs_dir / run_name
     freeze_dataset_snapshot(Path(species_data_yaml), run_dir)
     best_pt = train_model(
         data_yaml=species_data_yaml,
         base_model_path=str(base_model_path),
-        project_dir=local_training_dir / "runs",
+        project_dir=config.training_runs_dir,
         run_name=run_name,
         epochs=config.training_epochs,
         patience=config.training_patience,
@@ -311,9 +295,7 @@ def main():
     )
     args = parser.parse_args()
 
-    species_data = args.species_data or str(
-        config.local_training_dir / "species" / "data.yaml"
-    )
+    species_data = args.species_data or str(config.training_data_yaml)
     run_training_pipeline(species_data_yaml=species_data)
 
 

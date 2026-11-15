@@ -116,7 +116,17 @@ def best_per_drop_species(df: pd.DataFrame) -> pd.DataFrame:
     """
     ranked = df.assign(_rank=source_rank(df))
     best = ranked.groupby("drop_id")["_rank"].transform("min")
-    return ranked[ranked["_rank"] == best].drop(columns="_rank")
+    kept = ranked[ranked["_rank"] == best].drop(columns="_rank")
+    # One source can still hold two accounts of a drop: a drop reviewed in its
+    # own BIIGLE volume and again in a survey volume keeps a peak per volume
+    # (`biigle_volume_A`, `biigle_volume_B`), both ranked "expert". Keeping
+    # both counted the drop twice in every site total. The drop's MaxN over
+    # both sets of frames is the larger peak, so keep that row. Stable sort
+    # so equal peaks resolve the same way every load; NaN species (reviewed,
+    # nothing seen) collapse like any other value.
+    return kept.sort_values("maxn", ascending=False, kind="stable").drop_duplicates(
+        ["drop_id", "scientific_name"]
+    )
 
 
 def split_reserves(series: pd.Series) -> list:
@@ -139,7 +149,7 @@ def apply_filters(frame: pd.DataFrame, *, years, regions, reserves, protections)
     """
     out = frame
     if years:
-        out = out[out["survey_year"].between(*years) | out["survey_year"].isna()]
+        out = out[out["survey_season"].between(*years) | out["survey_season"].isna()]
     if regions:
         out = out[out["region"].isin(regions)]
     if reserves:

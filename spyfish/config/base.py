@@ -111,6 +111,10 @@ class MlStatus:
     PENDING = "ml_pending"
     READY = "ml_ready"
     RUNNING = "ml_running"
+    # Raw detections CSV written, MaxN / annotation ingest / QA frames not yet.
+    # The GPU job (--ml-infer) stops here; the CPU job (--ml-post) picks these
+    # up. A plain --ml passes through it in one process.
+    INFERRED = "ml_inferred"
     COMPLETE = "ml_complete"
     ERROR = "ml_error"
     SKIPPED = "ml_skipped"
@@ -118,7 +122,8 @@ class MlStatus:
     VALID_TRANSITIONS: dict = {
         PENDING: {READY, SKIPPED},
         READY: {RUNNING, SKIPPED},
-        RUNNING: {COMPLETE, ERROR},
+        RUNNING: {INFERRED, ERROR},
+        INFERRED: {COMPLETE, ERROR},
         ERROR: {READY},
     }
 
@@ -171,8 +176,8 @@ class ZooFramesStatus:
     volunteers to draw the fish the model missed (recall).
 
     No SKIPPED: a drop with no detections still gets blind frames, and those are
-    the purest recall check there is. COMPLETE is set by the (not yet built)
-    validation sync once the set is retired. ERROR retries straight to UPLOADED
+    the purest recall check there is. COMPLETE is set by the validation sync
+    (--zooniverse-validation-sync) once the set is retired. ERROR retries straight to UPLOADED
     because the stage re-selects ERROR drops and the upload is idempotent.
     """
 
@@ -240,6 +245,11 @@ class ReportingStatus:
 #   - DatabaseManager.advance_status()  , uses VALID_TRANSITIONS for checks
 #                                          and ERROR for clearing validation_errors
 #   - StageRunner._run_drop_stage()     , sets section to ERROR on exception
+
+# `validation_errors.ErrorType` for a data problem that is recorded but does NOT
+# block ingest (the deployment stays ingest_status ok and is analysed): e.g. a
+# video a few seconds short of 30 min. Not a status value, never in a status column.
+INGEST_ISSUE = "ingest_issue"
 
 SECTION_STATUSES: tuple = (
     MlStatus,

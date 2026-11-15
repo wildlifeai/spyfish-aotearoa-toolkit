@@ -1,9 +1,10 @@
 """Tests for prune_unpinned_empty_classes (the 50 -> 22 class-list fix)."""
+
 import yaml
 
 from spyfish.ml.training.prepare_training_data import prune_unpinned_empty_classes
 
-ROSTER = ["fish", "Pagrus auratus", "Parapercis colias", "bait"]
+ROSTER = ["fish", "Chrysophrys auratus", "Parapercis colias", "bait"]
 
 
 def _dataset(tmp_path, names, labels_by_split):

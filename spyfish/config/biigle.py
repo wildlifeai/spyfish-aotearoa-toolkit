@@ -206,6 +206,38 @@ class BiigleConfig(BaseConfig):
         return int(get_required(self.biigle_section, "request_timeout_secs", "biigle"))
 
     @property
+    def image_label_workers(self) -> int:
+        """Threads posting whole-image labels (one request per label, no bulk
+        endpoint). 1 is serial."""
+        workers = int(
+            get_required(self.biigle_section, "image_label_workers", "biigle")
+        )
+        if workers < 1:
+            raise ValueError(f"biigle.image_label_workers must be >= 1, got {workers}")
+        return workers
+
+    @property
+    def rate_limit_max_retries(self) -> int:
+        """How many times one request is re-sent after a 429 before raising."""
+        return int(
+            get_required(self.biigle_section, "rate_limit_max_retries", "biigle")
+        )
+
+    @property
+    def rate_limit_fallback_wait_secs(self) -> float:
+        """Wait after a 429 that carries no Retry-After header."""
+        return float(
+            get_required(self.biigle_section, "rate_limit_fallback_wait_secs", "biigle")
+        )
+
+    @property
+    def rate_limit_max_wait_secs(self) -> float:
+        """Longest Retry-After worth sleeping through; a longer one raises."""
+        return float(
+            get_required(self.biigle_section, "rate_limit_max_wait_secs", "biigle")
+        )
+
+    @property
     def volume_finalize_max_retries(self) -> int:
         return int(
             get_required(self.biigle_section, "volume_finalize_max_retries", "biigle")

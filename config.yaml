@@ -134,6 +134,12 @@ reporting:
   # still exclude it, because it is not one species.
   unidentified_label: "Unidentified"
 
+  # First month of the survey season the dashboard reports by. 7 = July to
+  # June: fieldwork runs December to May, so a calendar year cuts one season
+  # across two years. A season is shown by both years (2026/27). 1 gives plain
+  # calendar years back.
+  survey_season_start_month: 7
+
   # The model's catch-all detection — an animal it could not identify. Named once
   # here because two places need it: excluded from abundance figures above, and
   # banded by box size in extraction.frame_strategy (it is not one species but N
@@ -156,7 +162,7 @@ reporting:
     - "Bathytoshia brevicaudata"  # short-tailed stingray
 
   indicator_species:
-    - "Pagrus auratus"      # snapper — the classic NZ reserve-effect indicator
+    - "Chrysophrys auratus" # snapper — the classic NZ reserve-effect indicator (WoRMS name; Pagrus auratus is a synonym)
     - "Parapercis colias"   # blue cod — the southern equivalent
     - "Jasus edwardsii"     # rock lobster — heavily fished, strong reserve response
 
@@ -184,6 +190,30 @@ paths:
   # Base directory for all project data
   base_dir: "process_files"
   deployment_targets_csv: process_files/deployment_targets.csv
+  # Workflow versions cached by the validation sync-back (one JSON per workflow).
+  # Answers are indexes whose meaning depends on the version they were given under.
+  zooniverse_workflow_versions: process_files/zooniverse/workflow_versions
+  # Classifications pulled from Panoptes by the two Zooniverse syncs: one
+  # JSON-lines file per workflow plus the last classification id seen, so each
+  # run fetches only what volunteers did since the previous one.
+  zooniverse_classifications: process_files/zooniverse/classifications
+  # Scientific-name synonyms, `written name: canonical name`, applied to EVERY
+  # row on its way into the annotations DB (AnnotationDatabaseManager.add_annotations
+  # -> SpeciesRegistry.canonical_name). It is the same file the legacy workbook
+  # extraction applies at conversion time, so one map serves both: workbook typos
+  # (`Chelidonchthys kumu`), WoRMS synonyms (`Lotella rhacinus`), NZ-usage
+  # corrections (`Pseudocaranx dentex` -> `georgianus`) and the placeholders that
+  # mean "unidentified animal" (`Sp1`..`Sp7`, `Unidentified` -> `fish`). Chains
+  # resolve to a fixed point and the canonical must be a registry name
+  # (class_map.json). A name that is neither is kept as written and logged at
+  # ERROR with its row count: nothing is dropped, the log says what to add.
+  # Lives in the legacy help dir so it syncs with it.
+  species_synonyms: process_files/legacy_data_help/species_map_global.yaml
+  # Species-presence prior per marine reserve, built by scripts/build_site_prior.py
+  # from EXPERT annotations (two_stage_classifier_plan.md §6). SENSITIVE: it says
+  # which species occur in which reserve, so it stays under process_files/
+  # (gitignored) and is never exported to a public tool.
+  site_prior: process_files/site_prior
   # Legacy directories (at project root, synced to S3, gitignored)
   legacy:
     zooniverse: "process_files/zooniverse/legacy_classifications"
@@ -193,6 +223,11 @@ paths:
     # to S3 with the other pipeline data and stay out of git: reference/
     # and the site coordinates are sensitive (CLAUDE.md, "Sensitive data").
     annotations_help: "process_files/legacy_data_help"
+    # `legacy DropID: SharePoint DropID` for legacy expert rows whose DropID
+    # disagrees with the deployment SharePoint records (e.g. the workbook says
+    # replicate _02 where SharePoint and the video say _01). Applied by
+    # --legacy-experts right after the CSV is read. File name, in annotations_help.
+    drop_id_map: "legacy_drop_id_map.yaml"
   movie_extensions: ["avi", "mov", "mp4", "mpg", "wmv"]
   missing_files_filename: "missing_files_in_aws.txt"
   extra_files_filename: "extra_files_in_aws.txt"
@@ -226,15 +261,27 @@ paths:
     base_model: "base_model"
     pipeline_model: "pipeline_model"
     archived_models: "archived_models"
+    classifier: "classifier"     # second-stage species classifier checkpoints (finetune_bioclip.py format), newest stamp wins
+    bioclip: "bioclip"           # open_clip hub cache of the frozen BioCLIP 2 backbone, ~1.7 GB, downloaded once per machine
+    two_stage: "wip_two_stage"   # second-stage classifier training outputs (crops, embeddings, reports, fine-tune runs). Historical name; renaming it means moving the folder on every machine
+    exports: "exports"           # review exports (slates, MaxN frames, per-survey reports): data, so under process_files/
 
 
 ml_inference:
-  limit_processing: 9 # SAFEGUARD: Only process N videos per run while building
+  limit_processing: 5 # SAFEGUARD: Only process N videos per run while building
   log_interval_frames: 10 # Log every N frames during ML inference
   ml_fps: 3        # Target frames per second for ML inference. Stride is computed at runtime from the video's actual FPS.
-  imgsz: 640  #1920
+                   # Do not lower without re-measuring maxn_persistence_seconds: the window is converted to frames from
+                   # the raw CSV's spacing, and below ~2 fps a 1.0 s window rounds to ONE frame, i.e. the filter is off.
+                   # Thinning the 3 fps raw CSVs (scripts/fps_thinning_experiment.py, 2026-11-03, 132 runs) showed the
+                   # sampling itself costs little (1.5 fps reproduces the 3 fps MaxN in 80% of drop x species pairs,
+                   # never higher) while the window change moves counts by ~0.7 either way. See design_doc.md.
+  imgsz: model   # 'model' = the size in the checkpoint's train_args (the model is the source of truth, see spyfish/ml/model_meta.py);
+                 # a number overrides it for experiments and logs a WARNING when it differs from what the model was trained at.
+                 # Before 2026-11-10 this was a bare 640 with no link to the loaded weights, so a model trained at another size
+                 # would have run at the wrong one with no error.
   confidence_threshold: 0.25      # Base YOLO inference threshold; gates raw detections → BIIGLE frame selection AND every box uploaded to BIIGLE (build_coco_from_raw_csv applies no further confidence filter, it just takes the raw row nearest the frame time). So a box visible in BIIGLE is a detection at or above THIS value, currently 0.25. NOTE 2026-08-24: this comment previously read "Lowered 0.25→0.15 (2026-05-26) to surface more boxes for expert review" while the value sat at 0.25 — either the change was reverted or never applied. Decide whether 0.15 was intended before trusting the recall-leaning rationale.
-  maxn_confidence_threshold: 0.40  # Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
+  maxn_confidence_threshold: 0.40  # 'model' = the cutoff picked for the checkpoint on its val split at the F-beta peak (training.threshold_beta), stored beside the weights as <model>.thresholds.json and read by spyfish/ml/model_meta.py; written by the evaluate step for every new model, or by `python -m spyfish.ml.training.threshold --model production` for an existing one. A number overrides it and WARNS when the sidecar disagrees. Switch to 'model' once production has a sidecar (NeSI, one val pass). Never below confidence_threshold: the raw CSV holds nothing under it. Hand-set history: Gates the MaxN CSV → Zooniverse/citsci clip selection AND the reported ML abundance count. Lowered 0.50→0.40 (2026-05-26) to surface more clips for volunteer review.
   # Persistence filter (2026-08-21): a count only sets MaxN if sustained across a rolling
   # window of sampled frames; single-frame spikes are recorded (RawMaxInterval/SpikeFlag
   # columns) but do not count. Measured across 19 drops: 40% of detection runs last exactly
@@ -243,7 +290,7 @@ ml_inference:
   # CSV's own frame spacing (~1/ml_fps). Set persistence to 0 to disable (single-frame MaxN).
   maxn_persistence_seconds: 1.0    # Rolling-min window: count must hold this long to count toward MaxN (3 frames at ml_fps 3).
   maxn_gap_fill_seconds: 0.4       # Zero-gaps up to this long between detections take min(neighbours) first ("threshold flicker" forgiveness — 49% of gaps between runs are 1 frame). Never invents detections: an isolated blip stays exposed.
-  maxn_exclude_classes: ["bait"]   # Classes whose detections never count toward MaxN and never get a MaxN row. The bait fish strapped to the canister is a real fish visually; only the class split keeps it out of abundance counts.
+  maxn_exclude_classes: ["bait", "Not a fish?"]   # Classes whose detections never count toward MaxN and never get a MaxN row. The bait fish strapped to the canister is a real fish visually; only the class split keeps it out of abundance counts.
   # Legacy review frames (2026-10-12). Deployments that carry legacy expert
   # annotations (per-30s-interval workbook counts, external_id='legacy') get
   # their expert MaxN moments pulled from the video after --ml, so the expert's
@@ -255,13 +302,37 @@ ml_inference:
     random_intervals: 3            # Besides each species' peak, this many other scored intervals per species (seeded by DropID, so the same ones come back). Checks the analyst's counting at ordinary moments, not just the peak.
     max_time_delta_seconds: 0.5    # The clean frame is the raw-CSV frame nearest the legacy second, so the drawn boxes match the pixels. Beyond this gap (no detection near that second) the frame is seeked by time instead and drawn with no boxes.
   max_boxes_per_frame: 80          # Sanity ceiling: if a drop's inference averages more detections/frame than this, treat it as degenerate (model saturating max_det on out-of-distribution footage, or confidence_threshold mis-set to ~0) and fail the drop instead of building a giant COCO. No real BUV frame has 80 fish; the flood case hits YOLO's max_det=300.
-  batch_size: 32                   # Frames per YOLO predict() call during video inference. Batching amortises per-call overhead and keeps the GPU fed (single-frame calls leave an A100 at ~0% util). 32 fits comfortably at imgsz=640 on a 40GB A100; lower to 8–16 for larger imgsz or smaller GPUs.
+  video_reader: cv2                # How inference decodes video: cv2, or ffmpeg (`ffmpeg -map 0:v:0`, every other stream discarded). Raw GoPro chapters carry audio + tmcd + gpmd + fdsc streams; cv2 reads them all and on some chapters stalls past its 30 s read timeout (UoA on NeSI, 2026-11-11). Merged pipeline videos are clean, so cv2 stays the default; callers override per call (run_yolo_inference(reader=...)).
+  min_frame_coverage: 0.9          # Share of the sampled frames a video must yield before its raw CSV is promoted. A failed cap.read()/grab() ends the decode loop exactly like the end of the video, so a read that stalls (UoA Vault files on NeSI, 2026-10-28 and 2026-11-11: 3 of 2,121 frames) used to promote a near-empty CSV as finished. Below this the CSV stays .partial and the drop fails.
+  half: true                       # FP16 inference (model.predict(half=True)). Free speed on every NVIDIA GPU we use (l4/a100/h100 all have tensor cores); YOLO's boxes are unchanged to well within the confidence rounding. Ultralytics ignores it on CPU, so the same config runs on a laptop.
+  batch_size: 32                   # Frames per YOLO predict() call during video inference AT batch_size_imgsz. Batching amortises per-call overhead and keeps the GPU fed (single-frame calls leave an A100 at ~0% util). 32 fits comfortably at imgsz=640 on a 40GB A100; lower for smaller GPUs.
+  batch_size_imgsz: 640            # The image size batch_size was sized for. A model that runs larger gets batch_size x (this / imgsz)^2, floor 1, so memory per call stays about constant (1280 -> 8).
   # YOLO NMS, applied at inference (passed to model.predict). Cleans overlapping/stacked
   # boxes at the source, so the raw CSV — and therefore MaxN counts, frame selection AND
   # the BIIGLE COCO — are all consistent. Tuning these requires re-running --ml (fast now
   # that inference is batched).
   nms_iou: 0.45                    # Boxes overlapping more than this IoU are suppressed. Lower = more aggressive merging of duplicate boxes on one fish (YOLO default 0.7). Tuned to 0.45 by eyeballing real frames across SLI_117_02 (2026-06-04): 0.4 cleaned duplicates dramatically but deleted one real fish; 0.45 keeps the dedup win while preserving that fish. Raise toward 0.5 if distinct overlapping fish (schooling/eels) get merged.
   nms_agnostic: true               # Cross-class NMS: when true, an overlapping species box + generic 'fish' box on the same animal collapse to one (highest confidence wins) instead of both surviving. YOLO default is false (per-class).
+  # Second stage (two_stage_classifier_plan.md): BioCLIP 2 names every YOLO box from its
+  # full-resolution crop; YOLO keeps finding them. Frozen test drops, 2026-11-04, the same
+  # 1,235 detected boxes: fine-tune 0.951 acc / 0.768 macro F1 vs the species head's
+  # 0.930 / 0.599, better on every species but silver sweep (recall 0.66 vs 0.78).
+  # The raw CSV's `class` becomes the classifier's name; `confidence` stays the DETECTION
+  # score (every threshold downstream gates on it); yolo_class / yolo_confidence /
+  # clf_class / clf_confidence keep both opinions. Runs in the GPU job (--ml-infer).
+  classifier:
+    enabled: true
+    backbone: "hf-hub:imageomics/bioclip-2"   # open_clip name; cached under paths.sub_dirs.bioclip. Compute nodes have no internet: HF_HUB_OFFLINE=1 (scripts/slurm/_env.sh)
+    crop_margin: 0.10         # share of the box added on each side before the crop, what the fine-tune trained on
+    min_box_px: 16            # a box smaller than this on either side keeps the YOLO name: nothing to classify
+    batch_size: 64            # crops per encode_image call
+    preprocess_workers: 4     # threads that resize the crops of one batch (PIL releases the GIL in the resize), so the GPU is not waiting on a one-by-one loop. Same tensors in the same order as the serial path; 0 or 1 = serial. gpu.sl asks for 8 CPUs and the video decode thread wants its share, hence 4
+    p_min: 0.5                # top probability below this → fallback_label: a fish, species unsure (the demo's P_MIN)
+    fallback_label: fish      # used below p_min when YOLO is not confident either
+    fallback_to_yolo: true    # below p_min, keep YOLO's species when its detection confidence clears the floor below
+    fallback_yolo_min_confidence: 0.5
+    label_map:                # classifier class → pipeline name, applied before the species registry canonicalises
+      "other fish": fish
   remote_host: "mahuika"
   remote_user: "kalindi"
   extraction:
@@ -344,6 +415,14 @@ extraction:
     min_confidence: 0.25             # Count detections at or above this conf — lower than maxn_conf=0.5 on purpose, surfaces transient multi-fish moments
     citsci_dedupe_tolerance_seconds: 1.0 # Drop ML-peak rows within this many seconds of any citsci-selected frame (avoids near-duplicates)
 
+  # MaxN frames for the dashboard's Survey review, cut by
+  # scripts/wip/export_maxn_frames.py into each deployment's review/ folder and
+  # synced to S3 with it. 1200 px is the width the page and its HTML export
+  # show them at; a full 1920 px frame is about 1 MB, this is about 150 KB.
+  review_frames:
+    width: 1200
+    jpeg_quality: 80
+
   # Metadata slate: the handwritten whiteboard (site, date, time, lat/lon, depth)
   # rangers hold up to the camera before the drop. Scanned once per deployment at
   # the start of --ml, when the video is on local disk; the best frame is saved as
@@ -354,19 +433,54 @@ extraction:
   # video (KSF_20240124_BUV_KSF_085_06, slate at 0-3 s): revisit once a batch of
   # slates has been collected.
   slate_detection:
-    scan_width: 480            # analysis resolution; the saved frame is full-res
+    scan_width: 480            # analysis resolution, not the saved frame's
+    save_width: 1280           # {drop}_slate.jpg is saved this wide (handwriting stays readable; 1920 was ~270 KB a slate). Slates saved before 2026-11-12 are full-res and are not re-made
     step_seconds: 1.0
     max_seconds: 120           # ceiling when sampling_start is missing or 0; the pipeline otherwise stops at sampling_start
     grace_seconds: 3.0         # keep looking this long after the last hit for a better frame
-    paper_value_min: 150       # HSV value: bright
-    paper_saturation_max: 50   # HSV saturation: not coloured (white/grey)
-    ink_value_max: 90          # dark strokes inside the panel
+    paper_value_min: 120       # HSV value: bright; 120 not 150 because a board held close is in the holder's shadow (OKA, ORA close-ups measured 101-130), deck is ~93
+    paper_saturation_max: 80   # HSV saturation: not coloured (white/grey). 80 not 50: shade under open sky is blue-tinted, a shaded board reads sat 41-76 (KOK_20240219 measured) and at 50 the mask kept only its lit half; KOK_054's datasheet, wholly in shade, came back paper=0.03
+    # Underwater and open-water frames are blue nearly everywhere, and at
+    # paper_saturation_max 80 pale seabed and sunlit water pass the paper mask
+    # (KSF_085_02: seabed scored 8.7). A frame with more than water_frame_max
+    # of its pixels in the water hue band is skipped outright: seabed 0.96-1.00,
+    # deck with a board 0.22-0.26, deck with the sea behind 0.54 (measured 2026-11-04).
+    water_hue_range: [80, 125]  # OpenCV hue: teal to blue
+    water_saturation_min: 90   # 90 not 40: shaded white paper is blue-tinted (sat 45-85), seabed water 107-183 (measured 2026-11-06); at 40 a board filling the frame was skipped as sea (TON_001, TON_013 at 0 s)
+    water_frame_max: 0.8
+    # Second board colour: AHE writes on a varnished wooden clipboard, which the
+    # white mask never sees. OpenCV HSV, measured on AHE_20250513 footage:
+    # hue 12-15, saturation 90-180, value 160-220; the deck is value ~90 and
+    # saturation ~50, the whiteboard saturation < 50, so the three do not overlap.
+    # Which surveys use the wooden board. Everyone else writes on a whiteboard,
+    # and with the wood mask on everywhere it picked hands and lit deck on
+    # TUH, TON, KOK and BNP (61 rejects in the 2026-11-04 pass). A survey's
+    # board is the same for all its drops, so this is per survey, not per drop.
+    wood_surveys:
+      - AHE_20250513_BUV
+    wood_hue_range: [5, 25]    # orange/tan
+    wood_saturation_min: 60    # coloured, unlike grey deck and white board
+    wood_value_min: 120        # the lit face of the board, not shadow or deck
+    # Ink is RELATIVE to the board: black marker is darker than the board by
+    # ink_darker_by (HSV value); on a white board coloured marker (SLI 2022 is
+    # green, OKA blue) is the saturated stuff instead, so either counts there.
+    # Wood is itself saturated, so only darkness counts on it. The old absolute
+    # ink_value_max: 90 missed every green/blue board (2026-11-04 review).
+    ink_darker_by: 80          # sweep on 10 examples 2026-11-04: 80 lifts real boards most; hull dirt is as dark as marker at any value, that one is for the OCR gate
+    ink_saturation_min: 110    # above the saturation of shaded white paper (p90 76), below green/blue marker
     min_paper_frac: 0.10       # largest white blob must cover >= this share of the frame
-    min_solidity: 0.80         # blob area / convex hull area: a held-up board is convex
-    max_aspect: 2.0            # long/short side of the blob: boards ~1.3, deck strips 3-6
+    min_rect_fill: 0.55        # blob area / its minimum bounding rectangle: boards 0.62-0.87, hands (the wood mask's twin) 0.51, deck patches 0.47
+    min_solidity: 0.65         # blob area / convex hull area: a held-up board is convex, but gripping hands notch it (SLI_20260114_BUV_SLI_065_01: full board at 0.67-0.70; deck frames that pass aspect sit below 0.65)
+    max_aspect: 2.2            # long/short side of the blob: boards 1.1-1.7, a clipboard with the datasheet strip 2.02 (NOI), deck strips 3-6
     max_edge_frac: 0.15        # Canny edge share inside the blob: whiteboard smooth, deck textured
     min_strokes: 5             # small dark components inside the blob (handwriting); blank board = 0
-    stroke_area_px: [4, 400]   # component area at scan_width; smaller = noise, larger = shadow/object
+    sharpness_tie_band: 0.2    # candidates within this fraction of the top score are re-ranked by sharpness (Laplacian variance on the board): the crispest frame of the held-steady stretch, for reading
+    review_candidates: 3       # frames the pipeline keeps per drop in {drop}_slate_candidates/, so the review page can offer runner-ups
+    review_spread_frames: 2
+    review_distinct_seconds: 5 # runner-ups at least this far apart, and a review scan runs the whole window: early false hits hid boards at 44 s and 64 s (SLI_065, SLI_066)    # plus this many frames spread over the above-water part of the scan: a choice when every scored frame is wrong
+    stroke_area_frac: [0.0001, 0.03]  # ink component area as a FRACTION of the board blob: a letter on a close-up board is big, on a far one small; the old fixed [4, 400] px threw out the big letters and ranked close-ups last
+    cut_off_penalty: 0.5       # score x (1 - this x sides/4) for a blob touching the frame edge: a half-visible board ranks below the whole board a second later
+    max_cut_sides: 2           # a blob touching more frame edges than this is a flood, not a board: deck + chilly-bin lid 3, sky + sun glare 3-4, seabed 4; boards 0-2 (a datasheet cut at top and right is 2). Below that the penalty ranks.
 
 zooniverse:
   project_id: 14054          # Upload target — single project only. spyfish-aotearoa main.
@@ -395,13 +509,32 @@ zooniverse:
       crop_image_px: 800       # Saved crop is 800x800 px: sharp on a phone, ~100 KB.
     frames:
       max_width_px: 1920       # Frames are saved at native width up to this; drawn boxes map back via the recorded scale.
+    # Sync-back (--zooniverse-validation-sync): reads the retired sets' answers
+    # back into per-drop verdict CSVs and advances *_uploaded → *_complete.
+    sync:
+      miss_iou: 0.3            # A drawn box overlapping an ML box at >= this IoU is a redraw, not a new fish. Loose on purpose: phone-drawn boxes are sloppy.
+      # How the single-choice answers are spelled across workflow versions. An
+      # answer is resolved to its label under the version it was given, then
+      # read as yes or no through these lists; a label in neither raises, so a
+      # reworded answer cannot silently count as "no vote".
+      yes_labels: ["Yes"]
+      no_labels: ["No"]
 
 deployment_validation:
   buv_video_duration_seconds: 1800  # Expected minimum duration of a full BUV deployment (30 min)
-  sampling_end_buffer_seconds: 0  # Sampling can end up to 2 min before the full duration — still valid
+  sampling_end_buffer_seconds: 0  # silent slack below the full duration: a video this much short is not even noted
+  # A sampling WINDOW (end - start) short of the full duration by no more than this is an ISSUE:
+  # recorded in validation_errors as `ingest_issue`, shown in reports, but the
+  # deployment is still ingested ok and analysed. Shorter, or a window missing
+  # altogether, is an ERROR and blocks the deployment (ingest_status
+  # validation_error). A window LONGER than the full duration is normal and not
+  # checked: the pipeline analyses sampling_start..sampling_end whatever its length. Measured 2026-11-05 on 451
+  # window errors: 226 missing, 214 too long (median 108 s over), 11 short
+  # (5 s to the whole video); SLI_20220228_BUV_SLI_093_01 was blocked for 8 s.
+  sampling_window_issue_seconds: 60
 
 orchestrator:
-  log_output: "console"
+  log_output: "console"  # console: INFO -> stdout, WARNING+ -> stderr (SLURM .out / .err). file: dated file under paths.logs_dir, nothing on screen.
 
 ffmpeg:
   crf: 22
@@ -524,7 +657,7 @@ biigle:
   # IDs are stored here, so renaming a label in Biigle's UI needs no code
   # change. A `null` means "not created in Biigle yet" and those frames are
   # skipped, which is how the feature rolls out one bucket at a time. Set the
-  # IDs from the output of scripts/create_biigle_pick_labels.py.
+  # IDs from BiigleHandler.create_label (tree 3375, parent Pick 691591).
   # When true, a MaxN / Uncertain frame also gets the whole-image label of the
   # species it is evidence for, alongside its "Pick" reason label. Routed
   # through the same resolver as the bounding boxes, so the image label and the
@@ -540,6 +673,7 @@ biigle:
     fish_variety: 691595   # Pick > Fish variety   — spans the catch-all's box-size range
     spot_check: 691596     # Pick > Spot check     — model-blind even sample, catches misses
     video_start: 691597    # Pick > Video start    — deployment opening health check
+    manual_count: 789381   # Pick > Manual count   — UoA: inside an interval the observers' hand count recorded a fish
 
   # OVERRIDE map only: species scientific/common name (from COCO JSON) → Biigle label ID.
   # This is the FIRST routing source in upload_frames.py and exists to force a model
@@ -560,10 +694,25 @@ biigle:
   # family-level call is no longer indistinguishable from a species-level one.
   # The tree also gained "Rays - Batoidea" (691434) and "Sharks - Elasmobranchii"
   # (691433), so those two model classes route naturally too and need no entry.
-  label_mapping: {}
+  label_mapping:
+    "Not a fish?": 789444   # static boxes flagged in --ml-post (spyfish/ml/static_boxes.py); workflow tree 3375, so a box the expert leaves is never synced back as a species
   # HTTP timeout for all Biigle API requests (seconds). Prevents indefinite hangs
   # on slow or unreachable endpoints.
   request_timeout_secs: 30
+  # Rate limiting. The account was locked on 2026-10-16 after a loop kept
+  # sending through 429s, so every request now goes through one rule: a 429 is
+  # waited out for as long as its Retry-After header says and re-sent, at most
+  # `rate_limit_max_retries` times, then the run raises and sends nothing more
+  # to BIIGLE. No other status is retried. A Retry-After longer than
+  # `rate_limit_max_wait_secs` raises at once rather than sleeping through it;
+  # `rate_limit_fallback_wait_secs` is the wait when the header is missing.
+  rate_limit_max_retries: 2
+  rate_limit_fallback_wait_secs: 60
+  rate_limit_max_wait_secs: 300
+  # Threads posting whole-image "Pick" labels. BIIGLE has no bulk endpoint for
+  # these, so it is one POST per label, some tens per drop. Was 20 (a whole
+  # drop's labels in one burst); 4 costs a few seconds per drop. 1 is serial.
+  image_label_workers: 4
   # Polling config for async Biigle operations
   volume_finalize_max_retries: 10
   volume_finalize_retry_interval_secs: 3.0
@@ -578,10 +727,34 @@ training:
   batch: 16                     # 16 fits imgsz=640 on a100/40GB+; an L4 (22.5GB) OOMs at 16 and silently falls back to 8 (slower AND worse), so request a100 rather than raising this
   optimizer: "AdamW"           # AdamW outperformed SGD on the 2026-04 species sweep; flip back to "SGD" if needed
   lr0: 0.001                   # initial learning rate; scale up to ~0.01 if optimizer is SGD
-  dropout: 0.1                 # head-dropout rate; helps small-dataset overfitting (set 0.0 to disable)
+  dropout: 0.1                 # classification-head dropout. Ultralytics applies it to classify models only; detect training (the species model, the detectors) ignores it
+  # Every trainer passes these two blocks to YOLO verbatim (key = Ultralytics
+  # argument name): the species retrain (train.py), the WIP detector job
+  # (scripts/slurm/train_detector.sl) and anything that comes next.
+  # They lived as two dicts inside train.py until 2026-11-10; the detector job,
+  # written from config.yaml alone, never saw them and trained on Ultralytics
+  # defaults with AMP on, which made its first result incomparable with the
+  # species model. One place now, read through config.training_augmentation /
+  # config.training_stability.
+  augmentation:                  # underwater augmentation, validated in the yolov12_comparison experiments
+    hsv_h: 0.05                  # hue: blue/green water shifts
+    hsv_s: 0.8                   # saturation: murky vs clear water
+    hsv_v: 0.6                   # value: lighting changes with depth
+    degrees: 10.0                # slight rotation
+    fliplr: 0.5                  # horizontal flips
+    mosaic: 1.0                  # combine 4 images
+    mixup: 0.1                   # slight mixup for overlapping fish
+    bgr: 0.1                     # 10% chance to swap BGR channels
+  stability:                     # keeps training from NaN-ing and from OOM under SLURM
+    warmup_epochs: 5.0
+    warmup_bias_lr: 0.0001
+    nbs: 64
+    amp: false                   # fp16 training produced NaN losses on some underwater datasets
+    box: 5.0                     # bounding-box loss weight (Ultralytics default 7.5)
+    cache: disk                  # decoded images cached to DISK. cache=true (RAM) OOM-kills under SLURM: Ultralytics sizes the RAM cache from psutil, which sees the whole node's memory, not the job's --mem (2026-06-03, killed at 32G)
+    workers: 8                   # dataloader processes for epoch 1's disk reads
   train_pct: 1.0
   val_pct: 0.0                  # 0 = no per-survey val donation (used only when auto_balance_val is false). With auto_balance_val on, val comes from the species-balanced selector instead.
-  test_pct: 0.0                 # 0 = skip test split entirely; test drops roll into train
   # Species-balanced val selection (the suggester, folded into the pipeline).
   # When true, the split picks whole drops into val so each multi-source species
   # reaches ~val_balance_pct of its boxes (greedy, stops within tolerance), honouring
@@ -603,7 +776,7 @@ training:
   # Costs train data for the smallest classes on purpose: a class you cannot
   # measure is a class you cannot trust.
   val_min_boxes_per_species: 20
-  class_floor_min_images: 50    # merge species appearing in fewer than this many distinct frames into "fish"
+  class_floor_min_images: 50    # a taxon (or pool, or hierarchy group) needs this many distinct post-cap TRAIN frames to be a class; below it the rollup walks up the taxonomy and ends at "fish"
 
   # FROZEN CLASS IDS. Index in this list IS the YOLO class id, permanently.
   # APPEND ONLY: never insert, never reorder, never delete a line.
@@ -633,7 +806,10 @@ training:
   # `fish` is required (the class floor needs somewhere to redirect to).
   class_order:
     - fish                      # 0  catch-all: an animal the model could not name
-    - Pagrus auratus            # 1  snapper, indicator species
+    - Chrysophrys auratus       # 1  snapper, indicator species. Renamed from
+                                #    Pagrus auratus 2026-11-04 (same slot, same
+                                #    animal); older checkpoints still carry the
+                                #    old class name, the synonyms map folds it.
     - Parapercis colias         # 2  blue cod, indicator species
     - Jasus edwardsii           # 3  rock lobster, indicator species
     - Pseudolabrus miles        # 4
@@ -657,35 +833,81 @@ training:
     - Anguilliformes            # 22  eels: morays + congers pooled 2026-08-25.
                                 #     Muraenidae (11) and Conger verreauxi (18)
                                 #     keep their seats but are now always empty.
+    - Meuschenia scabra         # 23  smooth leatherjacket: cleared the floor 2026-11-09, pinned so its id stops drifting
 
-  # One canonical class per animal. Applied to every species name BEFORE
-  # counting, balancing, flooring, and class-list building. Without this,
-  # hierarchy splits (family vs species labels for the same animal) and
-  # nomenclature drift split one animal's boxes across two classes; the smaller
-  # half then falls below class_floor_min_images and merges into 'fish', which
-  # is how hagfish and red gurnards ended up ground-truthed as 'fish'
-  # (found 2026-08-21). Policy: the bigger pile keeps its name.
-  # Policy (Kalindi, 2026-08-21): join the busiest taxon of the group. When a
-  # merged-away species accumulates enough boxes of its own, delete its line
-  # here and the class floor decides whether it stands as its own class.
-  # Amendment 2026-08-22: judge "enough" on distinct FRAMES, not boxes. The
-  # floor is a frame count, and for species that arrive in groups the two
-  # numbers diverge badly (rig: 315 boxes but 55 frames; jack mackerel: 454
-  # boxes but 63 frames). Reading a box count as if it were a frame count is
-  # what left rig out of this map and silently in 'fish'.
-  # The sibling-species entries below knowingly trade species precision for
-  # keeping rare-family boxes out of 'fish'; accepted level of mistake.
+  # TRAINING CLASS ROLLUP (2026-11-10). Which class a labelled taxon trains as
+  # is computed once per data prep by spyfish/ml/training/rollup.py from the
+  # post-cap TRAIN frame counts and the taxonomy in `hierarchy_file`, and
+  # written to species/rollup_map.json, which the run snapshot, the test
+  # records and the planning scripts read. Nothing else decides a merge.
+  #   1. `fish` and `bait` never move.
+  #   2. Everything under a `rollup_pool_nodes` entry trains as that node
+  #      (however many frames it has) unless listed in `rollup_keep_separate`.
+  #      A pool under class_floor_min_images in total is not a class.
+  #   3. A taxon with at least the floor stands alone.
+  #   4. Below the floor: walk the ancestors nearest first. An ancestor that is
+  #      already a class takes it; one that is not becomes a class only if the
+  #      taxa it would collect that have NOT earned their own class reach the
+  #      floor together (residual counting, so a rare species cannot borrow its
+  #      common sibling's frames). Nothing reached: it trains as `fish`.
+  # Experts keep labelling every species in BIIGLE; the rollup is training-time
+  # only, so species detail survives in the MaxN CSVs and in reporting.
+  hierarchy_file: "process_files/training/hierarchy.json"   # child -> parent (WoRMS genus + family, plus the pool nodes below at their own rank); rebuild with scripts/build_worms_hierarchy.py after a class-map reseed. Family is the coarsest automatic group; anything coarser must be a pool node.
+  # Taxa that are ALWAYS trained as one class. Each is a real taxon, not a
+  # shape-based grouping.
+  #   Anguilliformes (2026-08-25): congers floor alone (64 frames) and morays
+  #     were weak alone (recall 0.28-0.34, mAP 0.256 over three runs); "elongate
+  #     body in a crevice" is the more learnable concept. Hagfish (Myxinidae)
+  #     are class Myxini, not eels, and are not here on purpose.
+  #   Elasmobranchii (2026-08-22): "a shark that is not one of the named ones".
+  #     Rig arrives in groups (315 boxes in 55 frames) and floored at 39 train
+  #     frames; school shark, sevengill and bronze whaler have a handful each.
+  #   Batoidea: rays pool the same way (~70 frames together). Kept apart from
+  #     Elasmobranchii because a disc and a torpedo are the two shapes a
+  #     detector separates most reliably; rays sit under Elasmobranchii in the
+  #     hierarchy, so a ray pool that fell under the floor would join the
+  #     shark pool rather than `fish`.
+  rollup_pool_nodes:
+    - Anguilliformes
+    - Elasmobranchii
+    - Batoidea
+  # Species under a pool node that get their own class instead. Add a species
+  # here when it clears the floor by a margin and is worth naming; remove it
+  # and it rejoins the pool at the next data prep. A keep-separate species that
+  # cannot stand alone joins its pool after all (step 4), never `fish`.
+  rollup_keep_separate:
+    - Cephaloscyllium isabella   # carpet shark, ~230 frames, strong alone
+    - Squalus acanthias          # spiny dogfish, promoted out of Elasmobranchii 2026-08-22 (141 frames / 17 drops)
+
+  # SAME ANIMAL, TWO LABELS. Applied to every species name BEFORE the rollup
+  # counts anything. The rollup is a rule over counts and cannot know that a
+  # family label and a species label denote one fish in this data; these are
+  # the cases where they do, so merging first keeps one animal's frames in one
+  # pile (split across two labels, the smaller half floored into 'fish', which
+  # is how hagfish and red gurnards ended up ground-truthed as 'fish', found
+  # 2026-08-21). Policy: the bigger pile keeps its name. Delete a line when
+  # the two labels start meaning different animals (a second gurnard species
+  # turns up); the rollup then treats them as the distinct taxa they are.
+  # One animal under two NAMES (`Pseudocaranx dentex` -> `georgianus`) is NOT
+  # listed here: that is a synonym, and paths.species_synonyms rewrites it for
+  # training and the annotations DB alike (canonicalize_species step 1).
+  # NOTE: canonicalize_species is a SINGLE dict lookup, not transitive, so
+  # every key must point at its final name directly (a value may not be a key).
   species_canonicalization:
     # Red gurnard is the ONLY gurnard in this data, so the family label and the
-    # species label name the same animal and must stay one class. Keep this
-    # entry even though canonicalization_readiness.py reports it READY (111
-    # frames): that script counts, it cannot know two labels denote one animal.
-    # Promoting it would recreate the exact hierarchy split the map exists to
-    # close. (Tree note: "Gurnards - Triglidae" is back as 691421 after being
-    # deleted, so the Triglidae label_mapping override is no longer needed.)
+    # species label name the same animal. canonicalization_readiness.py reports
+    # it READY (111 frames) but that script counts, it cannot know two labels
+    # denote one animal.
     Chelidonichthys kumu: Triglidae         # 142 boxes / 111 frames vs family label's 316 / 60
     Eptatretus cirrhatus: Myxinidae         # 61 vs 139
-    Pseudocaranx dentex: Pseudocaranx georgianus  # same fish, current name after reclassification
+    # Triplefins: common triplefin is the busy pile (111 boxes); the family
+    # label (47) is in practice the same fish. Other Forsterygion species are
+    # NOT mapped here any more: the hierarchy rolls them up (genus, then
+    # family) or floors them, which is honest about what they are.
+    Tripterygiidae: Forsterygion lapillum
+    # Goatfish: blue-striped goatfish is the only goatfish seen (48 boxes vs
+    # the family label's 1).
+    Mullidae: Upeneichthys lineatus
     # A workflow label, not a taxon: "an animal worth a second look", so the
     # honest training class is the unidentified-animal bucket. Its BIIGLE
     # siblings ('Fish: final', 'Fish: review required', 'To review') resolve to
@@ -693,78 +915,6 @@ training:
     # 3511, so it has no alias to resolve through and needs naming here.
     # Found 2026-08-22 in KOK_20240219_BUV_KOK_013_01, 1 row.
     Interesting Sighting: fish
-    # EELS. Morays (Muraenidae) and congers (Congridae) both sit in
-    # Anguilliformes, so this is a real taxon rather than a shape-based
-    # grouping — a conger reported as a moray would be a genuine
-    # misidentification, "an eel" is not. Rationale (2026-08-25):
-    #   * Conger verreauxi has 64 frames and floors into 'fish' on its own,
-    #     so as a separate class it holds nothing.
-    #   * Muraenidae has ~200 frames but is WEAK on its own: recall 0.28-0.34,
-    #     mAP 0.256 across the last three runs.
-    #   * Pooled they are ~264 frames, and "elongate body in a crevice" is a
-    #     more learnable concept than the moray/conger distinction, so the
-    #     merged class may well beat either alone.
-    # Experts keep annotating morays and congers separately in Biigle — this
-    # pooling is training-time only, so species detail survives in the MaxN
-    # CSVs and in reporting. Hagfish (Myxinidae) are deliberately NOT here:
-    # they are class Myxini, not eels at all, and at 200 frames / 0.72 recall
-    # they are already one of the better classes.
-    # NOTE: canonicalize_species is a SINGLE dict lookup, not transitive
-    # (`.get(resolved, resolved)`), so every child must point at Anguilliformes
-    # DIRECTLY. Pointing them at Muraenidae would stop there and never arrive.
-    Muraenidae: Anguilliformes              # ~200 frames, weak alone
-    Conger verreauxi: Anguilliformes        # 64 frames, floors into 'fish' alone
-    Conger wilsoni: Anguilliformes          # 1 drop
-    Ophisurus serpens: Anguilliformes       # snake eel, tree child, unseen in data yet
-    Gymnothorax prionodon: Anguilliformes   # repointed from Muraenidae 2026-08-25
-    Gymnothorax nubilus: Anguilliformes     # tree child, unseen in data yet
-    Gymnothorax obesus: Anguilliformes      # tree child, unseen in data yet
-    Gymnothorax prasinus: Anguilliformes    # tree child, unseen in data yet
-    Enchelycore ramosa: Anguilliformes      # tree child, unseen in data yet
-    # Triplefins: common triplefin is the busy pile (111 boxes).
-    Tripterygiidae: Forsterygion lapillum   # 47 vs 111; species pile dominates
-    Forsterygion varium: Forsterygion lapillum     # tree child, unseen in data yet
-    Forsterygion maryannae: Forsterygion lapillum  # tree child, unseen in data yet
-    Forsterygion gymnotum: Forsterygion lapillum   # tree child, unseen in data yet
-    Notoclinops segmentatus: Forsterygion lapillum # tree child, unseen in data yet
-    # Goatfish: blue-striped goatfish is the busy pile (48 boxes).
-    Mullidae: Upeneichthys lineatus         # 1 vs 48; species pile dominates
-    Upeneus francisi: Upeneichthys lineatus        # tree child, unseen in data yet
-    Parupeneus spilurus: Upeneichthys lineatus     # tree child, unseen in data yet
-    # Sharks without enough data pool as "shark, not otherwise classified" —
-    # the fish-bucket pattern one level down. Carpet shark (Cephaloscyllium,
-    # 226 frames) is strong enough to stand alone and is deliberately NOT
-    # mapped; Elasmobranchii means "a shark that isn't one of those". Delete a
-    # line when its species clears the floor alone (see
-    # canonicalization_readiness.py).
-    #
-    # 2026-08-22 restructure. Two changes, both driven by counting distinct
-    # FRAMES rather than boxes:
-    #  * Squalus acanthias promoted OUT (216 boxes / 141 frames / 17 drops,
-    #    well clear of the floor). It was 91% of the bucket, so the class named
-    #    "shark NOS" was really "spiny dogfish" wearing a generic label.
-    #  * Mustelus lenticulatus mapped IN. It was left out as "strong enough to
-    #    keep its own class" on a box count (315), but those 315 boxes sit in
-    #    only 55 frames across 5 drops — rig arrives in groups, 5.7 boxes per
-    #    frame. There is no floor at annotation-load time, so rig becomes a
-    #    candidate class regardless; cap_frames_per_drop and the val split then
-    #    leave 39 train / 0 val, and apply_post_assembly_floor merges anything
-    #    under this threshold into 'fish'. A shark ground-truthed as
-    #    unidentified fish is the hagfish/gurnard bug of 2026-08-21 again.
-    # Remaining bucket: rig + school shark + sevengill + bronze whaler,
-    # ~70 frames together.
-    Mustelus lenticulatus: Elasmobranchii
-    Galeorhinus galeus: Elasmobranchii
-    Notorynchus cepedianus: Elasmobranchii
-    Carcharhinus brachyurus: Elasmobranchii
-    # Rays pool the same way (60 frames together); none is viable alone.
-    # Deliberately NOT folded into Elasmobranchii: a disc and a torpedo are the
-    # two shapes a detector separates most reliably, so one class holding both
-    # would be harder to learn than two. Batoidea's problem is val coverage
-    # (5 val images, from only 4 drops), not train volume.
-    Bathytoshia brevicaudata: Batoidea
-    Myliobatis tenuicaudatus: Batoidea
-    Dipturus innominatus: Batoidea
   # Species removed from TRAINING entirely (canonical names). Their boxes are
   # dropped at label conversion (not merged into 'fish' — a kina is not a
   # fish), so the animals appear unlabeled and the model learns to ignore
@@ -775,6 +925,13 @@ training:
   local_training_dir: "process_files/training"
   excluded_drops_file: "process_files/training_lists/excluded_drops.txt"   # drops removed entirely from training; one DropID per line, '#' comments OK
   test_drops_file: "process_files/training_lists/test_drops.txt"           # FROZEN test set: always test, never train/val; append-only, see scripts/propose_test_split.py
+  # Curated BIIGLE volumes (extra_no_survey_id/volume_<id>) mix many source
+  # deployments under one "drop". This CSV (drop, frame stem, source deployment)
+  # lets cap_frames_per_drop treat each source deployment as its own drop, so
+  # 328 frames of one 2021 video are capped like any pipeline drop. Volumes not
+  # in the file keep the old behaviour (uncapped). Built by
+  # scripts/build_extra_frame_deployments.py; a missing file means no volume is mapped.
+  extra_frame_deployments_file: "process_files/training_lists/extra_frame_deployments.csv"
   # BIIGLE volume ids whose drops always go to TRAIN (old-label / legacy training
   # volumes whose annotations shouldn't be evaluated against). Resolved offline
   # via the volume_id column stamped into each drop's _biigle_training_raw.csv
@@ -783,6 +940,7 @@ training:
   # split control: val selection is fully automatic (auto_balance_val above).
   force_train_biigle_volumes: []
   retrain_min_improvement_pct: 2.0
+  threshold_beta: 2.0           # F-beta the MaxN cutoff is picked at (spyfish/ml/training/threshold.py): recall counts this many times precision. A miss in the peak frame lowers MaxN with nothing downstream to recover it; a false box still has to survive the persistence filter and review, so recall is worth more. 1.0 = plain F1 (what Ultralytics' own P/R table assumes).
   # Per-drop frame filter (applied in assemble_yolo_dataset)
   cap_frames_per_drop: 50                # max frames per drop in the assembled YOLO dataset (extras bypass this cap). BUV is a fixed camera, so frames within a drop share one background + repeat individuals; beyond ~50 they're largely redundant (lowered 100→50, 2026-08-21). dominant_species frames are dropped first, so blue-cod-only frames go before multi-species ones.
   # Frames holding a species with fewer than this many frames CORPUS-WIDE are
@@ -803,9 +961,106 @@ training:
   cap_exempt_rare_below_frames: 600
   dominant_species:                      # frames whose only labels are in this list are dropped first when over cap
     - "Parapercis colias"                # blue cod — overrepresented (~59% of all boxes); drop blue-cod-only frames first so the cap keeps frames with rarer species
-    # - "Pagrus auratus"                   # snapper — enable if it starts dominating too
+    # - "Chrysophrys auratus"              # snapper — enable if it starts dominating too
   split_seed: 42                         # int = reproducible splits + frame selection; null = fresh randomness each run
+
+  # ── Second-stage classifier TRAINING (spyfish/ml/classifier/, scripts/two_stage/) ──
+  # BioCLIP 2 names the boxes YOLO finds (ml_inference.classifier runs it). These
+  # keys drive building the crops, choosing the classifier's classes and the
+  # fine-tune. The classifier's vocabulary is deliberately NOT the YOLO rollup's:
+  # the detector pools eels because it cannot tell a moray from a conger, the
+  # classifier exists to try. Crop margin, min box size and backbone are shared
+  # with inference (ml_inference.classifier) so training crops match what the
+  # pipeline cuts.
+  classifier:
+    source: biigle_csv            # where the boxes come from: biigle_csv (per-drop BIIGLE CSVs + frames), yolo_dataset (the assembled species/ dataset, already rolled up, what NeSI has), uoa. TWO_STAGE_SOURCE in the environment overrides this; the SLURM job sets yolo_dataset.
+    # A species is a classifier class when it has at least this many crops over
+    # at least this many drops; everything else trains and scores as other_class.
+    # Drops matter because the fine-tune is held out by drop: a species from one
+    # deployment can never be scored. Crops are the unit here (one crop is one
+    # training example), where YOLO's floor counts frames. 2 / 30 is what the
+    # 2026-11-04 checkpoint trained with; on the 2026-11 corpus 3 / 50 would
+    # drop trumpeter, kahawai, stingray, blue maomao, demoiselle and goatfish
+    # (656 of 54k boxes) into other_class. Kept at 30 to see how those fare.
+    min_drops: 2
+    min_crops: 30
+    other_class: "other fish"     # a fish the classifier cannot name; ml_inference.classifier.label_map folds it to `fish` at inference
+    not_fish_class: "not a fish"  # junk class, trained from the hard negatives (scripts/two_stage/hard_negatives.py). At inference a box named this stays in the raw CSV and is dropped by every downstream reader (spyfish/ml/raw_detections.py): no MaxN, frames, crops or BIIGLE box
+    exclude_classes: [bait, fish] # labels that are not species: never a crop, never a class. training.excluded_species (kina) is applied as well, so a species parked for YOLO is parked here too (it trained the classifier until 2026-11-10)
+    max_crops_per_drop_species: 300   # blue cod has 11.8k boxes in 8 drops; cap so one species does not swamp the probe. Ignored for the uoa source (every box counts there)
+    seed: 42
+    folds: 5                      # drop-grouped cross-validation folds for the probe and the fine-tune holdout
+    iou_match: 0.5                # an expert box and a detector box are the same fish at this IoU or above
+    prior_alpha: 1.0              # site prior strength in the probe evaluation (0 = off); the fine-tune report sweeps 0, 0.25, 0.5, 1
+    probe:                        # the linear probe on frozen BioCLIP embeddings (spyfish/ml/classifier/classes.fit_probe): standardise, then class-balanced logistic regression
+      max_iter: 3000
+      c: 0.5                      # inverse regularisation strength
+    finetune:                     # the recipe behind the 2026-11-04 checkpoint; scripts/two_stage/finetune_bioclip.py flags override per run
+      fold: 3                     # which drop-grouped fold is held out when there is no frozen test split
+      epochs: 6
+      batch: 32
+      unfreeze_blocks: 2          # trainable transformer blocks from the end of the image encoder (24 = all); ln_post and the projection always train
+      lr_encoder: 1.0e-5
+      lr_head: 1.0e-3
+      weight_decay: 0.05
+      label_smoothing: 0.1
+      workers: 6                  # DataLoader worker processes that load and augment the crops; scripts/slurm/two_stage.sl asks for 8 CPUs (6 workers + the training process). 0 = on the training process, as before 2026-11-11. A run is reproducible for a given workers value (worker seeds come from seed above) but not bit-identical across values: the augmentation draws move from the main random stream to the workers'. --workers overrides per run
+      augmentation:               # a top-down fish faces any way; colour and blur stand in for turbidity and depth
+        rotation_degrees: 180     # +/- degrees, i.e. the full circle
+        horizontal_flip: true
+        color_jitter: [0.3, 0.3, 0.3, 0.05]   # brightness, contrast, saturation, hue
+        blur_probability: 0.3
+        blur_kernel: 5
+        blur_sigma: [0.1, 1.5]
+    hard_negatives:               # detector boxes no expert box explains, reviewed in clusters before they train as not_fish_class
+      iou_negative: 0.3           # below this overlap with every expert box a detector box is a candidate
+      max_per_drop: 400           # keep the candidate set the same order of size as the positives
+      n_clusters: 16              # k-means groups for the contact-sheet review
+    static_boxes:                 # scripts/two_stage/static_boxes.py: a box that stays in one place for minutes is not a fish (sea cucumber, sea star, stick, rock). 2026-11-12, after BioCLIP named HOR sticks `rock lobster` at 0.94
+      link_distance_box: 0.5      # a box joins a track when its centre is within this share of the box diagonal of the track's MEAN centre, ...
+      link_distance_px: 80        # ... or within this many pixels, whichever is larger: camera sway moves every object by the same pixels, so a small object needs the floor (overlap failed at ±15 px on an 80 px box). The mean, not the last box: sway rocks a fixed object around its mean, a fish swimming off leaves it
+      link_size_ratio: 1.5        # and its diagonal is within this factor of the track's
+      max_gap_seconds: 600        # a track survives this long without a detection. Long on purpose: YOLO sees a stick on 1% of frames (HOR_065: 62 of ~4,800 over 27 min), so continuity is not the signal
+      min_span_seconds: 300       # a static track lasts at least 5 min. Tried 12 (2026-11-12): it removed a fifth of the junk AND a fifth of the fish across 72 reviewed tracks, because at SLI and ORA fish hold one spot for 13-30 min (tarakihi in the current, fish in reef holes). Duration only separates them where fish come and go (HOR)
+      min_boxes: 20               # and has at least this many boxes
+      max_spread_px: 25           # the signal: box centres within this median distance of their median (sway included). A fish coming back to the bait never lands on the same pixels twice
+      max_size_spread: 0.15       # and box diagonals within this share of their median (a different fish at the same spot has a different size)
+      crops_per_track: 5          # negatives taken per track, spread over its span: hundreds of near-identical crops of one stick teach nothing new
+      crop_min_iou: 0.7           # crops come only from boxes overlapping the track's median box this much: the static object, not a fish lying across the spot
+      # Pipeline (spyfish/ml/static_boxes.py, run in --ml-post). A static track whose
+      # fish score (YOLO mean confidence + how rarely YOLO fires on it, i.e.
+      # -log(boxes per minute), each standardised by the means/stds below, from the
+      # first review's 136 tracks) is under flag_below gets its boxes relabelled
+      # `label`: out of the ML MaxN and frame choice, uploaded to BIIGLE for the
+      # expert. Review of 240 tracks / 14 surveys (2026-11-12): below 0 = 111 junk, 0 fish.
+      not_a_fish_flag: true
+      label: "Not a fish?"        # BIIGLE label 789444 (workflow tree 3375); see biigle.label_mapping and maxn_exclude_classes
+      flag_below: 0.0
+      score_conf_mean: 0.4272
+      score_conf_std: 0.1119
+      score_rate_mean: -2.0704
+      score_rate_std: 1.5555
   background_ratio: 0.1                  # target share of background (empty-label) frames in the TRAIN split; 0 disables. Ultralytics rec 0–10%, COCO ≈ 1%. Backgrounds (mostly from training-frame volumes) are pooled across train drops and subsampled to hit this ratio.
+
+
+site_prior:
+  # Species-presence prior per marine reserve (the 3-letter DropID prefix) for the
+  # planned two-stage classifier (two_stage_classifier_plan.md §6). Inputs are
+  # EXPERT annotations only (legacy + BIIGLE rows, annotated_by = 'expert'); no
+  # citsci, no ML. A species' raw rate at a reserve is the share of expert-reviewed
+  # drops in which it was recorded (presence, not counts).
+  #
+  # Reserves with few reviewed drops have not seen all their species (rarefaction
+  # output shows how many a sample of n drops finds), so every reserve borrows from
+  # its neighbours: prior = (n * own_rate + pseudo_drops * neighbour_rate) / (n + pseudo_drops).
+  # Neighbours are weighted by distance between reserve centroids (median deployment
+  # position) with an exponential kernel exp(-d / length_scale_km).
+  length_scale_km: 250      # a reserve 250 km away counts e^-1 of one next door; NZ's north-south gradient (PKI subtropicals vs BNP temperates) is ~1,500 km
+  pseudo_drops: 20          # a reserve with 20 expert-reviewed drops is half its own data, half neighbours; OKA (1 drop) is nearly all neighbours, BNP (349) nearly all its own
+  donor_min_drops: 10       # reserves with fewer reviewed drops only borrow, they lend nothing (their rates are noise)
+  floor: 0.01               # minimum presence probability for any species at any reserve: vagrants and range shifts stay possible, and nothing is ever impossible for the classifier
+  rarefaction_sample_sizes: [5, 10, 17, 30, 50, 100]   # expected species found in n drops, per reserve: the "how incomplete is a small reserve's list" diagnostic
+  bucket_names: ["fish"]    # not species: excluded from the prior but their drops still count as reviewed
 
 
 training_extraction:

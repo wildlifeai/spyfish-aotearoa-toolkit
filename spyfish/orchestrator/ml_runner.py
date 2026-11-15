@@ -1,9 +1,8 @@
 import logging
 import os
 from pathlib import Path
+from time import perf_counter
 from typing import List
-
-import pandas as pd
 
 from spyfish.config.base import (
     InvalidTransitionError,
@@ -15,8 +14,13 @@ from spyfish.config.wrapper import config
 from spyfish.database.annotation_manager import AnnotationDatabaseManager
 from spyfish.database.manager import DatabaseManager
 from spyfish.extraction.slate import extract_slate_frame
-from spyfish.ml.process_ml_annotations import process_one_drop
+from spyfish.ml.model_meta import resolve_imgsz, resolve_maxn_threshold
+from spyfish.ml.process_ml_annotations import (
+    DegenerateInferenceError,
+    process_one_drop,
+)
 from spyfish.ml.run_inference import main as run_inference_main
+from spyfish.orchestrator.download import download_videos
 from spyfish.storage.s3_handler import S3Handler
 from spyfish.utils import validate_model_path
 
@@ -34,11 +38,12 @@ class MLRunner:
             config.ml_inference, "limit_processing", "ml_inference"
         )
         self.ml_fps = config.ml_fps
-        self.imgsz = int(config.imgsz)
         # Via the property (not raw get_required) so the (0, 1] validation fires,
         # a stray confidence_threshold=0 floods inference with max_det garbage.
         self.confidence = config.confidence_threshold
         self.model = str(validate_model_path(config.pipeline_model_path))
+        # The checkpoint knows what size it was trained at; config only overrides.
+        self.imgsz = resolve_imgsz(self.model)
         # Drops this runner successfully claimed (advanced to ml_running).
         # Populated by run_inference_loop; finalize_batch_results must only
         # ever touch these, never a target another job claimed first.
@@ -79,7 +84,13 @@ class MLRunner:
             # ml_complete -> ml_ready is not a forward transition, it is an
             # operator-requested re-run.
             summary = self.db.get_survey_ml_status_summary(survey_id)
-            redo = summary.get(MlStatus.COMPLETE, []) + summary.get(MlStatus.ERROR, [])
+            # ml_inferred is in here too: its raw CSV is from the model being
+            # redone, so post-processing it would complete a stale result.
+            redo = (
+                summary.get(MlStatus.COMPLETE, [])
+                + summary.get(MlStatus.ERROR, [])
+                + summary.get(MlStatus.INFERRED, [])
+            )
             # ml_running has no other way out: it is set before inference and
             # only advances on completion, so a killed job leaves drops stuck.
             stranded = summary.get(MlStatus.RUNNING, [])
@@ -88,7 +99,7 @@ class MLRunner:
             if redo:
                 logging.info(
                     f"--force: reset {len(redo)} {survey_id} drop(s) from "
-                    f"ml_complete/ml_error back to ml_ready: {sorted(redo)}"
+                    f"ml_complete/ml_error/ml_inferred back to ml_ready: {sorted(redo)}"
                 )
             if stranded:
                 logging.warning(
@@ -98,12 +109,13 @@ class MLRunner:
                     f"processed twice - check for a live job before continuing."
                 )
 
-        records = self.db.get_deployments_eligible("ml_status", [MlStatus.READY])
+        records = self.db.get_deployments_eligible(
+            MlStatus.COLUMN, [MlStatus.READY], survey_id=survey_id
+        )
+        # With a survey, the survey is the batch.
+        limit = len(records) if survey_id else self.limit
 
         if survey_id:
-            prefix = f"{survey_id}_"
-            records = [r for r in records if r["drop_id"].startswith(prefix)]
-            self.limit = len(records)
             summary = self.db.get_survey_ml_status_summary(survey_id)
             not_ready = {s: d for s, d in summary.items() if s != MlStatus.READY}
             logging.info(
@@ -120,83 +132,85 @@ class MLRunner:
                     f"Survey {survey_id}: no deployments found — check the survey id."
                 )
 
-        df = pd.DataFrame(records)
-
-        if df.empty:
+        if not records:
             return []
 
         # The batch is the TOP `limit` drops by priority, not "walk the queue
-        # until `limit` succeed". The old loop below kept going past a failed
+        # until `limit` succeed". An earlier loop kept going past a failed
         # drop, so on 2026-10-14 a run meant for 9 targeted SLI drops walked
         # all 800+ ml_ready drops trying to download each one; with a real
         # bucket that is the whole backlog's egress bill for a 9-drop job. A
         # drop that fails here is reported, not replaced.
-        if len(df) > self.limit:
+        # Archived drops are set aside BEFORE the cut: the transfer below skips
+        # every DEEP_ARCHIVE video, so nine archived drops at the top of the
+        # queue made every run download nothing while the rest of ml_ready
+        # never moved. This reads only the DB and the local disk (no S3 call).
+        # A video already in media_dir is kept whatever the column says, and
+        # a restored object keeps `archived` until --check-arrivals refreshes
+        # it, so that is the step that brings these back.
+        if not survey_id:
+            archived = [
+                r["drop_id"]
+                for r in records
+                if r.get("video_presence") == VideoPresence.ARCHIVED
+                and not (
+                    Path(self.video_storage_dir) / Path(r["video_path"] or "").name
+                ).is_file()
+            ]
+            if archived:
+                logging.warning(
+                    f"{len(archived)} ml_ready drop(s) have video_presence="
+                    f"{VideoPresence.ARCHIVED} and no local copy; left out of this "
+                    f"batch (restore, then --check-arrivals): {archived[:5]}"
+                    + (" ..." if len(archived) > 5 else "")
+                )
+                skip = set(archived)
+                records = [r for r in records if r["drop_id"] not in skip]
+
+        if len(records) > limit:
             logging.info(
-                f"{len(df)} drops at ml_ready; taking the top {self.limit} by "
+                f"{len(records)} drops at ml_ready; taking the top {limit} by "
                 f"priority (limit_processing)."
             )
-            df = df.head(self.limit)
+            records = records[:limit]
 
-        logging.debug("Generating target paths and downloading media via aws s3...")
-
-        actual_video_dir = self.video_storage_dir
-        os.makedirs(actual_video_dir, exist_ok=True)
-
-        # Download in priority order. `limit` already bounds the frame above;
-        # the check here is kept so a survey run (limit = survey size) behaves
-        # the same way.
-        valid_indices = []
-        local_filepaths = []
-        for idx, path in df["video_path"].items():
-            if len(valid_indices) >= self.limit:
-                break
-
-            if df.at[idx, "video_presence"] == VideoPresence.ARCHIVED:
-                drop_id = df.at[idx, "drop_id"]
-                logging.warning(
-                    f"Skipping {drop_id}: video in DEEP_ARCHIVE, "
-                    f"restore with `aws s3api restore-object` before ML can run."
-                )
-                continue
-
-            filename = os.path.basename(path)
-            local_path = os.path.join(actual_video_dir, filename)
-            s3_uri = f"s3://{self.bucket}/{path}"
-
-            if os.path.exists(local_path):
-                logging.debug(
-                    f"Video {filename} already exists at {local_path}. Skipping download."
-                )
-                local_filepaths.append(local_path)
-                valid_indices.append(idx)
-                continue
-
-            logging.info(f"Downloading {s3_uri} to {local_path}...")
-            try:
-                success = self.s3.download_object_from_s3(key=path, filename=local_path)
-                if not success:
-                    raise RuntimeError("S3Handler returned False")
-                local_filepaths.append(local_path)
-                valid_indices.append(idx)
-            except Exception as e:
-                logging.error(f"Failed to download video {s3_uri}: {e}")
-                continue
-
-        # Keep only the rows where the video is actually available locally
-        df = df.loc[valid_indices].copy()
-
-        if df.empty:
+        # The same transfer --download runs (orchestrator/download.py): a file
+        # already in media_dir is used whatever video_presence says, an
+        # unrestored DEEP_ARCHIVE object is reported and skipped. After a
+        # --download job this finds everything present; its TIMING
+        # phase=download line then reports n_videos=0, which is what a GPU job
+        # should show.
+        result = download_videos(
+            [r["drop_id"] for r in records], db=self.db, s3=self.s3
+        )
+        on_disk = set(result["downloaded"]) | set(result["present"])
+        targets = [
+            {
+                **r,
+                "VideoURL": str(
+                    Path(self.video_storage_dir) / Path(r["video_path"]).name
+                ),
+            }
+            for r in records
+            if r["drop_id"] in on_disk
+        ]
+        if not targets:
             logging.warning("No media was successfully downloaded. Exiting.")
-            return []
+        # DB key names: drop_id, sampling_start, sampling_end
+        return targets
 
-        df["VideoURL"] = local_filepaths
+    def run_inference_loop(
+        self, targets: List[dict], post_process: bool = True
+    ) -> List[str]:
+        """Executes YOLO inference for each target. Returns drop_ids that succeeded.
 
-        # Return list of records for inference (using DB key names: drop_id, sampling_start, sampling_end)
-        return df.to_dict("records")
-
-    def run_inference_loop(self, targets: List[dict]) -> List[str]:
-        """Executes YOLO inference for each target. Returns drop_ids that succeeded."""
+        Each drop goes ``ml_ready → ml_running → ml_inferred`` once its raw
+        detections CSV is on disk. With ``post_process`` (the default, what
+        ``--ml`` does) the drop is then post-processed in the same loop and
+        ends at ``ml_complete``. ``--ml-infer`` passes ``post_process=False``
+        so the GPU job stops at ``ml_inferred`` and ``--ml-post`` finishes the
+        CPU-only part on a CPU node (`run_post_processing`).
+        """
         if not targets:
             return []
 
@@ -251,19 +265,15 @@ class MLRunner:
 
         logging.info(f"Starting inference loop for {len(targets)} drops...")
 
-        # Shared resources for per-drop post-ML processing. Initialised once
-        # outside the loop so each iteration reuses the same DB connections.
-        ann_db = AnnotationDatabaseManager()
+        # One annotations DB handle for the whole batch; only opened when this
+        # loop also post-processes, the GPU-only job never touches it.
+        ann_db = AnnotationDatabaseManager() if post_process else None
         model_name = Path(self.model).stem
-        interval = config.interval_seconds
-        base_conf = config.confidence_threshold
-        maxn_conf = config.maxn_confidence_threshold
 
         success_targets = []
         for row in targets:
             drop_id = row["drop_id"]
             try:
-                drop_annotations_dir = config.get_drop_annotations_dir(drop_id)
                 inference_args = {
                     "drop_id": drop_id,
                     "video_url": row["VideoURL"],
@@ -273,14 +283,16 @@ class MLRunner:
                     "ml_fps": self.ml_fps,
                     "imgsz": self.imgsz,
                     "confidence_threshold": self.confidence,
-                    "output_csv": os.path.join(
-                        drop_annotations_dir, f"{drop_id}_{model_name}_raw.csv"
-                    ),
+                    "output_csv": str(config.get_raw_csv_path(drop_id, model_name)),
                 }
                 # Slate first: the handwritten metadata board at the start of the
                 # video, while it is on local disk. The rig is on the bottom by
                 # sampling_start, so the board cannot be later than that. Its own
-                # try so a miss or a bug here never costs the ML run.
+                # try so a miss or a bug here never costs the ML run. It stays
+                # with inference (seconds of CPU) rather than post-processing so
+                # the ordering guarantee "slate before ML" holds in every mode.
+                # In the three-job chain --download has already saved it (on CPU),
+                # so this returns at once: extract_slate_frame skips a saved slate.
                 try:
                     extract_slate_frame(
                         drop_id,
@@ -293,54 +305,171 @@ class MLRunner:
                     )
 
                 logging.info(f"  → Running ML inference: {drop_id}")
+                t_inference = perf_counter()
                 run_inference_main(inference_args)
-
-                # Per-drop post-ML: write MaxN + QA frames BEFORE marking complete,
-                # so a crash here leaves the drop in `ml_running` for retry rather
-                # than `ml_complete` with no artifacts on disk.
-                process_one_drop(
-                    drop_id=drop_id,
-                    video_dir=Path(self.video_storage_dir),
-                    ann_db=ann_db,
-                    model_name=model_name,
-                    interval=interval,
-                    base_conf=base_conf,
-                    maxn_conf=maxn_conf,
+                # The raw CSV is on disk (atomic rename inside run_inference), so
+                # the GPU's part is done whatever happens next.
+                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.INFERRED)
+                logging.info(
+                    f"TIMING drop={drop_id} phase=inference "
+                    f"seconds={perf_counter() - t_inference:.0f}"
                 )
-                self.db.sync_annotation_counts([drop_id])
-                # sync_annotation_counts already advances ml_status → ml_complete for
-                # any drop that gained annotations; only advance here if it didn't
-                # (e.g. a zero-detection drop still in ml_running), so we never trip
-                # the ml_complete → ml_complete guard.
-                dep = self.db.get_deployment(drop_id)
-                if not dep or dep["ml_status"] != MlStatus.COMPLETE:
-                    self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
+
+                if post_process:
+                    self.post_process_drop(drop_id, ann_db, model_name)
                 success_targets.append(drop_id)
 
             except Exception as e:
                 logging.error(f"ML processing failed for {drop_id}: {e}", exc_info=True)
-                # Only a drop still in ml_running can legally move to ml_error. If it
-                # already reached ml_complete (inference succeeded but a later step
-                # raised), forcing ml_error would itself be an invalid transition and
-                # mask the real success, so skip it.
-                dep = self.db.get_deployment(drop_id)
-                if dep and dep["ml_status"] == MlStatus.RUNNING:
-                    self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
-                    self.db.add_validation_error(
-                        survey_id=config.get_survey_id_from_drop(drop_id),
-                        drop_id=drop_id,
-                        error_type=MlStatus.ERROR,
-                        column_name="ml_inference",
-                        error_message=f"ML processing failed: {type(e).__name__}: {e}",
-                    )
-                else:
-                    current = dep["ml_status"] if dep else "unknown"
-                    logging.error(
-                        f"{drop_id}: exception after status reached {current!r}, not "
-                        "forcing ml_error (would be an invalid transition)."
-                    )
+                self._mark_ml_error(drop_id, e, column_name="ml_inference")
 
         return success_targets
+
+    def post_process_drop(
+        self,
+        drop_id: str,
+        ann_db: AnnotationDatabaseManager,
+        model_name: str,
+    ) -> None:
+        """CPU-only tail of the ML stage for one ``ml_inferred`` drop.
+
+        MaxN + annotation ingest + QA frames from the raw CSV already on disk,
+        then ``ml_inferred → ml_complete``. Runs before the drop is marked
+        complete so a crash leaves it at ``ml_inferred`` for a retry rather
+        than complete with no artifacts. Raises on failure; the caller decides
+        how to record it.
+        """
+        t_post = perf_counter()
+        process_one_drop(
+            drop_id=drop_id,
+            video_dir=Path(self.video_storage_dir),
+            ann_db=ann_db,
+            model_name=model_name,
+            interval=config.interval_seconds,
+            base_conf=config.confidence_threshold,
+            maxn_conf=resolve_maxn_threshold(config.model_path_for_name(model_name)),
+            deployment=self.db.get_deployment(drop_id),
+        )
+        self.db.sync_annotation_counts([drop_id])
+        # sync_annotation_counts already sets ml_complete for any drop that
+        # gained annotations; only advance here if it didn't (e.g. a
+        # zero-detection drop still at ml_inferred), so we never trip the
+        # ml_complete → ml_complete guard.
+        dep = self.db.get_deployment(drop_id)
+        if not dep or dep["ml_status"] != MlStatus.COMPLETE:
+            self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.COMPLETE)
+        logging.info(
+            f"TIMING drop={drop_id} phase=post seconds={perf_counter() - t_post:.0f}"
+        )
+
+    def run_post_processing(self, survey_id: str | None = None) -> List[str]:
+        """``--ml-post``: finish every ``ml_inferred`` drop (CPU node).
+
+        No ``limit_processing`` here: these drops were already bounded when
+        their inference batch was picked, and a backlog of inferred drops from
+        several GPU jobs should all be finished. ``survey_id`` narrows to one
+        survey (DropID prefix), same as every other stage. Needs the video on
+        local disk at the runner's path (QA and legacy review frames seek into
+        it), which on NeSI is the shared project filesystem the GPU job wrote
+        to. Returns the drop_ids that reached ``ml_complete``.
+        """
+        records = self.db.get_deployments_eligible(
+            MlStatus.COLUMN, [MlStatus.INFERRED], survey_id=survey_id
+        )
+        drop_ids = [r["drop_id"] for r in records]
+        if not drop_ids:
+            logging.info(f"No drops at {MlStatus.INFERRED}. Nothing to post-process.")
+            return []
+
+        logging.info(f"Post-processing {len(drop_ids)} {MlStatus.INFERRED} drop(s)...")
+        ann_db = AnnotationDatabaseManager()
+        done = []
+        for drop_id in drop_ids:
+            try:
+                self.post_process_drop(
+                    drop_id, ann_db, self._inferred_model_name(drop_id)
+                )
+                done.append(drop_id)
+            except Exception as e:
+                logging.error(
+                    f"ML post-processing failed for {drop_id}: {e}", exc_info=True
+                )
+                self._mark_ml_error(drop_id, e, column_name="ml_post")
+        return done
+
+    def _inferred_model_name(self, drop_id: str) -> str:
+        """The model whose raw CSV ``--ml-post`` should finish for ``drop_id``.
+
+        The GPU job names its raw CSV after the model it ran; by the time the
+        CPU job runs, ``--retrain`` may have promoted a newer model, so the
+        configured model is not necessarily the one that produced the drop's
+        detections. Read the name back from disk: of the ``{drop}_{model}_raw.csv``
+        files present, take the one written last. That is the run that put the
+        drop at ``ml_inferred``; the newest training stamp is not, after a
+        rollback to an older checkpoint or when a trial model once ran on the
+        drop. Falls back to the configured model when no raw CSV is found, so
+        the error raised downstream names the file that was expected.
+        """
+        configured = Path(self.model).stem
+        # Canonical model names only: the zooniverse / biigle raw CSVs share
+        # the suffix but are not listed.
+        candidates = config.list_ml_raw_csvs(drop_id)
+        if not candidates:
+            return configured
+        # Stamp only breaks an mtime tie (files restored in one copy).
+        newest = max(
+            candidates,
+            key=lambda m: (
+                candidates[m].stat().st_mtime,
+                config.model_name_stamp(m),
+                m,
+            ),
+        )
+        if newest != configured:
+            logging.info(
+                f"  {drop_id}: raw CSV is from {newest}, not the configured "
+                f"{configured}; post-processing the model that ran."
+            )
+        return newest
+
+    def _mark_ml_error(self, drop_id: str, exc: Exception, column_name: str) -> None:
+        """Record a failed drop in ``validation_errors``, moving it to ``ml_error``
+        only when a GPU re-run is what fixes it.
+
+        ``ml_running`` → ``ml_error``: inference itself failed; the only exit
+        from ``ml_error`` is ``ml_ready``, which re-infers.
+        ``ml_inferred`` stays ``ml_inferred``: the raw CSV is on disk and the
+        failure is CPU-side (video evicted before the QA frame seek, DB write).
+        The next ``--ml-post`` retries it; sending it to ``ml_error`` would
+        force a GPU re-inference for a CPU problem. The error is still recorded.
+        If the drop already reached ``ml_complete`` (work succeeded but a later
+        step raised), forcing ``ml_error`` would itself be an invalid transition
+        and mask the real success, so skip it.
+        """
+        dep = self.db.get_deployment(drop_id)
+        current = dep["ml_status"] if dep else None
+        if current in (MlStatus.RUNNING, MlStatus.INFERRED):
+            # A degenerate raw CSV fails the same way on every retry, so it
+            # goes to ml_error for a person even from ml_inferred.
+            if current == MlStatus.RUNNING or isinstance(exc, DegenerateInferenceError):
+                self.db.advance_status(drop_id, MlStatus.COLUMN, MlStatus.ERROR)
+            else:
+                logging.warning(
+                    f"{drop_id}: left at {MlStatus.INFERRED}; the raw CSV is on "
+                    "disk, the next --ml-post retries it."
+                )
+            self.db.add_validation_error(
+                survey_id=config.get_survey_id_from_drop(drop_id),
+                drop_id=drop_id,
+                error_type=MlStatus.ERROR,
+                column_name=column_name,
+                error_message=f"ML processing failed: {type(exc).__name__}: {exc}",
+            )
+        else:
+            logging.error(
+                f"{drop_id}: exception after status reached {current or 'unknown'!r}, "
+                "not forcing ml_error (would be an invalid transition)."
+            )
 
     def finalize_batch_results(
         self, successful_drops: List[str], all_drop_ids: List[str] | None = None

@@ -7,7 +7,7 @@ for rare ones: 8% of Batoidea's 71 boxes is 6, and 5 val boxes is what the
 
 from spyfish.ml.training.split_data import balance_val_drops
 
-SPECIES = ["fish", "Pagrus auratus", "Batoidea"]
+SPECIES = ["fish", "Chrysophrys auratus", "Batoidea"]
 
 
 def _corpus(tmp_path, layout):
@@ -73,7 +73,7 @@ def test_floor_does_not_disturb_a_common_species(tmp_path):
     root, drops = _rare_corpus(tmp_path)
     _, val_without, _ = balance_val_drops(
         root,
-        ["fish", "Pagrus auratus"],
+        ["fish", "Chrysophrys auratus"],
         drops,
         val_pct=0.08,
         tolerance=0.2,
@@ -81,7 +81,7 @@ def test_floor_does_not_disturb_a_common_species(tmp_path):
     )
     _, val_with, _ = balance_val_drops(
         root,
-        ["fish", "Pagrus auratus"],
+        ["fish", "Chrysophrys auratus"],
         drops,
         val_pct=0.08,
         tolerance=0.2,

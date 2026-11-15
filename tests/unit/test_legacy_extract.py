@@ -35,7 +35,7 @@ def test_all_null_row_becomes_an_absence_record():
     df = _read(
         f"{HEADER}\n"
         f"{PLACEHOLDER_DROP},NULL,NULL,NULL,expert,30,NA\n"
-        f"{DROP},Pagrus auratus,00:05:10,3,expert,30,NA\n"
+        f"{DROP},Chrysophrys auratus,00:05:10,3,expert,30,NA\n"
     )
     annotations, placeholders = parse_legacy_rows(df)
 
@@ -51,11 +51,11 @@ def test_all_null_row_becomes_an_absence_record():
     assert absence["external_id"] == "legacy"
 
     real = next(a for a in annotations if a["drop_id"] == DROP)
-    assert real["scientific_name"] == "Pagrus auratus"
+    assert real["scientific_name"] == "Chrysophrys auratus"
 
 
 def test_normal_row_maps_all_fields():
-    df = _read(f"{HEADER}\n{DROP},Pagrus auratus,00:05:10,3,expert,30,0.8\n")
+    df = _read(f"{HEADER}\n{DROP},Chrysophrys auratus,00:05:10,3,expert,30,0.8\n")
     annotations, placeholders = parse_legacy_rows(df)
 
     assert placeholders == []
@@ -70,18 +70,18 @@ def test_normal_row_maps_all_fields():
 def test_partially_filled_row_is_kept_not_skipped():
     """Only the all-NULL signature marks a placeholder. A row with ANY of the
     three data fields present is a real (if incomplete) record."""
-    df = _read(f"{HEADER}\n{DROP},Pagrus auratus,NULL,NULL,expert,30,NA\n")
+    df = _read(f"{HEADER}\n{DROP},Chrysophrys auratus,NULL,NULL,expert,30,NA\n")
     annotations, placeholders = parse_legacy_rows(df)
 
     assert placeholders == []
     (ann,) = annotations
-    assert ann["scientific_name"] == "Pagrus auratus"
+    assert ann["scientific_name"] == "Chrysophrys auratus"
     assert ann["time_of_max"] is None
     assert ann["max_interval"] == 0
 
 
 def test_na_confidence_becomes_none():
-    df = _read(f"{HEADER}\n{DROP},Pagrus auratus,00:05:10,3,expert,30,NA\n")
+    df = _read(f"{HEADER}\n{DROP},Chrysophrys auratus,00:05:10,3,expert,30,NA\n")
     annotations, _ = parse_legacy_rows(df)
     assert annotations[0]["confidence_agreement"] is None
 
@@ -98,9 +98,9 @@ def test_time_of_max_seconds_derived_at_ingest_with_excel_repair():
     """
     df = _read(
         f"{HEADER}\n"
-        f"{DROP},Pagrus auratus,23:45:00,2,expert,30,NA\n"  # 23 min 45 s
-        f"{DROP},Pagrus auratus,00:17:00,1,expert,30,NA\n"  # 17 s (coerced dep)
-        f"{DROP},Pagrus auratus,00:25:30,3,expert,30,NA\n"  # immune: 25.5 min
+        f"{DROP},Chrysophrys auratus,23:45:00,2,expert,30,NA\n"  # 23 min 45 s
+        f"{DROP},Chrysophrys auratus,00:17:00,1,expert,30,NA\n"  # 17 s (coerced dep)
+        f"{DROP},Chrysophrys auratus,00:25:30,3,expert,30,NA\n"  # immune: 25.5 min
         f"{PLACEHOLDER_DROP},Parapercis colias,00:10:00,1,expert,30,NA\n"  # 10 min
     )
     annotations, _ = parse_legacy_rows(df)
@@ -111,7 +111,7 @@ def test_time_of_max_seconds_derived_at_ingest_with_excel_repair():
 
 
 def test_time_of_max_seconds_is_none_when_text_is_missing():
-    df = _read(f"{HEADER}\n{DROP},Pagrus auratus,NULL,2,expert,30,NA\n")
+    df = _read(f"{HEADER}\n{DROP},Chrysophrys auratus,NULL,2,expert,30,NA\n")
     annotations, _ = parse_legacy_rows(df)
     assert annotations[0]["time_of_max_seconds"] is None
 

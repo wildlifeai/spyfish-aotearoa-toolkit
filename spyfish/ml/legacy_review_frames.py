@@ -152,7 +152,7 @@ def write_legacy_review_frames(
         return []
 
     frames_dir = config.get_frames_dir(drop_id)
-    qa_dir = config.get_drop_dir(drop_id) / "qa_frames" / "legacy" / model_name
+    qa_dir = config.get_frames_dir(drop_id, "qa") / "legacy" / model_name
     frames_dir.mkdir(parents=True, exist_ok=True)
     max_delta = config.legacy_review_max_time_delta_seconds
 

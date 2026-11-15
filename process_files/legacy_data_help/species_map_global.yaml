@@ -1,0 +1,116 @@
+Arripis sp: Arripis sp.
+Blue knifefish ?: Labracoglossa nitida
+Carangidae sp: Carangidae sp.
+Cephaloscyllium isabellum: Cephaloscyllium isabella
+Cheilodactylus spectabilis: Chirodactylus spectabilis
+Chelidonchthys kumu: Chelidonichthys kumu
+Chelidonichthys cuculus: Chelidonichthys kumu
+Chiroremus marmoratus: Chironemus marmoratus
+Chromis dispilus: Chromis dispila
+# Snapper: WoRMS accepts Chrysophrys auratus (367239); Pagrus auratus is the superseded
+# combination the SharePoint list, old model checkpoints and most legacy sheets still use.
+# Decided 2026-11-04: the registry name is Chrysophrys auratus.
+Pagrus auratus: Chrysophrys auratus
+Conger sp: Conger sp.
+# WoRMS ranks the NZ fur seal as a subspecies; BIIGLE and the class map follow it.
+Arctocephalus forsteri: Arctocephalus australis forsteri
+# Coris sandageri is a common misspelling; the registry/WoRMS name is Coris sandeyeri.
+Coris sandageri: Coris sandeyeri
+Dasyatis brevicaudata: Bathytoshia brevicaudata
+Dasyatis brevicaudatus: Bathytoshia brevicaudata
+Forsterygion: Forsterygion sp.
+Forsterygion spp.: Forsterygion sp.
+# Forsterygion is a triplefin genus; BIIGLE labels triplefins at family level.
+Forsterygion sp.: Tripterygiidae
+Galeorhimus galeus: Galeorhinus galeus
+Goat fish: Upeneichthys lineatus
+Goatfish: Upeneichthys lineatus
+Gurnard: Chelidonichthys kumu
+Gymnothoraz numilus: Gymnothorax nubilus
+Gynothorax nubilis: Gymnothorax nubilus
+Gynothorax prasinus: Gymnothorax prasinus
+Helicenus percoides: Helicolenus percoides
+Hypoelectrodes huntii: Hypoplectrodes huntii
+# Half-banded perch: Te Papa 2015 name, never published, not in WoRMS. Genus, like the
+# PKI 1998 rows that only said 'Hypoplectrodes sp.' (decided 2026-11-04).
+Hypoplectrodes dimidius: Hypoplectrodes sp.
+Hypoplectrodes sp: Hypoplectrodes sp.
+Jack Mackeral: Trachurus novaezelandiae
+Leather jack: Meuschenia scabra
+Leather jacket: Meuschenia scabra
+Leatherjacket: Meuschenia scabra
+Leptocephalus verreauxi: Conger verreauxi
+Lotella rhacinus: Lotella rhacina
+Macroctupus maorum: Macroctopus maorum
+Nemadacytylus douglasii: Nemadactylus douglasii
+Notoclinus cinctus: Notolabrus cinctus
+Notolabrus cintus: Notolabrus cinctus
+Notorhynchus cepedianus: Notorynchus cepedianus
+Octopus maorium: Macroctopus maorum
+Odax pullas: Odax pullus
+# "Leather jack" in some sheets got resolved to this American jack (a valid species in WoRMS, not a synonym);
+# it is a lookup error for the smooth leatherjacket.
+Oligoplites saurus: Meuschenia scabra
+Pagrus aurastus: Chrysophrys auratus
+Parapercis colis: Parapercis colias
+Paraperis colias: Parapercis colias
+# Parika scaber is the pre-revision name for the smooth leatherjacket. WoRMS records
+# 'Meuschenia scaber' (277614) as an incorrect subsequent spelling of Meuschenia scabra
+# (1841076); the BIIGLE tree already uses scabra. Decided 2026-11-04: WoRMS spelling.
+Meuschenia scaber: Meuschenia scabra
+Parika scaber: Meuschenia scabra
+Parus auratus: Chrysophrys auratus
+Pesudophycis bachus: Pseudophycis bachus
+Pig fish: Congiopodus leucopaecilus
+Pigfish: Congiopodus leucopaecilus
+Pinnoctopus cordiformis: Macroctopus maorum
+Psedolabrus miles: Pseudolabrus miles
+Psedudocaranx georgianus: Pseudocaranx georgianus
+# Not a WoRMS synonym: both are accepted species. P. dentex is now restricted to the Atlantic and
+# Mediterranean; NZ trevally recorded under that name is Pseudocaranx georgianus.
+Pseudocaranx dentex: Pseudocaranx georgianus
+Pseduolabrus miles: Pseudolabrus miles
+Pseudolabrus fucicola: Notolabrus fucicola
+Psuedophycis bachus: Pseudophycis bachus
+Psuedophyscis bacchus: Pseudophycis bachus
+# "Red pig" appears in the AHE (Hahei) workbooks — northern, so the red
+# pigfish, not the southern Congiopodus "pigfish" above.
+Red pig: Bodianus unimaculatus
+Rhombosolea plebia: Rhombosolea plebeia
+Scorpanea papillosa: Scorpaena papillosa
+Scorpis lineolatus: Scorpis lineolata
+Scorpis violaceus: Scorpis violacea
+Seriola lalandi lalandi: Seriola lalandi
+Spiny red: Jasus edwardsii
+Spot demoiselle: Chromis dispila
+# NZ "spotted dogfish" is the rig / spotted estuary smooth-hound
+Spotted Dogfish: Mustelus lenticulatus
+Sweep: Scorpis lineolata
+Terakihi: Nemadactylus macropterus
+Two spot demoiselle: Chromis dispila
+"Un-identified": Unidentified
+"Unidentified Cod??": Unidentified
+Unidentified epipelagic: Unidentified
+Unidentified fish: Unidentified
+Unidentified spp.: Unidentified
+Unidentified spp. 1: Sp1
+Unidentified spp. 2: Sp2
+Unidentified spp. 3: Sp3
+Unkown: Unidentified
+Upeneichthys porosus: Upeneichthys lineatus
+Upeneichthys porsus: Upeneichthys lineatus
+Yellow morey: Gymnothorax prasinus
+Yellowtail kingfish: Seriola lalandi
+Zearaja nasuta: Dipturus nasutus
+# Workbook placeholders for "an unidentified animal". Sp1..Sp7 are per-survey
+# counters, not names, so they fold into the registry's unidentified bucket
+# (`fish`) at insert. The extraction maps "Unidentified spp. 1" to Sp1 first;
+# canonical_name follows the chain.
+Sp1: fish
+Sp2: fish
+Sp3: fish
+Sp4: fish
+Sp5: fish
+Sp6: fish
+Sp7: fish
+Unidentified: fish

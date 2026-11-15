@@ -99,6 +99,27 @@ class ExtractionConfig(BaseConfig):
     # ── FFmpeg encoding settings ─────────────────────────────────────────
 
     @property
+    def review_frame_width(self) -> int:
+        """Width in pixels of a MaxN frame saved for the Survey review."""
+        return int(
+            get_required(
+                get_required(self._extraction, "review_frames", "extraction"),
+                "width",
+                "extraction.review_frames",
+            )
+        )
+
+    @property
+    def review_frame_jpeg_quality(self) -> int:
+        return int(
+            get_required(
+                get_required(self._extraction, "review_frames", "extraction"),
+                "jpeg_quality",
+                "extraction.review_frames",
+            )
+        )
+
+    @property
     def slate_detection(self) -> dict:
         """Thresholds for finding the handwritten metadata slate at the video start."""
         return get_required(self._extraction, "slate_detection", "extraction")

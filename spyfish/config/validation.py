@@ -106,12 +106,32 @@ class ValidationConfig(BaseConfig):
             )
         )
 
+    @property
+    def sampling_window_issue_seconds(self) -> int:
+        return int(
+            get_required(
+                self._deployment_validation,
+                "sampling_window_issue_seconds",
+                "deployment_validation",
+            )
+        )
+
     def validate_sampling_window(
         self, drop_id: str, sampling_start: float, sampling_end: float
     ) -> list[str]:
+        """The blocking errors only (empty = the deployment may be ingested); see `check_sampling_window`."""
+        return self.check_sampling_window(drop_id, sampling_start, sampling_end)[0]
+
+    def check_sampling_window(
+        self, drop_id: str, sampling_start: float, sampling_end: float
+    ) -> tuple[list[str], list[str]]:
         """Check that the sampling window looks valid for a BUV deployment.
 
-        Returns a list of error messages (empty = valid).
+        Returns (errors, issues). Errors block ingest; issues are recorded and
+        reported but the deployment is still analysed. A window (end - start)
+        short of the full duration by no more than `sampling_window_issue_seconds`
+        is an issue, shorter an error. A window longer than the full duration is normal
+        and not checked.
 
         Rules:
           - sampling_start=0 means the ranger didn't set the window →
@@ -120,9 +140,11 @@ class ValidationConfig(BaseConfig):
             video is likely corrupted or incomplete.
           - sampling window (end - start) must not exceed the expected BUV duration.
         """
-        errors = []
+        errors: list[str] = []
+        issues: list[str] = []
         expected = self.buv_video_duration_seconds
         buffer = self.sampling_end_buffer_seconds
+        tolerance = self.sampling_window_issue_seconds
 
         # NaN first: every comparison below is False against NaN, so a NaN
         # window would sail through all three rules and be reported valid.
@@ -138,26 +160,32 @@ class ValidationConfig(BaseConfig):
                 f"{drop_id}: sampling window missing "
                 f"(start={sampling_start!r}, end={sampling_end!r})."
             )
-            return errors
+            return errors, issues
 
         if sampling_start == 0:
             errors.append(
                 f"{drop_id}: sampling_start=0, likely missing sampling window metadata."
             )
 
-        if sampling_end < (expected - buffer):
-            errors.append(
-                f"{drop_id}: sampling_end={sampling_end:.0f}s is shorter than "
-                f"expected ({expected}s - {buffer}s buffer = {expected - buffer}s)."
+        # The WINDOW (end - start) must be the full duration. Until 2026-11-05
+        # this compared sampling_end alone with the duration, so a window that
+        # started late passed however short it was (4 deployments >60 s short).
+        window = sampling_end - sampling_start
+        short_by = (expected - buffer) - window
+        if short_by > 0:
+            msg = (
+                f"{drop_id}: sampling window ({window:.0f}s, {sampling_start:.0f}s to "
+                f"{sampling_end:.0f}s) is {short_by:.0f}s shorter than expected "
+                f"({expected}s - {buffer}s buffer)."
             )
+            (issues if short_by <= tolerance else errors).append(msg)
 
-        if sampling_end > sampling_start + expected:
-            errors.append(
-                f"{drop_id}: sampling window ({sampling_end - sampling_start:.0f}s) "
-                f"exceeds expected BUV duration ({expected}s)."
-            )
+        # No rule for a window LONGER than the full duration: that is normal
+        # (the pipeline analyses sampling_start..sampling_end, whatever their
+        # distance), not an error and not an issue. It was an error until
+        # 2026-11-05 and blocked 214 deployments.
 
-        return errors
+        return errors, issues
 
     def validate_drop_id(self, drop_id: str) -> str:
         pattern = self.validation_patterns[self.drop_id_column]

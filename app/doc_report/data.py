@@ -33,7 +33,10 @@ from spyfish.config.base import (
     VideoPresence,
 )
 from spyfish.config.wrapper import config
-from spyfish.database.annotation_manager import newest_model_only
+from spyfish.database.annotation_manager import (
+    LEGACY_EXTERNAL_ID,
+    newest_model_only,
+)
 from spyfish.database.connection import connect_readonly
 
 
@@ -546,7 +549,8 @@ def discovery_curve(ann: pd.DataFrame, minutes: int = 30) -> pd.DataFrame:
 
     if "external_id" in counted.columns and "time_of_max" in counted.columns:
         legacy = counted[
-            (counted["external_id"] == "legacy") & counted["time_of_max"].notna()
+            (counted["external_id"] == LEGACY_EXTERNAL_ID)
+            & counted["time_of_max"].notna()
         ]
         if not legacy.empty:
             # Stored seconds first (the ingest and backfill write the repaired
@@ -1069,7 +1073,7 @@ def build_context(
         # have always kept them for the same reason, so this is also what makes
         # the two agree.
         def in_years(frame):
-            year = frame["survey_year"]
+            year = frame["survey_season"]
             return frame[year.between(lo, hi) | year.isna()]
 
         dep = in_years(dep)

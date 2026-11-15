@@ -90,6 +90,17 @@ def iou(
     return inter / union if union > 0 else 0.0
 
 
+def best_iou(box, others) -> float:
+    """Highest IoU between ``box`` and any box in ``others`` (corner format);
+    0.0 when ``others`` is empty.
+
+    The "is this box explained by any box of the other set" test: a detection
+    with ``best_iou`` under a threshold against the expert boxes of its frame
+    has no expert counterpart.
+    """
+    return max((iou(box, other) for other in others), default=0.0)
+
+
 # ── drawing ──────────────────────────────────────────────────────────────────
 
 

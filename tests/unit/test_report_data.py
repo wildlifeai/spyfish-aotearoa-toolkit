@@ -60,9 +60,9 @@ def test_species_maxn_takes_the_peak_across_intervals():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 2, "expert", 10.0),
-            (DROP, "Pagrus auratus", 7, "expert", 20.0),
-            (DROP, "Pagrus auratus", 3, "expert", 30.0),
+            (DROP, "Chrysophrys auratus", 2, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 7, "expert", 20.0),
+            (DROP, "Chrysophrys auratus", 3, "expert", 30.0),
         ]
     )
     out = report_data.species_maxn(ann)
@@ -74,8 +74,8 @@ def test_deployment_maxn_peaks_per_species_then_sums_across_them():
     """Two steps, in that order: peak within a species, add between species."""
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 2, "expert", 10.0),
-            (DROP, "Pagrus auratus", 6, "expert", 20.0),
+            (DROP, "Chrysophrys auratus", 2, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 6, "expert", 20.0),
             (DROP, "Parapercis colias", 4, "expert", 20.0),
         ]
     )
@@ -95,7 +95,7 @@ def test_species_maxn_keeps_reviewed_empty_deployments():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 4, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 4, "expert", 10.0),
             (OTHER_DROP, None, 0, "expert", None),
         ]
     )
@@ -121,8 +121,8 @@ def test_deployment_maxn_keeps_sources_apart():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 9, "ml", 10.0),
-            (DROP, "Pagrus auratus", 2, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 9, "ml", 10.0),
+            (DROP, "Chrysophrys auratus", 2, "expert", 10.0),
         ]
     )
     totals = report_data.deployment_maxn(ann, ("annotated_by",))
@@ -185,12 +185,12 @@ def test_unify_unidentified_merges_every_catch_all_label():
         [
             (DROP, "fish", 3, "ml", 10.0),
             (DROP, "Fish: review required", 2, "expert", 10.0),
-            (DROP, "Pagrus auratus", 1, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 1, "expert", 10.0),
         ]
     )
     out = report_data.unify_unidentified(ann)
     names = set(out["scientific_name"])
-    assert names == {"Unidentified", "Pagrus auratus"}
+    assert names == {"Unidentified", "Chrysophrys auratus"}
     # The display name travels with it, or a chart labels the same bucket twice.
     assert set(out.loc[out["scientific_name"] == "Unidentified", "display_name"]) == {
         "Unidentified"
@@ -203,12 +203,12 @@ def test_real_species_drops_the_bucket_but_not_real_species():
         _annotations(
             [
                 (DROP, "fish", 3, "ml", 10.0),
-                (DROP, "Pagrus auratus", 1, "expert", 10.0),
+                (DROP, "Chrysophrys auratus", 1, "expert", 10.0),
             ]
         )
     )
     assert report_data.real_species(ann)["scientific_name"].tolist() == [
-        "Pagrus auratus"
+        "Chrysophrys auratus"
     ]
 
 
@@ -226,10 +226,10 @@ def test_arrival_comes_from_ml_and_peak_from_the_best_source():
         [
             # ML scores every interval, so only it can say when something first
             # appeared.
-            (DROP, "Pagrus auratus", 1, "ml", 120.0),
-            (DROP, "Pagrus auratus", 5, "ml", 600.0),
+            (DROP, "Chrysophrys auratus", 1, "ml", 120.0),
+            (DROP, "Chrysophrys auratus", 5, "ml", 600.0),
             # Expert wins for the peak, and reviewed a later frame.
-            (DROP, "Pagrus auratus", 9, "expert", 1200.0),
+            (DROP, "Chrysophrys auratus", 9, "expert", 1200.0),
         ]
     )
     row = report_data.arrival_and_peak(ann).iloc[0]
@@ -242,9 +242,9 @@ def test_peak_is_the_time_of_the_largest_count_not_the_first_row():
     """Order in the frame must not decide which interval is the peak."""
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 2, "expert", 60.0),
-            (DROP, "Pagrus auratus", 8, "expert", 900.0),
-            (DROP, "Pagrus auratus", 3, "expert", 1500.0),
+            (DROP, "Chrysophrys auratus", 2, "expert", 60.0),
+            (DROP, "Chrysophrys auratus", 8, "expert", 900.0),
+            (DROP, "Chrysophrys auratus", 3, "expert", 1500.0),
         ]
     )
     assert report_data.arrival_and_peak(ann).iloc[0]["peak_s"] == 900.0
@@ -252,7 +252,7 @@ def test_peak_is_the_time_of_the_largest_count_not_the_first_row():
 
 def test_arrival_is_absent_rather_than_guessed_without_ml():
     """A deployment no model has run on has no arrival time, and says so."""
-    ann = _annotations([(DROP, "Pagrus auratus", 4, "expert", 300.0)])
+    ann = _annotations([(DROP, "Chrysophrys auratus", 4, "expert", 300.0)])
     row = report_data.arrival_and_peak(ann).iloc[0]
     assert pd.isna(row["arrival_s"])
     assert row["peak_s"] == 300.0
@@ -265,9 +265,9 @@ def test_discovery_curve_is_the_share_of_final_maxn_reached():
     """Best count so far over final MaxN, held flat between detections."""
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 1, "ml", 30.0),  # minute 1
-            (DROP, "Pagrus auratus", 2, "ml", 300.0),  # minute 6
-            (DROP, "Pagrus auratus", 4, "ml", 900.0),  # minute 16
+            (DROP, "Chrysophrys auratus", 1, "ml", 30.0),  # minute 1
+            (DROP, "Chrysophrys auratus", 2, "ml", 300.0),  # minute 6
+            (DROP, "Chrysophrys auratus", 4, "ml", 900.0),  # minute 16
         ]
     )
     curve = report_data.discovery_curve(ann)
@@ -291,8 +291,8 @@ def test_discovery_curve_excludes_frame_and_clip_sources():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 9, "expert", 10.0),
-            (DROP, "Pagrus auratus", 7, "citsci", 10.0),
+            (DROP, "Chrysophrys auratus", 9, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 7, "citsci", 10.0),
         ]
     ).assign(external_id="51297286", time_of_max=None)
     assert report_data.discovery_curve(ann).empty
@@ -308,9 +308,9 @@ def test_discovery_curve_builds_the_expert_path_from_legacy_times():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 1, "expert", None),
-            (DROP, "Pagrus auratus", 3, "expert", None),
-            (DROP, "Pagrus auratus", 2, "ml", 60.0),
+            (DROP, "Chrysophrys auratus", 1, "expert", None),
+            (DROP, "Chrysophrys auratus", 3, "expert", None),
+            (DROP, "Chrysophrys auratus", 2, "ml", 60.0),
         ]
     ).assign(
         external_id=["legacy", "legacy", None],
@@ -345,9 +345,9 @@ def test_discovery_curve_reads_excel_coerced_times_as_minutes_first():
     clean_drop = "TON_20211026_BUV_TON_001_01"
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 1, "expert", None),
-            (DROP, "Pagrus auratus", 2, "expert", None),
-            (clean_drop, "Pagrus auratus", 2, "expert", None),
+            (DROP, "Chrysophrys auratus", 1, "expert", None),
+            (DROP, "Chrysophrys auratus", 2, "expert", None),
+            (clean_drop, "Chrysophrys auratus", 2, "expert", None),
         ]
     ).assign(
         external_id="legacy",
@@ -375,8 +375,8 @@ def test_discovery_curve_keeps_true_times_inside_a_coerced_deployment():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 1, "expert", None),
-            (DROP, "Pagrus auratus", 2, "expert", None),
+            (DROP, "Chrysophrys auratus", 1, "expert", None),
+            (DROP, "Chrysophrys auratus", 2, "expert", None),
         ]
     ).assign(
         external_id="legacy",
@@ -398,8 +398,8 @@ def test_discovery_curve_clips_overrun_timestamps_into_the_last_minute():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 2, "ml", 30.0),
-            (DROP, "Pagrus auratus", 5, "ml", 1890.0),  # 31.5 minutes in
+            (DROP, "Chrysophrys auratus", 2, "ml", 30.0),
+            (DROP, "Chrysophrys auratus", 5, "ml", 1890.0),  # 31.5 minutes in
         ]
     )
     curve = report_data.discovery_curve(ann)
@@ -630,15 +630,17 @@ def test_species_value_grid_fills_absences_with_zero():
     per_species = pd.DataFrame(
         {
             "drop_id": [DROP],
-            "scientific_name": ["Pagrus auratus"],
+            "scientific_name": ["Chrysophrys auratus"],
             "maxn": [6.0],
         }
     )
     grid = report_data.species_value_grid(
-        deployments, per_species, ["Pagrus auratus", "Parapercis colias"]
+        deployments, per_species, ["Chrysophrys auratus", "Parapercis colias"]
     )
     assert len(grid) == 4  # 2 deployments x 2 species
-    snapper = grid[grid["scientific_name"] == "Pagrus auratus"].set_index("drop_id")
+    snapper = grid[grid["scientific_name"] == "Chrysophrys auratus"].set_index(
+        "drop_id"
+    )
     assert snapper.loc[DROP, "maxn"] == 6.0
     assert snapper.loc[OTHER_DROP, "maxn"] == 0.0
     # A species nobody recorded is all zeros, not absent rows.
@@ -670,7 +672,7 @@ def test_experiments_frame_keeps_absence_rows():
     """
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 3, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 3, "expert", 10.0),
             (OTHER_DROP, None, 0, "expert", None),
         ]
     )
@@ -818,7 +820,7 @@ def test_build_context_bad_deployment_toggle():
         {
             "drop_id": [DROP, OTHER_DROP],
             "is_bad_deployment": [False, True],
-            "survey_year": [2024, 2024],
+            "survey_season": [2024, 2024],
             "region": ["R", "R"],
             "protection_status": ["No protection", "No protection"],
             "link_to_marine_reserve": ["X", "X"],
@@ -827,11 +829,11 @@ def test_build_context_bad_deployment_toggle():
     )
     ann = _annotations(
         [
-            (DROP, "Pagrus auratus", 2, "expert", 10.0),
-            (OTHER_DROP, "Pagrus auratus", 9, "expert", 10.0),
+            (DROP, "Chrysophrys auratus", 2, "expert", 10.0),
+            (OTHER_DROP, "Chrysophrys auratus", 9, "expert", 10.0),
         ]
     ).assign(
-        survey_year=2024,
+        survey_season=2024,
         region="R",
         protection_status="No protection",
         link_to_marine_reserve="X",
@@ -869,7 +871,7 @@ def test_richness_rollup_keeps_groups_with_effort_but_no_sightings():
     sites that were analysed and recorded nothing vanished from the table
     and from the averages. Effort with zero richness is data.
     """
-    sightings = _annotations([(DROP, "Pagrus auratus", 4, "expert", 10.0)]).assign(
+    sightings = _annotations([(DROP, "Chrysophrys auratus", 4, "expert", 10.0)]).assign(
         site_id="KSF_085"
     )
     effort = pd.DataFrame(
@@ -893,7 +895,7 @@ def test_richness_rollup_excludes_the_unidentified_bucket():
         _annotations(
             [
                 (DROP, "fish", 3, "ml", 10.0),
-                (DROP, "Pagrus auratus", 1, "ml", 10.0),
+                (DROP, "Chrysophrys auratus", 1, "ml", 10.0),
             ]
         ).assign(site_id="KSF_085")
     )
@@ -916,17 +918,17 @@ def test_richness_by_counts_species_not_their_abundance():
         [
             _annotations(
                 [
-                    (DROP, "Pagrus auratus", 5, "expert", 10.0),
+                    (DROP, "Chrysophrys auratus", 5, "expert", 10.0),
                     (DROP, "Jasus edwardsii", 12, "expert", 10.0),
-                    (OTHER_DROP, "Pagrus auratus", 1, "expert", 10.0),
+                    (OTHER_DROP, "Chrysophrys auratus", 1, "expert", 10.0),
                 ]
             ),
             _annotations([(third, None, 0, "expert", 0.0)]),
         ]
-    ).assign(site_id="KSF_085", survey_year=2024)
+    ).assign(site_id="KSF_085", survey_season=2024)
     out = report_data.richness_by(sightings, "site_id").iloc[0]
     assert (out["species"], out["richness_sum"]) == (2, 3)
-    multi = report_data.richness_by(sightings, ["site_id", "survey_year"]).iloc[0]
+    multi = report_data.richness_by(sightings, ["site_id", "survey_season"]).iloc[0]
     assert (multi["species"], multi["richness_sum"]) == (2, 3)
 
 
@@ -956,10 +958,10 @@ def test_best_available_prefers_biigle_review_over_legacy_review():
     """
     ann = _with_external_id(
         [
-            (DROP, "Pagrus auratus", 5, "expert", 10.0, "legacy"),
-            (DROP, "Pagrus auratus", 2, "expert", 10.0, "biigle_volume_7"),
-            (DROP, "Pagrus auratus", 9, "ml", 10.0, "species_20260822"),
-            (OTHER_DROP, "Pagrus auratus", 4, "expert", 10.0, "legacy"),
+            (DROP, "Chrysophrys auratus", 5, "expert", 10.0, "legacy"),
+            (DROP, "Chrysophrys auratus", 2, "expert", 10.0, "biigle_volume_7"),
+            (DROP, "Chrysophrys auratus", 9, "ml", 10.0, "species_20260822"),
+            (OTHER_DROP, "Chrysophrys auratus", 4, "expert", 10.0, "legacy"),
         ]
     )
     out = report_data._apply_source(ann, report_data.BEST_AVAILABLE)
@@ -970,5 +972,5 @@ def test_best_available_prefers_biigle_review_over_legacy_review():
 def test_source_rank_without_external_id_column_falls_back_to_annotated_by():
     from ecology_data import SOURCE_PRIORITY, source_rank
 
-    ann = _annotations([(DROP, "Pagrus auratus", 5, "expert", 10.0)])
+    ann = _annotations([(DROP, "Chrysophrys auratus", 5, "expert", 10.0)])
     assert source_rank(ann).tolist() == [SOURCE_PRIORITY["expert"]]

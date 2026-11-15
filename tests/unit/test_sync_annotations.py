@@ -71,11 +71,11 @@ def test_map_strips_common_name_prefix():
 
 
 def test_map_plain_species_name():
-    row = pd.Series({"label_name": "Pagrus auratus", "annotation_id": "99"})
+    row = pd.Series({"label_name": "Chrysophrys auratus", "annotation_id": "99"})
     _, mapped = _map_biigle_to_spyfish_schema(
         row, "label_name", "DROP_01", "00:00:05.000", "frame_5.0s.jpg", volume_id=4626
     )
-    assert mapped["scientific_name"] == "Pagrus auratus"
+    assert mapped["scientific_name"] == "Chrysophrys auratus"
     assert mapped["external_id"] == "biigle_volume_4626"
     assert mapped["annotated_by"] == "expert"
     assert mapped["max_interval"] == 0  # incremented during aggregation
@@ -88,7 +88,9 @@ def test_map_external_id_is_the_volume_not_the_annotation():
     the sync's clear match legacy expert rows too. With no volume (bundle
     synthesizer) the key still carries the BIIGLE prefix so ownership holds.
     """
-    row = pd.Series({"label_name": "Pagrus auratus", "annotation_id": "77", "id": "78"})
+    row = pd.Series(
+        {"label_name": "Chrysophrys auratus", "annotation_id": "77", "id": "78"}
+    )
     _, mapped = _map_biigle_to_spyfish_schema(
         row, "label_name", "DROP_01", None, "image_uuid_001.jpg", volume_id=12
     )
@@ -104,8 +106,8 @@ def test_aggregate_rows_all_carry_the_volume_key():
     df = pd.DataFrame(
         {
             "label_name": [
-                "Pagrus auratus",
-                "Pagrus auratus",
+                "Chrysophrys auratus",
+                "Chrysophrys auratus",
                 "Kina - Evechinus chloroticus",
             ],
             "annotation_id": ["1", "2", "3"],
@@ -178,12 +180,12 @@ def test_aggregate_counts_per_timestamp_species():
         [
             {
                 "filename": "drop__frame_10.0s.jpg",
-                "label_name": "Pagrus auratus",
+                "label_name": "Chrysophrys auratus",
                 "annotation_id": "1",
             },
             {
                 "filename": "drop__frame_10.0s.jpg",
-                "label_name": "Pagrus auratus",
+                "label_name": "Chrysophrys auratus",
                 "annotation_id": "2",
             },
         ]
@@ -191,7 +193,7 @@ def test_aggregate_counts_per_timestamp_species():
     result = aggregate_raw_to_maxn_rows(df, "KSF_20240124_BUV_KSF_085_01")
     assert len(result) == 1
     assert result[0]["max_interval"] == 2
-    assert result[0]["scientific_name"] == "Pagrus auratus"
+    assert result[0]["scientific_name"] == "Chrysophrys auratus"
 
 
 def test_aggregate_multiple_species():
@@ -199,7 +201,7 @@ def test_aggregate_multiple_species():
         [
             {
                 "filename": "drop__frame_10.0s.jpg",
-                "label_name": "Pagrus auratus",
+                "label_name": "Chrysophrys auratus",
                 "annotation_id": "1",
             },
             {
@@ -212,7 +214,7 @@ def test_aggregate_multiple_species():
     result = aggregate_raw_to_maxn_rows(df, "DROP_01")
     assert len(result) == 2
     species = {r["scientific_name"] for r in result}
-    assert species == {"Pagrus auratus", "Notolabrus fucicola"}
+    assert species == {"Chrysophrys auratus", "Notolabrus fucicola"}
     assert all(r["max_interval"] == 1 for r in result)
 
 
@@ -221,12 +223,12 @@ def test_aggregate_multiple_timestamps():
         [
             {
                 "filename": "drop__frame_10.0s.jpg",
-                "label_name": "Pagrus auratus",
+                "label_name": "Chrysophrys auratus",
                 "annotation_id": "1",
             },
             {
                 "filename": "drop__frame_20.0s.jpg",
-                "label_name": "Pagrus auratus",
+                "label_name": "Chrysophrys auratus",
                 "annotation_id": "2",
             },
         ]
@@ -249,10 +251,10 @@ def test_aggregate_strips_common_name():
         [
             {
                 "filename": "drop__frame_5.0s.jpg",
-                "label_name": "Snapper - Pagrus auratus",
+                "label_name": "Snapper - Chrysophrys auratus",
                 "annotation_id": "1",
             },
         ]
     )
     result = aggregate_raw_to_maxn_rows(df, "DROP_01")
-    assert result[0]["scientific_name"] == "Pagrus auratus"
+    assert result[0]["scientific_name"] == "Chrysophrys auratus"

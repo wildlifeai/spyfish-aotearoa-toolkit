@@ -98,7 +98,7 @@ def render(ctx: dict) -> None:
     if years:
         lo, hi = years
         # Undated rows are kept, as they are in the shared context filter.
-        obs = obs[obs["survey_year"].between(lo, hi) | obs["survey_year"].isna()]
+        obs = obs[obs["survey_season"].between(lo, hi) | obs["survey_season"].isna()]
     if ctx.get("reserves"):
         obs = obs[
             report_data.matches_reserves(obs["link_to_marine_reserve"], ctx["reserves"])

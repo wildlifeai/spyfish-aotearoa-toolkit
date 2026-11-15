@@ -7,6 +7,7 @@ name for and then indexes past the end of the shortened dict. Even without the
 crash the numbers are meaningless: the same id names a different species on
 each side.
 """
+
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -26,7 +27,7 @@ def _model(names):
     return m
 
 
-ROSTER = ["fish", "Pagrus auratus", "Parapercis colias"]
+ROSTER = ["fish", "Chrysophrys auratus", "Parapercis colias"]
 
 
 @patch("ultralytics.YOLO")
@@ -46,7 +47,9 @@ def test_extra_dataset_classes_are_caught(mock_yolo, tmp_path):
 @patch("ultralytics.YOLO")
 def test_same_length_different_order_is_caught(mock_yolo, tmp_path):
     """Alphabetical vs frozen-roster order: same count, every id means something else."""
-    mock_yolo.return_value = _model(["Parapercis colias", "Pagrus auratus", "fish"])
+    mock_yolo.return_value = _model(
+        ["Parapercis colias", "Chrysophrys auratus", "fish"]
+    )
     msg = _class_list_mismatch("m.pt", _yaml(tmp_path, ROSTER))
     assert msg and "different species" in msg
 

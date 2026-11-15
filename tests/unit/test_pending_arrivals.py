@@ -5,10 +5,12 @@ matched neither branch of the old (absent, archived) filter, so those drops
 were never advanced and never processed.
 """
 
+import datetime
 from unittest.mock import patch
 
 from spyfish.config.base import MlStatus, VideoPresence
 from spyfish.orchestrator.ingest import check_pending_arrivals
+from spyfish.storage.s3_handler import S3Handler
 
 DROP = "KSF_20240124_BUV_KSF_085_01"
 KEY = f"media/KSF_20240124_BUV/{DROP}/{DROP}.mp4"
@@ -59,7 +61,6 @@ def test_deep_archive_is_marked_not_advanced(mock_db_class, mock_s3_class):
     """A restore has to finish before ML can read it, so mark and wait."""
     db = mock_db_class.return_value
     db.get_deployments_eligible.return_value = _pending(VideoPresence.ABSENT)
-    mock_s3_class.return_value.is_restored.return_value = False
 
     check_pending_arrivals(known_files={KEY}, media_file_info={KEY: "DEEP_ARCHIVE"})
 
@@ -67,20 +68,29 @@ def test_deep_archive_is_marked_not_advanced(mock_db_class, mock_s3_class):
     db.update_deployment_fields.assert_called_once_with(
         DROP, video_presence=VideoPresence.ARCHIVED
     )
-    mock_s3_class.return_value.is_restored.assert_called_once_with(KEY)
 
 
-@patch("spyfish.orchestrator.ingest.S3Handler")
 @patch("spyfish.orchestrator.ingest.DatabaseManager")
-def test_restored_deep_archive_is_advanced(mock_db_class, mock_s3_class):
-    """The listing still says DEEP_ARCHIVE after a restore; only head_object
-    knows a readable copy exists. 118 SLI videos sat restored for a week
-    (2026-10-09) while this check kept them archived."""
+def test_restored_deep_archive_is_advanced(mock_db_class):
+    """A restored object lists as DEEP_ARCHIVE with a live RestoreStatus; the
+    listing-derived media_file_info already calls that STANDARD, so the drop
+    advances like any other arrival. 118 SLI videos sat restored for a week
+    (2026-10-09) while the class alone kept them archived."""
     db = mock_db_class.return_value
     db.get_deployments_eligible.return_value = _pending(VideoPresence.ARCHIVED)
-    mock_s3_class.return_value.is_restored.return_value = True
+    listed = {
+        "Key": KEY,
+        "StorageClass": "DEEP_ARCHIVE",
+        "RestoreStatus": {
+            "IsRestoreInProgress": False,
+            "RestoreExpiryDate": datetime.datetime(
+                2099, 1, 1, tzinfo=datetime.timezone.utc
+            ),
+        },
+    }
+    info = {KEY: S3Handler.effective_storage_class(listed)}
 
-    check_pending_arrivals(known_files={KEY}, media_file_info={KEY: "DEEP_ARCHIVE"})
+    check_pending_arrivals(known_files={KEY}, media_file_info=info)
 
     db.update_deployment_fields.assert_called_once_with(
         DROP, video_presence=VideoPresence.PRESENT
@@ -88,17 +98,49 @@ def test_restored_deep_archive_is_advanced(mock_db_class, mock_s3_class):
     db.advance_status.assert_called_once_with(DROP, MlStatus.COLUMN, MlStatus.READY)
 
 
-@patch("spyfish.orchestrator.ingest.S3Handler")
-@patch("spyfish.orchestrator.ingest.DatabaseManager")
-def test_standard_storage_never_heads_the_object(mock_db_class, mock_s3_class):
-    """The per-object check is only paid for archived drops."""
-    db = mock_db_class.return_value
-    db.get_deployments_eligible.return_value = _pending(VideoPresence.ABSENT)
-
-    check_pending_arrivals(known_files={KEY}, media_file_info={KEY: "STANDARD"})
-
-    mock_s3_class.return_value.is_restored.assert_not_called()
-    db.advance_status.assert_called_once_with(DROP, MlStatus.COLUMN, MlStatus.READY)
+def test_effective_storage_class_reads_restore_status():
+    """One listing answers both questions: what class, and readable now?"""
+    future = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+    past = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
+    f = S3Handler.effective_storage_class
+    assert f({"Key": KEY}) == "STANDARD"  # listing omits the field for standard
+    assert f({"Key": KEY, "StorageClass": "DEEP_ARCHIVE"}) == "DEEP_ARCHIVE"
+    assert (
+        f(
+            {
+                "Key": KEY,
+                "StorageClass": "DEEP_ARCHIVE",
+                "RestoreStatus": {"IsRestoreInProgress": True},
+            }
+        )
+        == "DEEP_ARCHIVE"
+    )
+    assert (
+        f(
+            {
+                "Key": KEY,
+                "StorageClass": "DEEP_ARCHIVE",
+                "RestoreStatus": {
+                    "IsRestoreInProgress": False,
+                    "RestoreExpiryDate": future,
+                },
+            }
+        )
+        == "STANDARD"
+    )
+    assert (
+        f(
+            {
+                "Key": KEY,
+                "StorageClass": "DEEP_ARCHIVE",
+                "RestoreStatus": {
+                    "IsRestoreInProgress": False,
+                    "RestoreExpiryDate": past,
+                },
+            }
+        )
+        == "DEEP_ARCHIVE"
+    )
 
 
 def test_is_restored_reads_the_restore_header():

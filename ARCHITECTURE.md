@@ -167,9 +167,9 @@ dict, so no two views can disagree about how many deployments exist.
 | 🧪 **Tools** | Deployment Videos, Substrate Cover, Legacy MaxN check (`pages/_advanced/`) | Core Team |
 
 The University of Auckland mussel-farm dashboard (Mussel Insights, ML vs Expert)
-is a separate Streamlit app in `in_progress/uoa/` (`cd in_progress/uoa && streamlit
-run app.py`), not part of the DOC app; it imports the shared `theme`, `utils`,
-`support` and `ecology_data` modules from `app/`.
+is a separate Streamlit app in `uoa/` (`cd uoa/app && streamlit run streamlit_app.py`),
+not part of the DOC app; it imports the shared `theme`, `utils` and `support`
+modules from `app/`, and reads its data from S3 (see `uoa/README.md`).
 
 A view that is not built says so, rather than rendering an empty chart that
 looks like a view reporting nothing.

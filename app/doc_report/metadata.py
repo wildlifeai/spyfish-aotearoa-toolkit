@@ -73,7 +73,7 @@ def _render_unreadable_dates(ctx: dict) -> None:
     table below.
     """
     dep = ctx["all_deployments"]
-    undated = dep[dep["survey_year"].isna()]
+    undated = dep[dep["survey_season"].isna()]
     if undated.empty:
         return
 
@@ -81,7 +81,7 @@ def _render_unreadable_dates(ctx: dict) -> None:
         f"**{len(undated)} deployment(s) have a date that cannot be read.** The "
         "DropID validation pattern rejects these now, but these rows were "
         "ingested before it was tightened, so they still read as `ok` and are "
-        "not in the table below. They are missing from every per-year chart in "
+        "not in the table below. They are missing from every per-season chart in "
         "the report until the DropID is corrected upstream and re-ingested."
     )
     with st.expander(f"Show the {len(undated)} DropIDs"):

@@ -173,6 +173,14 @@ process_files/*
 process_files/training_lists/*
 !process_files/training_lists/*.txt
 !process_files/training_lists/*.csv
+# The species synonyms map is config the ingest gate depends on
+# (paths.species_synonyms); the rest of legacy_data_help stays on S3.
+!process_files/training
+process_files/training/*
+!process_files/training/hierarchy.json
+!process_files/legacy_data_help
+process_files/legacy_data_help/*
+!process_files/legacy_data_help/species_map_global.yaml
 runs/
 # Repo-local Ultralytics config (YOLO_CONFIG_DIR in the SLURM jobs): keeps a
 # YOLO call without `project=` from writing into another project's runs_dir.
@@ -191,6 +199,10 @@ model/
 media/
 wip/
 hold*
+# UoA: local copy of s3://<bucket>/uoa/kutai/ (same paths), see uoa/kutai/README.md
+uoa/kutai/
+# UoA scripts carry personal and NeSI paths; untracked like scripts/wip/
+uoa/scripts/
 .streamlit/
 data/
 slurm_logs/
@@ -205,3 +217,6 @@ claude_docs/
 
 # Local BIIGLE export backups (backup-of-record lives on S3)
 biigle_obb_backup_*/
+
+# Site key files as received (copies live in process_files/legacy_data_help/site_keys/source, synced to S3)
+site_keys/

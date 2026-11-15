@@ -10,7 +10,7 @@ question about the annotations.
 
 import pandas as pd
 import streamlit as st
-from ecology_data import source_bucket
+from ecology_data import season_label, source_bucket
 
 from .charts.annotations import render_arrival_and_peak, render_discovery_curve
 from .charts.deployments import render_annotation_detail
@@ -104,7 +104,7 @@ def render(ctx: dict) -> None:
             "link_to_marine_reserve",
             "protection_status",
             "site_id",
-            "survey_year",
+            "survey_season",
         )
         if c in dep.columns
     ]
@@ -113,6 +113,8 @@ def render(ctx: dict) -> None:
         on="drop_id",
         how="left",
     )
+    if "survey_season" in table.columns:
+        table["survey_season"] = table["survey_season"].map(season_label)
     st.dataframe(
         table,
         hide_index=True,
@@ -132,8 +134,6 @@ def render(ctx: dict) -> None:
             "link_to_marine_reserve": st.column_config.TextColumn("MPA"),
             "protection_status": st.column_config.TextColumn("Protection"),
             "site_id": st.column_config.TextColumn("SiteID", width="small"),
-            "survey_year": st.column_config.NumberColumn(
-                "Year", format="%d", width="small"
-            ),
+            "survey_season": st.column_config.TextColumn("Season", width="small"),
         },
     )

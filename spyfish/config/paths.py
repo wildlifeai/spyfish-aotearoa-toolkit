@@ -65,6 +65,22 @@ class PathsConfig(BaseConfig):
         )
 
     @property
+    def legacy_drop_id_map_path(self) -> Path:
+        """`legacy DropID: SharePoint DropID` YAML applied by --legacy-experts (see config.yaml)."""
+        return self.legacy_help_dir / get_required(
+            self.legacy_paths, "drop_id_map", "paths.legacy"
+        )
+
+    @property
+    def species_synonyms_path(self) -> Path:
+        """`written name: canonical name` YAML applied to every annotation on insert.
+
+        One map for the legacy workbook extraction and the annotations DB gate,
+        see the comment on `paths.species_synonyms` in config.yaml.
+        """
+        return self.project_root / get_required(self.paths, "species_synonyms", "paths")
+
+    @property
     def legacy_help_s3_prefix(self) -> str:
         """Repo-relative path of `legacy_help_dir`, reused as its S3 prefix."""
         return self.legacy_help_dir.relative_to(self.project_root).as_posix()
@@ -145,6 +161,39 @@ class PathsConfig(BaseConfig):
         return self.project_root / self.base_dir / self._sub("logs")
 
     @property
+    def exports_dir(self) -> Path:
+        """Review exports (per-survey reports, slate review lists). Data, so under process_files/.
+
+        The MaxN frames and slates themselves live in each deployment's folder
+        (``get_review_dir``, ``get_slate_frame_path``), where the S3 sync finds them.
+        """
+        return self.project_root / self.base_dir / self._sub("exports")
+
+    @property
+    def review_reports_dir(self) -> Path:
+        """``{survey}_review.html``, one self-contained page per survey."""
+        return self.exports_dir / "reports"
+
+    @property
+    def trash_dir(self) -> Path:
+        """Where code moves files instead of deleting them (``spyfish.utils.move_to_trash``).
+
+        One dated folder per day; empty it by hand once you have looked. NeSI has
+        no system trash, so a wrong delete there would be unrecoverable.
+        """
+        return self.exports_dir / "trash"
+
+    @property
+    def slates_verified_path(self) -> Path:
+        """Drops whose slate a person has checked, one DropID per line."""
+        return self.exports_dir / "slates_verified.txt"
+
+    @property
+    def slates_none_path(self) -> Path:
+        """Drops a reviewer marked as never showing a board, one DropID per line."""
+        return self.exports_dir / "slates_none.txt"
+
+    @property
     def models_root_dir(self) -> Path:
         return self.project_root / self.base_dir / self._sub("models")
 
@@ -155,6 +204,22 @@ class PathsConfig(BaseConfig):
     @property
     def pipeline_model_dir(self) -> Path:
         return self.models_root_dir / self._sub("pipeline_model")
+
+    @property
+    def classifier_model_dir(self) -> Path:
+        """Fine-tuned BioCLIP 2 checkpoints (second-stage species classifier)."""
+        return self.models_root_dir / self._sub("classifier")
+
+    @property
+    def bioclip_cache_dir(self) -> Path:
+        """open_clip hub cache for the frozen BioCLIP 2 backbone (~1.7 GB, once per machine)."""
+        return self.models_root_dir / self._sub("bioclip")
+
+    @property
+    def two_stage_dir(self) -> Path:
+        """Second-stage classifier training outputs: crops, embeddings, reports,
+        fine-tune runs (``spyfish/ml/classifier``, ``scripts/two_stage``)."""
+        return self.project_root / self.base_dir / self._sub("two_stage")
 
     @property
     def archived_models_dir(self) -> Path:
@@ -262,11 +327,41 @@ class PathsConfig(BaseConfig):
         binary model with more informative labels (see design_doc.md, "ML
         model strategy").
         """
-        found = (
-            sorted(self.pipeline_model_dir.glob("*.pt"))
-            if self.pipeline_model_dir.exists()
-            else []
+        return self._newest_stamped_model(
+            self.pipeline_model_dir, "species_20260822_192536.pt"
         )
+
+    def model_path_for_name(self, model_name: str) -> Path:
+        """The weights file of a model named in a raw/MaxN CSV: the production
+        copy, else the archived one. Raises when neither exists, because the
+        sidecars beside the weights (MaxN cutoff) are what callers are after
+        and guessing them is worse than stopping."""
+        self.validate_model_name(model_name)
+        for directory in (self.pipeline_model_dir, self.archived_models_dir):
+            candidate = directory / f"{model_name}.pt"
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            f"No weights for model {model_name!r} in {self.pipeline_model_dir} or "
+            f"{self.archived_models_dir}."
+        )
+
+    @property
+    def pipeline_model_name(self) -> str:
+        """The pipeline model's name: the stem of its weights file, which is
+        what every ML artifact and annotation row is keyed by."""
+        return self.pipeline_model_path.stem
+
+    @property
+    def classifier_model_path(self) -> Path:
+        """The second-stage classifier checkpoint in classifier_model_dir, same
+        naming rule and newest-stamp pick as the pipeline model."""
+        return self._newest_stamped_model(
+            self.classifier_model_dir, "bioclip_20261104_162700.pt"
+        )
+
+    def _newest_stamped_model(self, directory: Path, example: str) -> Path:
+        found = sorted(directory.glob("*.pt")) if directory.exists() else []
         canonical = [
             (self.model_name_stamp(p.stem), p)
             for p in found
@@ -275,14 +370,14 @@ class PathsConfig(BaseConfig):
         if not canonical:
             names = ", ".join(p.name for p in found) or "no .pt files"
             raise FileNotFoundError(
-                f"No model named to the standard in {self.pipeline_model_dir} "
+                f"No model named to the standard in {directory} "
                 f"({names}). Weights must be named {{type}}_{{YYYYMMDD}}_{{HHMMSS}}.pt, "
-                "e.g. species_20260822_192536.pt; the stem is the model name "
+                f"e.g. {example}; the stem is the model name "
                 "stored on every ML annotation, so rename the file."
             )
         if len(canonical) > 1:
             logging.warning(
-                f"{self.pipeline_model_dir} holds {len(canonical)} model files; "
+                f"{directory} holds {len(canonical)} model files; "
                 f"using the newest stamp. Keep one promoted model here."
             )
         return max(canonical)[1]
@@ -360,6 +455,18 @@ class PathsConfig(BaseConfig):
         """
         return f"{self.s3_deployment_data_dir}/{survey_id}/"
 
+    def get_reserve_code_from_drop(self, drop_id: str) -> Optional[str]:
+        """The marine reserve code a DropID was made under (its first segment),
+        or None when the name does not start with one.
+
+        Deliberately looser than ``validate_drop_id``: legacy workbook drops
+        carry site names instead of site codes
+        (``CRP_20030423_BUV_Liitle-waterfall_01``) and fail validation, yet
+        their reserve segment is well-formed. Never build a path from the result.
+        """
+        m = re.match(r"([A-Z]{3})_", drop_id or "")
+        return m.group(1) if m else None
+
     def get_video_path(self, drop_id: str) -> Path:
         return self.media_dir / f"{self.validate_drop_id(drop_id)}.mp4"
 
@@ -371,6 +478,16 @@ class PathsConfig(BaseConfig):
         return self.get_drop_dir(drop_id) / (
             f"{self.validate_drop_id(drop_id)}{self.slate_frame_suffix}"
         )
+
+    # MaxN frames for the Survey review (one per source and species, boxed),
+    # with the manifest that says what each one is: the second, the model's
+    # count on the frame, the agreement colour.
+    review_dir_name = "review"
+    review_frame_marker = "__maxn_"  # in every review frame's file name
+    review_manifest_name = "maxn_frames.csv"
+
+    def get_review_dir(self, drop_id: str) -> Path:
+        return self.get_drop_dir(drop_id) / self.review_dir_name
 
     def get_video_s3_key(self, drop_id: str) -> str:
         """Canonical S3 key for a drop's source video file.
@@ -408,6 +525,18 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}_frames_selection.csv"
         )
 
+    def get_clip_uploads_csv_path(self, drop_id: str) -> Path:
+        """Every clip sent to Zooniverse for this drop and when, append-only.
+
+        The selections CSV is rewritten by each clips run (a top-up replaces
+        the ML selection with the full grid), so it says what the LAST run
+        picked, not what volunteers were shown.
+        """
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}_zooniverse_clip_uploads.csv"
+        )
+
     def get_biigle_selections_csv_path(self, drop_id: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
@@ -441,6 +570,58 @@ class PathsConfig(BaseConfig):
         return self.get_drop_annotations_dir(drop_id) / (
             f"{self.validate_drop_id(drop_id)}_zooniverse_{kind}_manifest.csv"
         )
+
+    # ── validation sync-back (--zooniverse-validation-sync) ──────────────────
+
+    def _validation_kind_file(self, drop_id: str, kind: str, suffix: str) -> Path:
+        if kind not in self.VALIDATION_KINDS:
+            raise ValueError(
+                f"kind must be one of {self.VALIDATION_KINDS}, got {kind!r}"
+            )
+        return self.get_drop_annotations_dir(drop_id) / (
+            f"{self.validate_drop_id(drop_id)}_zooniverse_{kind}_{suffix}"
+        )
+
+    def get_validation_classifications_path(self, drop_id: str, kind: str) -> Path:
+        """Cached Panoptes classifications for the drop's ``kind`` set (JSON)."""
+        return self._validation_kind_file(drop_id, kind, "classifications.json")
+
+    def get_validation_verdicts_path(self, drop_id: str, kind: str) -> Path:
+        """One row per crop (``crops``) or per frame (``frames``) with its verdict."""
+        return self._validation_kind_file(drop_id, kind, "verdicts.csv")
+
+    def get_validation_missed_boxes_path(self, drop_id: str) -> Path:
+        """Clusters of volunteer-drawn boxes with no ML box, in video pixels."""
+        return self.get_drop_annotations_dir(drop_id) / (
+            f"{self.validate_drop_id(drop_id)}_zooniverse_missed_boxes.csv"
+        )
+
+    @property
+    def zooniverse_workflow_versions_dir(self) -> Path:
+        """Cached workflow versions (one JSON per workflow) for the validation sync."""
+        return self.project_root / get_required(
+            self.paths, "zooniverse_workflow_versions", "paths"
+        )
+
+    @property
+    def zooniverse_classifications_dir(self) -> Path:
+        """Per-workflow classification cache and cursors (``panoptes_fetch``)."""
+        return self.project_root / get_required(
+            self.paths, "zooniverse_classifications", "paths"
+        )
+
+    @property
+    def site_prior_dir(self) -> Path:
+        """Species-presence prior per reserve (``scripts/build_site_prior.py``).
+
+        Sensitive: species presence per reserve, gitignored, never public.
+        """
+        return self.project_root / get_required(self.paths, "site_prior", "paths")
+
+    @property
+    def site_prior_csv_path(self) -> Path:
+        """The prior itself, one row per (reserve, species) with ``presence_prob``."""
+        return self.site_prior_dir / "species_presence_by_reserve.csv"
 
     biigle_expert_raw_suffix = "_biigle_expert_raw.csv"
     # Every frame of the drop the expert was SHOWN, annotated or not. A Biigle
@@ -505,6 +686,25 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}{self.biigle_expert_substrate_suffix}"
         )
 
+    biigle_upload_record_glob = "_biigle_upload_*.json"
+
+    def get_biigle_upload_record_path(
+        self, drop_id: str, volume_id: int, stamp: str, target: str = ""
+    ) -> Path:
+        """Dated, write-once record of one BIIGLE annotation upload for a drop.
+
+        ``{drop}{_target}_biigle_upload_{volume_id}_{YYYYMMDD_HHMMSS}.json``. The
+        working COCO keeps its fixed name because extraction and upload hand it
+        to each other; this copy is taken at the moment of upload and never
+        rewritten, so the S3 sync (additive, but same-name files are replaced)
+        can only ever add records, never lose the one the expert reviewed.
+        """
+        suffix = f"_{target}" if target else ""
+        return (
+            self.get_drop_annotations_dir(drop_id)
+            / f"{self.validate_drop_id(drop_id)}{suffix}_biigle_upload_{int(volume_id)}_{stamp}.json"
+        )
+
     def get_coco_annotations_path(self, drop_id: str, target: str = "") -> Path:
         """COCO JSON of YOLO detections for a drop's selected frames.
 
@@ -547,11 +747,69 @@ class PathsConfig(BaseConfig):
             / f"{self.validate_drop_id(drop_id)}_zooniverse_frames_raw.csv"
         )
 
+    ml_raw_suffix = "_raw.csv"
+
     def get_raw_csv_path(self, drop_id: str, model_name: str) -> Path:
         return (
             self.get_drop_annotations_dir(drop_id)
-            / f"{self.validate_drop_id(drop_id)}_{model_name}_raw.csv"
+            / f"{self.validate_drop_id(drop_id)}_{model_name}{self.ml_raw_suffix}"
         )
+
+    def parse_ml_raw_csv_name(self, filename: "str | Path") -> "tuple[str, str] | None":
+        """``(drop_id, model_name)`` from a full-video ML raw CSV's name (or S3
+        key), None for anything else.
+
+        The inverse of ``get_raw_csv_path``, and the one place that reads a
+        raw CSV name back. Other artifacts share the ``_raw.csv`` suffix
+        (``_zooniverse_raw``, ``_zooniverse_frames_raw``, ``_biigle_expert_raw``,
+        ``_biigle_training_raw``, an experiment's ``_conf050_raw``); none of
+        them is a canonical model name, so all return None.
+        """
+        name = Path(filename).name
+        if not name.endswith(self.ml_raw_suffix):
+            return None
+        drop_pattern = self.get_validation_pattern("drop_id").lstrip("^").rstrip("$")
+        m = re.match(
+            f"(?P<drop>{drop_pattern})_(?P<model>.+)$",
+            name[: -len(self.ml_raw_suffix)],
+        )
+        if not m or self.model_name_stamp(m.group("model")) is None:
+            return None
+        return m.group("drop"), m.group("model")
+
+    def list_ml_raw_csvs(self, drop_id: str) -> "dict[str, Path]":
+        """``{model_name: path}`` for every model's raw CSV in the drop's
+        annotations dir. Which one to use is the caller's rule (written last,
+        newest training stamp); this only says which exist."""
+        drop_id = self.validate_drop_id(drop_id)
+        found = {}
+        for p in sorted(
+            self.get_drop_annotations_dir(drop_id).glob(
+                f"{drop_id}_*{self.ml_raw_suffix}"
+            )
+        ):
+            parsed = self.parse_ml_raw_csv_name(p.name)
+            if parsed and parsed[0] == drop_id:
+                found[parsed[1]] = p
+        return found
+
+    def resolve_ml_raw_csv(self, drop_id: str) -> "tuple[str, Path] | None":
+        """``(model_name, raw CSV)`` a downstream stage should read for this drop.
+
+        The pipeline model's raw CSV when it exists, else the newest model (by
+        training stamp) that ran on the drop, else None. Downstream stages
+        (clips, BIIGLE upload, Zooniverse validation) used to look only for the
+        pipeline model's file, so promoting or renaming a model left every
+        ml_complete drop "not ready" forever with its detections on disk.
+        """
+        found = self.list_ml_raw_csvs(drop_id)
+        if not found:
+            return None
+        pipeline = self.pipeline_model_name
+        if pipeline in found:
+            return pipeline, found[pipeline]
+        newest = max(found, key=lambda m: (self.model_name_stamp(m) or "", m))
+        return newest, found[newest]
 
     def get_clips_dir(self, drop_id: str, target: str = "") -> Path:
         sub_path = f"{target}_clips" if target else "clips"

@@ -104,5 +104,35 @@ class ZooniverseConfig(BaseConfig):
         )
         return int(get_required(frames, "max_width_px", "zooniverse.validation.frames"))
 
+    @property
+    def zooniverse_validation_miss_iou(self) -> float:
+        """Sync-back: a volunteer box overlapping an ML box at or above this IoU
+        is a redraw of that box, below it a missed fish."""
+        sync = get_required(
+            self._zooniverse_validation, "sync", "zooniverse.validation"
+        )
+        return float(get_required(sync, "miss_iou", "zooniverse.validation.sync"))
+
+    def _validation_answer_labels(self, key: str) -> frozenset:
+        sync = get_required(
+            self._zooniverse_validation, "sync", "zooniverse.validation"
+        )
+        labels = get_required(sync, key, "zooniverse.validation.sync")
+        if not isinstance(labels, list) or not labels:
+            raise ValueError(
+                f"zooniverse.validation.sync.{key} must be a non-empty list"
+            )
+        return frozenset(str(label) for label in labels)
+
+    @property
+    def zooniverse_validation_yes_labels(self) -> frozenset:
+        """Answer labels (as the workflow versions spell them) that mean yes."""
+        return self._validation_answer_labels("yes_labels")
+
+    @property
+    def zooniverse_validation_no_labels(self) -> frozenset:
+        """Answer labels (as the workflow versions spell them) that mean no."""
+        return self._validation_answer_labels("no_labels")
+
 
 zooniverse_config = ZooniverseConfig()

@@ -85,21 +85,47 @@ def test_both_sources_are_converted(tmp_path):
 
 
 def test_frame_in_both_volumes_keeps_only_the_expert_boxes(tmp_path, caplog):
-    shared = _frame("0500.000s")
+    shared, own = _frame("0500.000s"), _frame("688.000s")
     labels = _drop(
         tmp_path,
         expert=_rows([shared], WRASSE),
-        training=_rows([shared], BLUE_COD),
+        training=_rows([shared, own], BLUE_COD),
     )
     with caplog.at_level("WARNING"):
         biigle_to_yolo(tmp_path, config.class_map_path)
 
-    _, wrasse = _ids()
+    cod, wrasse = _ids()
     assert _class_ids(labels, "0500.000s") == {wrasse}
+    assert _class_ids(labels, "688.000s") == {
+        cod
+    }, "non-overlapping training frame kept"
     assert any(
         "in both the expert and the training volume" in r.message
         for r in caplog.records
     )
+
+
+def test_training_copy_of_the_expert_volume_is_dropped_quietly(tmp_path, caplog):
+    """`download-project` on the DONE project re-downloads per-drop expert
+    volumes under the training suffix (KOK_20240219: 63-135 frames per drop,
+    all shared). That is a duplicate, not a second sampler: info, not warning,
+    and no boxes doubled."""
+    shared = [_frame("0500.000s"), _frame("0600.000s")]
+    labels = _drop(
+        tmp_path,
+        expert=_rows(shared, WRASSE),
+        training=_rows(shared, BLUE_COD),
+    )
+    with caplog.at_level("INFO"):
+        biigle_to_yolo(tmp_path, config.class_map_path)
+
+    _, wrasse = _ids()
+    assert _class_ids(labels, "0500.000s") == {wrasse}
+    assert not any(
+        r.levelname == "WARNING" and "both" in r.message for r in caplog.records
+    )
+    assert any("second copy of the expert volume" in r.message for r in caplog.records)
+    assert not any("All 0 annotations" in r.message for r in caplog.records)
 
 
 def test_negatives_from_both_reviewed_lists_survive_the_rebuild(tmp_path):
@@ -137,3 +163,35 @@ def test_fully_empty_training_drop_gets_its_negatives(tmp_path):
 
     txts = list(labels.glob("*.txt"))
     assert len(txts) == 3 and all(not p.read_text() for p in txts)
+
+
+def test_reviewed_list_without_its_annotations_is_ignored(tmp_path):
+    """An expert volume still in review has a (backfilled) reviewed list but no
+    expert raw CSV. Its frames were never looked at, so none may become empty."""
+    labels = _drop(
+        tmp_path,
+        training=_rows([_frame("382.000s")], BLUE_COD),
+        training_reviewed=[_frame("382.000s"), _frame("688.000s")],
+        expert_reviewed=[_frame("0146.781s"), _frame("0163.131s")],  # no expert CSV
+    )
+    biigle_to_yolo(tmp_path, config.class_map_path)
+
+    empties = sorted(p.stem for p in labels.glob("*.txt") if not p.read_text().strip())
+    assert empties == [f"{DROP}__frame_688.000s"]
+
+
+def test_same_frame_under_a_nested_name_still_keeps_the_expert_boxes(tmp_path):
+    """Training volumes spell frames `{drop}/frames/{name}.jpg`, expert reviews
+    the bare name. Labels are written per stem, so a full-string comparison
+    missed the clash and the training .txt overwrote the expert's."""
+    shared = _frame("0500.000s")
+    nested = f"{DROP}/frames/{shared}"
+    labels = _drop(
+        tmp_path,
+        expert=_rows([shared], WRASSE),
+        training=_rows([nested, _frame("688.000s")], BLUE_COD),
+    )
+    biigle_to_yolo(tmp_path, config.class_map_path)
+
+    cod, wrasse = _ids()
+    assert _class_ids(labels, "0500.000s") == {wrasse}
