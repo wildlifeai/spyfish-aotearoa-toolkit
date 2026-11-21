@@ -83,7 +83,7 @@ flowchart TB
 
 | Layer | Technology | Why |
 |---|---|---|
-| **Language** | Python 3.12+ | ML ecosystem, data manipulation, all external API clients |
+| **Language** | Python 3.10 to 3.13 | ML ecosystem, data manipulation, all external API clients |
 | **ML Model** | Ultralytics YOLOv12 | Real-time object detection; active development |
 | **Video Processing** | OpenCV + FFmpeg | OpenCV for frame extraction (pixel parity with YOLO); FFmpeg for clip encoding |
 | **Database** | SQLite (2 files) | Zero infrastructure, file-based, synced to S3; fits ~1k deployments/year |
