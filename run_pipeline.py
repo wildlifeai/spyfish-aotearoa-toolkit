@@ -40,6 +40,7 @@ eligibility, status transitions, and logging are wired up automatically.
 import argparse
 import functools
 import logging
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -430,6 +431,102 @@ STAGES: list = [
 # ---------------------------------------------------------------------------
 
 
+def _run_ping() -> int:
+    """Report configuration and read-only service reachability.
+
+    The check deliberately avoids constructing pipeline handlers, because those
+    handlers raise as soon as a credential is missing.  It is intended to be
+    useful on a fresh checkout where credentials may not exist yet.
+    """
+    required = (
+        "S3_BUCKET",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "BIIGLE_API_EMAIL",
+        "BIIGLE_API_TOKEN",
+        "ZOONIVERSE_USER",
+        "ZOONIVERSE_PASSWORD",
+    )
+    optional = {
+        "AWS_REGION": os.getenv("AWS_REGION") or "eu-central-1 (default)",
+        "AWS_ENDPOINT_URL": os.getenv("AWS_ENDPOINT_URL") or "not set",
+    }
+    missing = [name for name in required if not os.getenv(name)]
+
+    logging.info("Configuration:")
+    for name in required:
+        logging.info("  %s: %s", name, "set" if name not in missing else "missing")
+    for name, value in optional.items():
+        logging.info("  %s: %s", name, value)
+    logging.info("  BASE_DIR: %s", config.base_dir)
+
+    failures = []
+    if not any(
+        name in missing
+        for name in ("S3_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    ):
+        try:
+            import boto3
+
+            client = boto3.client(
+                "s3",
+                aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+                region_name=os.getenv("AWS_REGION", "eu-central-1"),
+                endpoint_url=os.getenv("AWS_ENDPOINT_URL") or None,
+            )
+            client.head_bucket(Bucket=os.environ["S3_BUCKET"])
+            logging.info("S3: reachable")
+        except Exception as exc:
+            failures.append("S3")
+            logging.error("S3: unavailable (%s)", str(exc).splitlines()[0])
+    else:
+        logging.info("S3: skipped because required settings are missing")
+
+    if not any(
+        name in missing for name in ("BIIGLE_API_EMAIL", "BIIGLE_API_TOKEN")
+    ):
+        try:
+            import requests
+
+            response = requests.get(
+                f"https://biigle.de/api/v1/projects/{config.biigle_project_id}",
+                auth=(os.environ["BIIGLE_API_EMAIL"], os.environ["BIIGLE_API_TOKEN"]),
+                timeout=config.request_timeout_secs,
+            )
+            response.raise_for_status()
+            logging.info("BIIGLE: reachable")
+        except Exception as exc:
+            failures.append("BIIGLE")
+            logging.error("BIIGLE: unavailable (%s)", str(exc).splitlines()[0])
+    else:
+        logging.info("BIIGLE: skipped because required settings are missing")
+
+    if not any(
+        name in missing for name in ("ZOONIVERSE_USER", "ZOONIVERSE_PASSWORD")
+    ):
+        try:
+            from panoptes_client import Panoptes, Project
+
+            Panoptes.connect(
+                username=os.environ["ZOONIVERSE_USER"],
+                password=os.environ["ZOONIVERSE_PASSWORD"],
+            )
+            Project.find(config.zooniverse_project_id)
+            logging.info("Zooniverse: reachable")
+        except Exception as exc:
+            failures.append("Zooniverse")
+            logging.error("Zooniverse: unavailable (%s)", str(exc).splitlines()[0])
+    else:
+        logging.info("Zooniverse: skipped because required settings are missing")
+
+    if missing:
+        logging.error("PING FAILED: missing required settings: %s", ", ".join(missing))
+    if failures:
+        logging.error("PING FAILED: unavailable services: %s", ", ".join(failures))
+    return 1 if missing or failures else 0
+
+
 def main() -> None:
     db = DatabaseManager()
     runner = StageRunner(STAGES, db)
@@ -504,9 +601,7 @@ def main() -> None:
 
     if args.ping:
         log_header("PING: CONFIG CHECK")
-        logging.info(f"S3 bucket: {config.s3_bucket}")
-        logging.info(f"Base dir:  {config.base_dir}")
-        return
+        sys.exit(_run_ping())
 
     def _patch_stage(s):
         if s.flag == "ml" and args.survey:
