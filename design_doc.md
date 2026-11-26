@@ -2128,7 +2128,7 @@ Two dashboards for different audiences:
 - **PowerBI** (separate) — DOC/Rangers: biodiversity reporting on maps and charts. Connects to SharePoint for deployment metadata.
 
 ```bash
-streamlit run "app/🐟_Spyfish_Data_Tools.py"
+(cd app && streamlit run "🐟_Spyfish_Data_Tools.py")
 ```
 
 ### Pages

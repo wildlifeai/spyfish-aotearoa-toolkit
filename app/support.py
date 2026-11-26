@@ -23,8 +23,8 @@ SUPPORT_PAGE_PATH = "support"
 def render_contact_note() -> None:
     """Sidebar contact note. Called once from the entrypoint, after `nav.run()`.
 
-    Single source of truth for the "something broke, tell Kalindi" message, so
-    the wording changes in one place.
+    Single source of truth for the "something broke" message, so the wording
+    changes in one place.
 
     Called after `nav.run()` so it sits at the bottom of the sidebar, under the
     page list. `st.navigation` runs the entrypoint on every page load, so one
@@ -51,7 +51,7 @@ def render_contact_note() -> None:
         unsafe_allow_html=True,
     )
     st.sidebar.error(
-        "⚠️ **If this tool doesn't work**, contact Kalindi immediately on "
-        "Slack, or email [kalindi@wildlife.ai](mailto:kalindi@wildlife.ai).  \n"
+        "⚠️ **If this tool doesn't work**, report it in [GitHub issues]("
+        "https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues).  \n"
         f"Read more about it here: [Error page](/{SUPPORT_PAGE_PATH})"
     )
