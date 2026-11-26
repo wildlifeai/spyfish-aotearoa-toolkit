@@ -28,5 +28,5 @@ streamlit==1.50.0
 tomli==2.2.1
 tqdm==4.67.1
 tzdata==2025.1
-ultralytics>=8.3.0
+ultralytics-opencv-headless>=8.3.242
 urllib3==2.3.0
