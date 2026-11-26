@@ -109,9 +109,20 @@ def sync_annotations() -> bool:
     Excludes .mp4 files. Zooniverse clips are uploaded directly to Zooniverse,
     and raw BUV footage already lives in media/ on S3.
     """
-    s3 = S3Handler()
     local_dq_dir = config.deployment_data_dir
     s3_prefix = config.s3_deployment_data_dir
+
+    # A fresh install can complete metadata-only stages before any deployment
+    # data directory exists. There is nothing to upload in that case, so do not
+    # turn a successful first run into a sync error.
+    if not local_dq_dir.is_dir():
+        logging.info(
+            "No deployment data directory at %s; skipping annotations sync.",
+            local_dq_dir,
+        )
+        return True
+
+    s3 = S3Handler()
 
     # Start with global exclude
     filters = ["--exclude", "*"]
