@@ -29,6 +29,8 @@ import argparse
 import csv
 import math
 import random
+import shutil
+import subprocess
 import zlib
 from pathlib import Path
 
@@ -178,15 +180,52 @@ def write_video(rel_key: str, drop_id: str, duration_seconds: int) -> None:
         for _ in range(int(frame_rng.integers(3, 6)))
     ]
 
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"avc1"), VIDEO_FPS, (w, h)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError(
+            "ffmpeg is required to generate sample videos; install it and retry"
+        )
+
+    process = subprocess.Popen(
+        [
+            ffmpeg,
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{w}x{h}",
+            "-r",
+            str(VIDEO_FPS),
+            "-i",
+            "-",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
-    if not writer.isOpened():
-        raise RuntimeError(f"cv2 could not open H.264 writer for {path}")
+
+    def write(frame: np.ndarray) -> None:
+        try:
+            process.stdin.write(frame.tobytes())
+        except BrokenPipeError as exc:
+            stderr = process.stderr.read().decode(errors="replace").strip()
+            raise RuntimeError(f"ffmpeg could not encode {path}: {stderr}") from exc
 
     static = label(base.copy())
     for _ in range(FISH_START_SECONDS * VIDEO_FPS):
-        writer.write(static)
+        write(static)
     for i in range((FISH_END_SECONDS - FISH_START_SECONDS) * VIDEO_FPS):
         frame = base.copy()
         for f in fish:
@@ -194,10 +233,14 @@ def write_video(rel_key: str, drop_id: str, duration_seconds: int) -> None:
             cx = travel % (w + 200) - 100  # swim off one edge, re-enter the other
             cy = f["y"] + 15 * math.sin(f["phase"] + i / 8)
             _draw_fish(frame, cx, cy, f["size"], f["color"], f["heading"])
-        writer.write(label(frame))
+        write(label(frame))
     for _ in range((duration_seconds - FISH_END_SECONDS) * VIDEO_FPS):
-        writer.write(static)
-    writer.release()
+        write(static)
+    process.stdin.close()
+    return_code = process.wait()
+    stderr = process.stderr.read().decode(errors="replace").strip()
+    if return_code != 0:
+        raise RuntimeError(f"ffmpeg could not encode {path}: {stderr}")
     print(
         f"wrote {duration_seconds}s video ({path.stat().st_size / 1e6:.1f} MB) → {path}"
     )
