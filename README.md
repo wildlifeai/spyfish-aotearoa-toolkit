@@ -36,8 +36,8 @@ independently rather than in one fragile chain.
 pip install -r requirements.txt
 pip install -e .
 
-# Secrets live in .env (never in git): AWS, BIIGLE and Zooniverse credentials
-#: see design_doc.md for the full list.
+# Copy .env_sample to .env and fill in the AWS, BIIGLE and Zooniverse values.
+# .env_sample is the source of truth for environment variables; never commit .env.
 
 python run_pipeline.py --ping     # config + connectivity check
 python run_pipeline.py            # run all default pipeline steps
