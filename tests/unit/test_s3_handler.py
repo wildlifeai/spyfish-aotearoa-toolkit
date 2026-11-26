@@ -25,6 +25,17 @@ def _make_handler():
         return S3Handler(bucket="test-bucket")
 
 
+def test_s3_endpoint_url_from_environment(monkeypatch):
+    endpoint = "http://127.0.0.1:5000"
+    monkeypatch.setenv("AWS_ENDPOINT_URL", endpoint)
+    boto3_mock = MagicMock()
+
+    with patch("spyfish.storage.s3_handler.boto3", boto3_mock):
+        S3Handler(bucket="test-bucket")
+
+    assert boto3_mock.client.call_args.kwargs["endpoint_url"] == endpoint
+
+
 def test_upload_preserves_local_file_on_failure(tmp_path):
     """Regression: `finally` block used to delete the local file even when
     upload raised BotoCoreError, causing silent data loss. The delete must

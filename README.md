@@ -81,8 +81,8 @@ SLURM scripts just wrap the same `run_pipeline.py` CLI.
 - **[design_doc.md](design_doc.md)**: the full picture: architecture,
   decisions, CLI reference, configuration, module reference.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**: system overview and diagrams.
-- **[Project wiki](https://spyfish.notion.site/overview)**: tutorials and
-  contributor information.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: local setup, sample data, and
+  credential-free development instructions.
 
 ## Links
 

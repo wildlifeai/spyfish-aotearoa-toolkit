@@ -11,6 +11,8 @@ Required Environment Variables:
     S3_BUCKET: Default S3 bucket name.
 
 Optional Environment Variables:
+    AWS_ENDPOINT_URL: S3-compatible endpoint for local development (for example,
+        Moto or LocalStack).
     S3_KSO_{TYPE}_CSV: KSO CSV file paths (e.g., S3_KSO_SURVEY_CSV).
     S3_SHAREPOINT_{TYPE}_CSV: SharePoint CSV paths (e.g., S3_SHAREPOINT_SURVEY_CSV).
 
@@ -163,6 +165,7 @@ class S3Handler:
             aws_access_key_id=config.access_key_id,
             aws_secret_access_key=config.secret_access_key,
             region_name=config.region,  # Dynamically loaded auth region for V4 signatures
+            endpoint_url=os.getenv("AWS_ENDPOINT_URL") or None,
             config=boto_config,  # Add config here
         )
         self._initialized = True
