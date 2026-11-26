@@ -407,7 +407,7 @@ def draw_frames_on_images(
 
         import cv2
     except ImportError:
-        logging.warning("opencv-python not installed, skipping spot-check drawing.")
+        logging.warning("opencv-python-headless not installed, skipping spot-check drawing.")
         return
 
     id_to_name = {v: k for k, v in class_map.items()}
