@@ -353,7 +353,7 @@ and puts a meaningless row in every co-occurrence matrix.
 
 | Layer                    | Technology                                     | Rationale                                                                               |
 | ------------------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Language                 | Python 3.12+                                   | Ecosystem for ML, data manipulation, and all external platforwhom clients               |
+| Language                 | Python 3.10 to 3.13                            | Ecosystem for ML, data manipulation, and all external platform clients                  |
 | ML inference             | Ultralytics YOLOv12                            | State-of-the-art real-time object detection; active upstream development                |
 | Video processing         | OpenCV + FFmpeg                                | OpenCV for frame extraction (frame parity with YOLO); FFmpeg for clip encoding          |
 | Database                 | SQLite (via `sqlite3`)                         | Zero-infrastructure, file-based, trivially synced to S3; sufficient for ~1k/year scale  |
@@ -1213,7 +1213,7 @@ The pipeline runs on NeSI (New Zealand eScience Infrastructure HPC). A NeSI cron
 
 ### System requirements
 
-- Python 3.10+
+- Python 3.10 to 3.13
 - `ffmpeg` (required for video clip extraction — must be on your `$PATH`)
 - AWS credentials with access to the S3 bucket (production: `marine-buv`, DOC-managed; development: configure in `.env`)
 - BIIGLE API credentials

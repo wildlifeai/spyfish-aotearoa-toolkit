@@ -32,6 +32,8 @@ independently rather than in one fragile chain.
 
 ## Quick start
 
+Use Python 3.10 to 3.13.
+
 ```bash
 pip install -r requirements.txt
 pip install -e .
