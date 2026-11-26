@@ -136,7 +136,7 @@ def sync_annotations() -> bool:
     # training artifacts in S3, and the right include/exclude rules, is a
     # design decision for later. Promoted models still flow to S3 via the
     # models/ prefix below.
-    # See the project issue tracker "ML pipeline" entry.
+    # See claude_docs/todo.md "ML pipeline" entry.
 
     # Include promoted models
     models_prefix = "models"

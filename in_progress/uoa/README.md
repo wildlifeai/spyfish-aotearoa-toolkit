@@ -6,7 +6,7 @@ collaborator's data, not DOC's, so it does not live in the DOC app
 (`app/🐟_Spyfish_Data_Tools.py`) and the DOC app does not reference anything here.
 It sits under `in_progress/` with the other unfinished, data-dependent tooling;
 it imports the shared `app/` modules by name, so `app.py` puts both folders on the path.
-Background: see the UoA section of `design_doc.md`.
+Background: `claude_docs/uoa_design.md`.
 
 ## Run
 

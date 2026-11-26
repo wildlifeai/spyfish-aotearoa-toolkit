@@ -375,7 +375,7 @@ and puts a meaningless row in every co-occurrence matrix.
 
 The ML model starts as a **binary classifier** (fish vs no-fish). Species-specific classes are added incrementally as training data for each species grows to a point where the model can reliably detect that species. This means the model naturally becomes multi-class over time as the annotation pipeline accumulates expert labels, without forcing multi-class detection before the training data supports it.
 
-**The binary model pipeline was retired (decided and deleted 2026-08-21).** "Binary" was never a different kind of model — it is the species model at the extreme end of the class-floor dial (`training.class_floor_min_images` merges weak species into the `fish` catchall; crank it high enough and *everything* blends into `fish`, with `bait` staying its own never-floored class). The separate binary training path (`make_binary_labels` + the binary dataset assembly + `--binary` retrain flags — all deleted) also carried a real defect: it remapped *every* class to 0, folding `bait` boxes into `fish` — exactly the count-inflating merge the species path's never-floor exemption exists to prevent. Validated before deletion: scored class-agnostically ("did it box each fish"), the species model beats the archived binary model P 0.96/R 0.94 vs P 0.84/R 0.60 at the production MaxN threshold — full numbers in the project issue tracker ("Retire the binary model pipeline"). There is deliberately no derived "total fish" MaxN row (a union row was implemented and then deleted the same day, 2026-08-21): a total-fish figure is a downstream sum over the per-class rows, not a pipeline output. Note when summing that per-class maxima can occur in different frames, so the sum is a slight upper bound on the true simultaneous total; `nms_agnostic: true` at inference keeps the per-class rows honest (one animal never carries two class boxes). Old `binary_*.pt` weights stay in `archive_models/`; historical `binary_*` DB rows now read `annotated_by = 'ml'`, `external_id = binary_*` (migrated at DB open, 2026-10-13).
+**The binary model pipeline was retired (decided and deleted 2026-08-21).** "Binary" was never a different kind of model — it is the species model at the extreme end of the class-floor dial (`training.class_floor_min_images` merges weak species into the `fish` catchall; crank it high enough and *everything* blends into `fish`, with `bait` staying its own never-floored class). The separate binary training path (`make_binary_labels` + the binary dataset assembly + `--binary` retrain flags — all deleted) also carried a real defect: it remapped *every* class to 0, folding `bait` boxes into `fish` — exactly the count-inflating merge the species path's never-floor exemption exists to prevent. Validated before deletion: scored class-agnostically ("did it box each fish"), the species model beats the archived binary model P 0.96/R 0.94 vs P 0.84/R 0.60 at the production MaxN threshold — full numbers in `claude_docs/todo.md` ("Retire the binary model pipeline"). There is deliberately no derived "total fish" MaxN row (a union row was implemented and then deleted the same day, 2026-08-21): a total-fish figure is a downstream sum over the per-class rows, not a pipeline output. Note when summing that per-class maxima can occur in different frames, so the sum is a slight upper bound on the true simultaneous total; `nms_agnostic: true` at inference keeps the per-class rows honest (one animal never carries two class boxes). Old `binary_*.pt` weights stay in `archive_models/`; historical `binary_*` DB rows now read `annotated_by = 'ml'`, `external_id = binary_*` (migrated at DB open, 2026-10-13).
 
 ### Config and orchestration
 
@@ -1057,7 +1057,7 @@ These are complementary tools, not competing choices.
 
 ### Future direction: multi-project support (Spyfish Anywhere)
 
-Generalizing the pipeline to support other camera-trap projects (different methodologies, regions, metadata sources) — same repo, layered profiles, internal schema pipeline-shaped with opportunistic Darwin Core alignment, exports to DwC-A Event Core for OBIS/GBIF publishing. The current roadmap is maintained in this document.
+Generalizing the pipeline to support other camera-trap projects (different methodologies, regions, metadata sources) — same repo, layered profiles, internal schema pipeline-shaped with opportunistic Darwin Core alignment, exports to DwC-A Event Core for OBIS/GBIF publishing. See [`claude_docs/anywhere_plan.md`](claude_docs/anywhere_plan.md).
 
 ---
 
@@ -1129,7 +1129,7 @@ Sequenced by dependency, not assigned dates.
 
 Zooniverse choice keys (`BLUECOD`, `SNAPPER`, etc.) were stored raw as `scientific_name` in `spyfish_annotations.db` before the normalisation step was added to `write_zooniverse_maxn_csv`. Any citsci rows ingested before this fix have incorrect species names and cannot be compared with ML or expert annotations.
 
-**Fix:** re-run `--zooniverse-sync` (or re-ingest from the existing MaxN CSVs) for all affected drops. The MaxN CSVs on disk also need regenerating if they were written before the fix, since the normalisation only applies at write time. Once re-ingested, the bootstrap orchestrator (`spyfish/orchestrator/bootstrap.py`) will handle this in bulk.
+**Fix:** re-run `--zooniverse-sync` (or re-ingest from the existing MaxN CSVs) for all affected drops. The MaxN CSVs on disk also need regenerating if they were written before the fix, since the normalisation only applies at write time. Once re-ingested, the bootstrap orchestrator (`spyfish/orchestrator/bootstrap.py`, planned in PR 3 of `claude_docs/zooniverse_annotations_todo.md`) will handle this in bulk.
 
 ### Zooniverse volunteer sync — step 5b pipeline wiring
 
@@ -1143,7 +1143,7 @@ Classification parsing is fully wired into `run_pipeline.py --zooniverse-sync` (
 5. `aggregate_by_subject_species` → write `{drop_id}_zooniverse_maxn.csv`
 6. `ingest_zooniverse_annotations` → advance to `citsci_complete`
 
-**Historical backfill (`--legacy-zooniverse`):** reads classification + subjects CSVs from `process_files/zooniverse/legacy_classifications/` (configured via `paths.legacy.zooniverse`). Legacy filename resolver handles DMY/YMD date-pattern filenames, `_NEW` upload-suffix normalisation, and year-fuzzy matching for surveys where the Zooniverse filename date differs from the DB date by days or weeks. Unresolvable stems (pre-standard 2011–12 format, surveys not yet ingested) are logged for follow-up. Companion admin flag `--legacy-experts` ingests the legacy expert annotation CSV from S3 — both are off the happy path and called explicitly.
+**Historical backfill (`--legacy-zooniverse`):** reads classification + subjects CSVs from `process_files/zooniverse/legacy_classifications/` (configured via `paths.legacy.zooniverse`). Legacy filename resolver handles DMY/YMD date-pattern filenames, `_NEW` upload-suffix normalisation, and year-fuzzy matching for surveys where the Zooniverse filename date differs from the DB date by days or weeks. See `claude_docs/todo.md` resolver audit for unresolvable stems (pre-standard 2011–12 format, surveys not yet ingested). Companion admin flag `--legacy-experts` ingests the legacy expert annotation CSV from S3 — both are off the happy path and called explicitly.
 
 **Legacy expert placeholders.** The legacy CSV is a database export that wrote the literal string `"NULL"` into every data field (ScientificName, TimeOfMax, MaxInterval) for deployments that had no expert annotations — a "no data" marker, not "reviewed and saw nothing". Pandas reads `"NULL"` as missing, so an earlier ingest turned 34 of these into absence records and advanced their drops to `expert_complete`, wrongly suppressing real citsci data on 5 of them under expert-wins. `parse_legacy_rows` now skips all-NULL rows (a row with *any* of the three data fields present is kept), includes the skipped drops in the count sync so stale counts recount to zero, and demotes placeholder drops stranded at `expert_complete` back to `expert_pending` when no expert rows exist from any path. Re-running `--legacy-experts` is the whole repair — every step is idempotent.
 
@@ -1248,7 +1248,8 @@ These are loaded at startup via `python-dotenv`. Secrets never live in `config.y
 
 ### First-run checklist
 
-- `ml_inference.limit_processing` — safety cap on videos per run (default: 9 in `config.yaml`). Increase only when you trust the pipeline and have enough resources.
+- `orchestrator.is_test_run` — **set to `false` for real runs**. When `true`, reads from `test_deployment_metadata.csv` instead of S3.
+- `ml_inference.limit_processing` — safety cap on videos per run (default: 1). Increase when you trust the pipeline.
 - `paths.media_base_dir` — override if you want videos on a separate large disk.
 
 ---
@@ -1293,7 +1294,7 @@ python run_pipeline.py --biigle-sync --retrain
 | `--set-targets`       | Bulk-update deployment statuses from a CSV (`paths.pipeline_targets_csv`)                                    |
 | `--legacy-experts`    | Historical backfill: download `BUV Annotations Legacy Experts.csv` from S3 → ingest as `annotated_by='expert', external_id='legacy'` |
 | `--legacy-zooniverse` | Historical backfill: read classification CSV exports from `process_files/zooniverse/legacy_classifications/` → parse, aggregate, ingest as `annotated_by='citsci'` per drop. When the dir is absent/empty, the exports are pulled from S3 first (same path under the bucket). `scripts/fetch_zooniverse_exports.py` downloads fresh exports from Panoptes into this dir (`--generate` to build new ones, `--to-s3` to refresh the bucket copy) — the bulk-export route for citsci catch-ups, vs `--zooniverse-sync` for small live increments |
-| `--db-refresh`        | Reconcile DB status with on-disk artifacts and live Zooniverse/Biigle API state (see `spyfish/orchestrator/db_refresh.py`; **needs validation**) |
+| `--db-refresh`        | Reconcile DB status with on-disk artifacts and live Zooniverse/Biigle API state (see `spyfish/orchestrator/db_refresh.py`; **needs validation** — see `claude_docs/todo.md`) |
 | `--zooniverse-frames` | Opt-in. Validation frames (BIIGLE selector × `zooniverse.validation.effort_multiplier`, every ML box drawn) → `vframes_{DropID}`; `zoo_frames_pending → zoo_frames_uploaded`. Needs `ml_complete` + local video |
 | `--zooniverse-crops`  | Opt-in. One crop per ML box in the same frames → `crops_{DropID}`; `zoo_crops_pending → zoo_crops_uploaded` (or `zoo_crops_skipped`) |
 | `--dry-run`           | Modifier. On `--retrain --data-prep`: fast part only. On the two validation stages: render + write manifests, upload nothing, statuses unchanged |
@@ -1305,6 +1306,7 @@ python run_pipeline.py --biigle-sync --retrain
 | Flag            | Description                                                                                  |
 | --------------- | -------------------------------------------------------------------------------------------- |
 | `--no-upload`   | Skip the final S3 sync (DB, models, results). Safe for local testing.                        |
+| `--test-run`    | Use test dataset. Also controlled by `is_test_run` in `config.yaml`.                         |
 | `--force`       | On `--zooniverse-sync`: re-fetch from Panoptes even if raw CSV exists on disk. On `--ml --survey`: also reset the survey's `ml_complete`/`ml_error` drops to `ml_ready` and re-run them |
 | `--survey`      | Restrict processing to one survey (DropID prefix). On `--ml`: every `ml_ready` drop in the survey, bypassing `limit_processing`. On drop stages (`--zooniverse-clips`, `--biigle-upload`): only the survey's eligible drops |
 | `--survey-volume` | On `--biigle-upload`: pool each survey's frames into ONE shared Biigle volume named `{survey_id} ML` instead of one volume per deployment. Sync routes a shared volume's annotations back per drop by filename; a drop with no files in a done shared volume is skipped, never recorded as an absence |
@@ -1339,11 +1341,11 @@ python run_pipeline.py --zooniverse-frames --zooniverse-crops
 - **Built from `--ml` output only:** the pipeline model's raw CSV and the video in `media/` (`config.get_video_path`; never streamed from S3, missing video = not ready). Blind times are snapped onto the inference grid (`inference_grid` rebuilds `run_inference`'s seek + stride, which nothing persists), so "no box" means the model looked and saw nothing.
 - **Metadata** = the clip keys (`DropID`, `#VideoFilename`, `#siteName`, `#SubjectType` `frame`/`crop`, `#SelectionReason`, `#TargetSpecies`, `#MaxInterval`, `#ConfidenceAgreement` = model confidence as on ML rows, `#SamplingStart`, `UplAbsSeconds`, reserve keys) plus `#ModelName`, `#FrameIndex`; frames add `#RenderScale`, crops add `#DetectionKey` (`drop|frame|box index`), `#BBox` (video px), `#LabelShown`.
 - **Workflows are attached by hand**, as for clips. The upload logs which workflow each set belongs on. The `vframes_` prefix (not `frames_`) avoids old April 2026 `frames_*` sets tripping the existing-set count check, and `parse_classifications` ignores both new prefixes, so `--zooniverse-sync` leaves them alone.
-- **Opt-in** (`run_in_all=False`) until the pipeline runs routinely. Sync-back (`*_complete`, verdict CSVs) is not built; the downloaded classification exports can be inspected manually for now.
+- **Opt-in** (`run_in_all=False`) until the pipeline runs routinely; see `claude_docs/todo.md`. Sync-back (`*_complete`, verdict CSVs) is not built; `scripts/wip/fetch_validation_classifications.py` + `analyse_validation_workflows.py` cover analysis for now.
 
 ### Zooniverse verification crops pilot (`scripts/wip/upload_test_crops_to_zooniverse.py`)
 
-**Superseded by `--zooniverse-crops` above**; kept for the record of the Aug 2026 pilot. Renders a cropped, labelled image per ML detection and pushes them to Zooniverse as `crop` subjects, so volunteers can answer "Is this a {species}?" with two buttons. Plan: `~/.claude/plans/composed-plotting-backus.md`; status and open items in the project issue tracker.
+**Superseded by `--zooniverse-crops` above**; kept for the record of the Aug 2026 pilot. Renders a cropped, labelled image per ML detection and pushes them to Zooniverse as `crop` subjects, so volunteers can answer "Is this a {species}?" with two buttons. Plan: `~/.claude/plans/composed-plotting-backus.md`; status and open items in `claude_docs/todo.md`.
 
 ```bash
 # render only — writes JPEGs + manifest, uploads NOTHING
@@ -1487,7 +1489,7 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 
 | Key                         | Default | Effect                                                                   |
 | --------------------------- | ------- | ------------------------------------------------------------------------ |
-| `limit_processing`          | 9       | Max videos processed per pipeline run. Increase for production.          |
+| `limit_processing`          | 1       | Max videos processed per pipeline run. Increase for production.          |
 | `ml_fps`                    | 3       | Frames per second submitted to YOLO. Stride = `actual_fps / ml_fps`.     |
 | `confidence_threshold`      | 0.15    | YOLO detection threshold. Lower = more detections, more false positives. |
 | `maxn_confidence_threshold` | 0.40    | Min confidence to count a detection in MaxN computation.                 |
@@ -1513,7 +1515,7 @@ All non-secret configuration lives in `config.yaml`. Missing keys raise `ValueEr
 
 #### `extraction.frame_strategy` — FRAME selection buckets
 
-Clips keep `binary_strategy` / `multiclass_strategy` above; frames use one per-species set. Allocation is by marginal information — what an expert label tells us that we don't already know. Measurements behind the numbers are in the project issue tracker ("Frame selection: one budget, several buckets").
+Clips keep `binary_strategy` / `multiclass_strategy` above; frames use one per-species set. Allocation is by marginal information — what an expert label tells us that we don't already know. Measurements behind the numbers are in `claude_docs/todo.md` ("Frame selection: one budget, several buckets").
 
 | Key                        | Default | Effect                                                                                             |
 | -------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
@@ -1655,7 +1657,7 @@ Single S3 scan: `storage.get_objects_from_s3(prefix=config.media_s3_prefix, keys
 
 `**extraction/slate.py**`: `extract_slate_frame(drop_id, video_path)` runs first thing per drop inside `run_inference_loop`, while the video is on local disk. It samples one frame a second from the start up to `sampling_start` (the rig is on the bottom by then; `extraction.slate_detection.max_seconds`, 120 s, is the ceiling when it is missing), stops a few seconds after the board disappears, and looks for the handwritten metadata whiteboard rangers hold up before the drop, and saves the best full-res frame to `config.get_slate_frame_path(drop_id)` (`{drop}_slate.jpg` in the drop folder) for cross-checking SharePoint metadata. Non-fatal: a miss or failure is logged and ML runs regardless; an existing JPEG is never re-made. `scripts/wip/find_slate.py` (untracked) runs the same code without ML (drop IDs or video files already on disk, `--force` to redo, `--csv` for a stats table): backfill, drops you do not want to run ML on, threshold tuning. Reading the text is not built: collect the JPEGs, then batch-OCR them with a local vision model on NeSI.
 
-`**run_post_ml(drop_ids, video_dir)**` (`process_ml_annotations.py`): Computes MaxN per interval × species and stores it in `spyfish_annotations.db` with `annotated_by = 'ml'` and `external_id = model_name` (the MaxN CSV writes `AnnotatedBy = "ml"` too, with the model in `ModelName`). Since 2026-08-21 `process_maxn` applies a **persistence filter** before the 10-second binning: detections above `maxn_confidence_threshold` are rebuilt onto the sampled-frame grid (missing frames are zeros), zero-gaps up to `maxn_gap_fill_seconds` are closed with min(neighbours), then a rolling min over `maxn_persistence_seconds` — computed on the full timeline so visits straddling interval boundaries aren't undercounted — becomes the interval's MaxN. Single-frame spikes are recorded (`RawMaxInterval`, `SpikeFlag`, `SpikeTimeSeconds`) but count 0; clip selection scores its Confusing bucket from `RawMaxInterval` so suppressed spikes still reach review. Classes in `maxn_exclude_classes` (bait) get no rows. There is no derived total-fish row: the old binary-model MaxN is replaced by summing per-class rows downstream when a total is wanted. Basis: across 19 drops, 40% of detection runs last exactly 1 frame while median peak confidence rises 0.49 → 0.79 with run length (the project issue tracker, "min_run_length").
+`**run_post_ml(drop_ids, video_dir)**` (`process_ml_annotations.py`): Computes MaxN per interval × species and stores it in `spyfish_annotations.db` with `annotated_by = 'ml'` and `external_id = model_name` (the MaxN CSV writes `AnnotatedBy = "ml"` too, with the model in `ModelName`). Since 2026-08-21 `process_maxn` applies a **persistence filter** before the 10-second binning: detections above `maxn_confidence_threshold` are rebuilt onto the sampled-frame grid (missing frames are zeros), zero-gaps up to `maxn_gap_fill_seconds` are closed with min(neighbours), then a rolling min over `maxn_persistence_seconds` — computed on the full timeline so visits straddling interval boundaries aren't undercounted — becomes the interval's MaxN. Single-frame spikes are recorded (`RawMaxInterval`, `SpikeFlag`, `SpikeTimeSeconds`) but count 0; clip selection scores its Confusing bucket from `RawMaxInterval` so suppressed spikes still reach review. Classes in `maxn_exclude_classes` (bait) get no rows. There is no derived total-fish row: the old binary-model MaxN is replaced by summing per-class rows downstream when a total is wanted. Basis: across 19 drops, 40% of detection runs last exactly 1 frame while median peak confidence rises 0.49 → 0.79 with run length (`claude_docs/todo.md`, "min_run_length").
 
 ---
 
@@ -1868,7 +1870,7 @@ separate because each needs information the previous one does not have.
 counts post-cap, post-split train images, so a species can still be lifted and
 then merged. On 2026-08-24 that happened to `Conger verreauxi`, `Elasmobranchii`
 and `Meuschenia scaber` — 3 of 10 lifts wasted. Making the balancer count
-post-cap frames is the fix (the project issue tracker).
+post-cap frames is the fix (`claude_docs/todo.md`).
 
 ### The per-drop cap and the rare-species exemption (2026-08-25)
 
@@ -1958,7 +1960,7 @@ Expert annotations are organised into **two BIIGLE projects**, which map onto th
 - **Per-drop-id project** — volumes named by DropID (the relevant deployments). **Done-gated**: ingested by `python run_pipeline.py --biigle-sync`, which only pulls volumes whose first file carries every label in `biigle.done_labels` (currently just `"Done Volume"` — `"Done QA Review"` to be re-added once a QA pass exists). Writes `_biigle_expert_raw.csv` + `_biigle_expert_maxn.csv`, advances `expert_status`, and these train via the normal MaxN path.
 - **Non-survey project** — old training data + some per-survey training-frame volumes. **No Done gate.** UUID/arbitrary image volumes → `python -m spyfish.biigle.biigle_to_yolo download-volume --volume-id <id>` (flat `extra_no_survey_id/volume_<id>/` bundle); per-survey Training-frames volumes → `python -m spyfish.biigle.biigle_to_yolo download-training-volume --volume-id <id>` (per-drop split keyed off the filename DropID). Both land as **extras** — discovered by `discover_extra_drops`, folded into the train split only, bypassing ceiling/floor balancing; their empty-`.txt` backgrounds are admitted to TRAIN at `training.background_ratio`. **In practice there were almost none until 2026-08-24** — see "Negatives: where empty frames come from" below.
 
-Both paths are the same core operation — *BIIGLE report → per-frame YOLO labels* — differing only in destination folder (per-drop vs `extra_no_survey_id/`). After both are on disk, a single `--retrain` (or `--retrain --data-prep`) assembles **one unified `data.yaml`** across all classes from both projects. (Open: legacy *video* drop-id volumes in the per-drop project still need a dedicated converter — see the project issue tracker.)
+Both paths are the same core operation — *BIIGLE report → per-frame YOLO labels* — differing only in destination folder (per-drop vs `extra_no_survey_id/`). After both are on disk, a single `--retrain` (or `--retrain --data-prep`) assembles **one unified `data.yaml`** across all classes from both projects. (Open: legacy *video* drop-id volumes in the per-drop project still need a dedicated converter — see `claude_docs/todo.md`.)
 
 The orchestrator (`spyfish/orchestrator/retrain_runner.py`) chains together:
 
@@ -2090,7 +2092,7 @@ Volumes created before this convention point straight at `{survey}/training_fram
 
 **Biigle call pattern.** `find_or_create_volume_and_add_frames` returns `(volume_id, filename_to_biigle_id)` populated from `add_files_to_volume`'s response. `upload_coco_annotations_to_biigle` accepts the map and skips a per-drop full `get_volume_images` fetch — that fetch was the dominant rate-limit-burner because the volume's image count grows with every drop and the helper does ~N concurrent GETs. Net per-survey cost dropped from O(K²) image fetches (K = drops processed) to O(n_frames) (only on the first-drop-of-fresh-volume case). A defensive fallback fires `get_volume_images` once if the map is incomplete — handles partial-state retries where files were already registered in the volume from a prior crashed run.
 
-**No duplicate-annotation guard, deliberately.** With current config (~50 annotations per drop, well under `upload_image_annotations`'s 100-batch threshold), annotation upload is a single atomic POST. `training_biigle_volume_id` is therefore a reliable "drop is done" signal — re-running can't create duplicates because the failure mode a guard would protect against (mid-batch partial state) isn't reachable. Revisit if `training_extraction.n_frames` scales past ~20 or species detection pushes per-drop annotations past 100 (see the project issue tracker).
+**No duplicate-annotation guard, deliberately.** With current config (~50 annotations per drop, well under `upload_image_annotations`'s 100-batch threshold), annotation upload is a single atomic POST. `training_biigle_volume_id` is therefore a reliable "drop is done" signal — re-running can't create duplicates because the failure mode a guard would protect against (mid-batch partial state) isn't reachable. Revisit if `training_extraction.n_frames` scales past ~20 or species detection pushes per-drop annotations past 100 (see `claude_docs/todo.md`).
 
 ### Biigle Rectangle → YOLO HBB conversion (`biigle_rect_to_yolo`)
 
@@ -2159,7 +2161,7 @@ pytest -v tests/                # Verbose output
 
 Tests use real SQLite databases (not mocked). Integration tests use a full ephemeral environment set up in `tests/conftest.py`. Always use realistic, validation-passing IDs in fixtures (e.g. `KSF_20240124_BUV_KSF_085_01`), not placeholder strings.
 
-For manual testing, use the deterministic sample-data commands below to create a local test bucket and run the pipeline against it. Use `set_status` to create test records when a workflow needs them.
+For manual testing: set `is_test_run: true` in `config.yaml` and use `set_status` to create test records. The test deployment metadata CSV lives at `process_files/orchestration/test_deployment_metadata.csv`.
 
 ### Sample data environment (fake end-to-end dataset)
 
@@ -2329,14 +2331,14 @@ python -m spyfish.biigle.biigle_to_yolo download-volume \
 
 This downloads the raw annotation CSV from BIIGLE, converts bounding boxes to YOLO `.txt` label files, and writes a `class_map.json`. The output can be used directly as training data alongside pipeline-generated labels.
 
-> **TODO:** `download-volume` currently writes YOLO labels only — does not write to `spyfish_annotations.db`. See the project issue tracker for the per-row drop_id resolution plan.
+> **TODO:** `download-volume` currently writes YOLO labels only — does not write to `spyfish_annotations.db`. See `claude_docs/todo.md` for the per-row drop_id resolution plan.
 
 ### BIIGLE projects: video-era archive (4920) and frame consolidation (3711)
 
 Two BIIGLE projects hold the historical video-era data alongside the current per-drop frame work:
 
 - **Project 4920 — video clip archive.** Per-drop **video** volumes that *stream the GoPro clips straight from S3*. Most volumes reference `disk-134://process_files/clips/biigle/{survey}/{drop}/...` (marine-buv); a small number reference `disk-98://biigle_clips/...` (marine-buv-kalindi, e.g. `AHE_119`, `TUH_034`). **BIIGLE keeps no copy of its own** — the only physical store is the S3 clip files. Deleting a clip from S3 removes it from 4920 playback (annotation metadata persists in BIIGLE's DB, but the video can no longer be loaded). Treat any clip referenced by a 4920 volume as load-bearing.
-- **Project 3711 — frames + expert labels.** Holds the per-drop `{drop} — ML frames` image volumes *and* the consolidated legacy video expert annotations as `{drop} — video labels` image volumes (regenerated from the old project 4626 OBB exports). Frames live at `process_files/deployment_data/{survey}/{drop}/frames/` (disk-134). The 4626 exports themselves are backup-of-record — read from S3, don't re-export. See the project issue tracker for the one-time uploader (`scripts/upload_video_labels_to_3711.py`).
+- **Project 3711 — frames + expert labels.** Holds the per-drop `{drop} — ML frames` image volumes *and* the consolidated legacy video expert annotations as `{drop} — video labels` image volumes (regenerated from the old project 4626 OBB exports). Frames live at `process_files/deployment_data/{survey}/{drop}/frames/` (disk-134). The 4626 exports themselves are backup-of-record — read from S3, don't re-export. See `claude_docs/todo.md` for the one-time uploader (`scripts/upload_video_labels_to_3711.py`).
 - **AWS clip housekeeping.** Clips under `process_files/clips/biigle/` that aren't referenced by any 4920 volume are reclaimable; clips referenced by 4920 must stay. Any deletion under that prefix must be cross-checked against 4920's volume URLs first.
 
 ### Legacy expert annotations (pre-BIIGLE)

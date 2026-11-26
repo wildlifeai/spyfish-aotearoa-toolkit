@@ -267,7 +267,7 @@ def _run_biigle_upload_drop(drop_id: str, survey_volume: bool = False) -> str | 
             # expert, once there is citsci data to look at. ML peaks + blind
             # frames for now; blind only, or a citsci-specific check (clips the
             # volunteers flagged as unclear), may turn out to be the better
-            # second opinion. See the project issue tracker.
+            # second opinion. See claude_docs/todo.md.
             logging.info(f"{drop_id}: {e} Falling back to the ML selection.")
             use_zooniverse = False
     if not use_zooniverse:
@@ -397,7 +397,7 @@ STAGES: list = [
     ),
     GlobalStage("biigle-sync", "Biigle annotation sync", _run_biigle_sync),
     # ── Zooniverse validation — opt-in until the pipeline runs routinely ────
-    # Public uploads, so never part of a plain run (see the project issue tracker).
+    # Public uploads, so never part of a plain run (see claude_docs/todo.md).
     # ERROR drops are re-selected: the upload is idempotent per subject set.
     DropStage(
         "zooniverse-frames",

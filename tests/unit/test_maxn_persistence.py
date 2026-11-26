@@ -1,7 +1,7 @@
 """
 Persistence filter in process_maxn — the rolling-min / gap-fill semantics.
 
-Measured basis (19 drops, 2026-08-21, see the project issue tracker): 40% of
+Measured basis (19 drops, 2026-08-21, see claude_docs/todo.md): 40% of
 detection runs last exactly one sampled frame (detector misfires), while 49%
 of gaps BETWEEN runs are one frame (threshold flicker on a present animal).
 The filter must therefore kill isolated blips, forgive single-frame dropouts,

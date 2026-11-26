@@ -12,7 +12,7 @@ Three things it is good for:
   12:40 and the footage at 12:40 shows sand, something went wrong between the
   spreadsheet and the database (a misparsed time, a mismatched DropID, a
   transposed column).
-* **The IsBadDeployment audit** (the project issue tracker): 41 flagged
+* **The IsBadDeployment audit** (`claude_docs/todo.md`): 41 flagged
   deployments carry real annotations, and the only way to judge whether the
   flag or the annotation is wrong is to look.
 * **Time-base sanity.** Legacy sheets record time several ways (minutes into
@@ -525,5 +525,5 @@ st.markdown(
     "base or import problem), when they show clearly more or fewer animals "
     "than the workbook says (a counting or transcription problem), or when a "
     "deployment flagged bad looks perfectly usable (a flag problem). The "
-    "audit note lives in the project issue tracker."
+    "audit note lives in `claude_docs/todo.md`."
 )

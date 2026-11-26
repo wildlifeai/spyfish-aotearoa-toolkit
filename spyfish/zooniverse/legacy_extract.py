@@ -377,7 +377,7 @@ def parse_legacy_classifications(
     logging.info(
         f"Legacy parse step 2/2: resolved {n_resolved}/{n_unmatched} legacy stem(s). "
         f"{n_still_unresolved} genuinely unresolvable (pre-standard filenames, "
-        f"surveys not yet in DB, see the project issue tracker resolver audit)."
+        f"surveys not yet in DB, see claude_docs/todo.md resolver audit)."
     )
     return df
 
