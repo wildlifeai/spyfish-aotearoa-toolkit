@@ -1063,7 +1063,7 @@ def assemble_yolo_dataset(
         f"across {len(image_index)} drop(s) under {images_dir}"
     )
 
-    # MVP per-drop frame filter, see claude_docs/todo.md "Per-drop training-frame
+    # MVP per-drop frame filter, see the project issue tracker "Per-drop training-frame
     # selection" entry for the smarter design that's still pending.
     # Rules:
     #   1. Empty .txt files (no surviving labels post workflow-skip) are

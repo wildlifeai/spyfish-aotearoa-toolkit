@@ -37,7 +37,6 @@ python run_pipeline.py  # runs all steps
 
 # Pipeline flags
 # --no-upload       skip S3 uploads (local testing)
-# --test-run        uses is_test_run: true in config
 # --ping            print config summary and exit (connectivity check)
 
 # Streamlit dashboard
@@ -105,7 +104,7 @@ Steps are invoked via CLI flags in `run_pipeline.py`:
 | `--zooniverse-frames` | `zoo_frames_status` | Frames picked by the BIIGLE selector (`frame_strategy` quotas × `zooniverse.validation.effort_multiplier`), every ML box drawn → `vframes_{drop}`. Volunteers draw missed fish (recall). |
 | `--zooniverse-crops` | `zoo_crops_status` | One crop per ML box in those same frames → `crops_{drop}`. Volunteers judge right species / right box (precision). |
 
-Both need `ml_status = ml_complete` and the video on local disk (never streamed from S3), and build everything from the existing raw CSV. They share one selection per drop (`get_validation_selection_path`). `--dry-run` renders and writes the manifests without uploading (the same flag `--retrain` uses for its fast part). Drops are chosen like every drop stage: eligible ones by `priority` (highest first), top `limit_processing` per run, so raise a drop's priority with `set_status --priority` to send it first. `--survey` bypasses the limit and does the whole survey. Sets are **attached to workflows by hand**, like clips; the upload logs which workflow each set belongs on. Sync-back of the answers is not built yet (`scripts/wip/analyse_validation_workflows.py` covers it).
+Both need `ml_status = ml_complete` and the video on local disk (never streamed from S3), and build everything from the existing raw CSV. They share one selection per drop (`get_validation_selection_path`). `--dry-run` renders and writes the manifests without uploading (the same flag `--retrain` uses for its fast part). Drops are chosen like every drop stage: eligible ones by `priority` (highest first), top `limit_processing` per run, so raise a drop's priority with `set_status --priority` to send it first. `--survey` bypasses the limit and does the whole survey. Sets are **attached to workflows by hand**, like clips; the upload logs which workflow each set belongs on. Sync-back of the answers is not built yet.
 
 ### Configuration Architecture
 
@@ -220,11 +219,4 @@ Do not expose in public-facing tools: GPS lat/lon of sites (illegal fishing risk
 
 ### Documentation
 - `design_doc.md` — single source of truth: architecture, decisions, diagrams, roadmap, known gaps, CLI reference, config reference, module reference, legacy data retrieval.
-- `claude_docs/todo.md` — running task list: code quality, test gaps, Zooniverse review findings, ML pipeline, BIIGLE, reliability hardening.
-- `claude_docs/zooniverse_analysis.md` — **index of all Zooniverse analytical artefacts** (audits, engagement stats, parser-output reviews, notebooks, charts, production code). Start here for any Zooniverse data-quality or volunteer-behaviour question.
-- `claude_docs/zooniverse_suspicious_users_report.md` — send-to-Zooniverse report on bot accounts (blank-API submissions), NH-overuse accounts, and (2026-05-25 addendum) Cat 3 speed-clickers.
-- `claude_docs/zooniverse_annotations_todo.md` — agreed decisions + PR plan for annotations DB cleanup (schema, `AnnotationRecord` dataclass, bootstrap orchestrator).
-- `claude_docs/folder_rename_plan.md` — confirmed folder structure rename decisions.
-- `claude_docs/uoa_design.md` — UoA legacy BUV integration (Underwood & Jeffs, Jan 2022): spreadsheet→deployment cleaning, symlinks, **and the ML→BIIGLE expert-review workflow** (`scripts/wip/run_ml_videos_and_upload_to_biigle.py`, binary `fish` model, per-deployment chapter pooling, the cross-chapter `build_coco` fix).
-- `claude_docs/anywhere_plan.md` — "Spyfish Anywhere": plan to generalize the pipeline to multiple camera-trap projects from one codebase (deployment↔media split, layered profiles, DwC-A export). §13 captures what the UoA one-off revealed and the convergence path back into core.
-- `claude_docs/uoa_paper_plan.md` — UoA ML paper (with Underwood & Jeffs): methodology chapter outline, decisions (20 Jan holdout, 5-class model, MaxN-vs-hand-annotations headline eval), open questions, and status-at-handoff. Start here for any paper-writing session.
+- Open work and historical research notes are tracked in the project issue tracker; only files present in this checkout are linked here.

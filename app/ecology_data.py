@@ -352,7 +352,7 @@ def load_effort(exclude_bad: bool = False) -> pd.DataFrame:
     # annotations are dropped from the numerators, it must leave the
     # denominator too, or every mean is deflated by effort that contributed
     # nothing. Default off because the flag is unreliable, see the note
-    # there and `claude_docs/todo.md`.
+    # there and the project issue tracker.
     with connect_readonly(config.db_path) as conn:
         bad = pd.read_sql(
             "SELECT drop_id FROM deployments WHERE is_bad_deployment = 1", conn

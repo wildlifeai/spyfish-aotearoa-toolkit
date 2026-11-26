@@ -1025,7 +1025,7 @@ def build_context(
     # because the flag is NOT reliably "unusable": 41 flagged drops carried
     # ~3,000 annotation rows when this was written, 2,154 of them full
     # legacy expert reviews. Somebody watched that footage and got data out
-    # of it. See `claude_docs/todo.md` ("IsBadDeployment audit").
+    # of it. See the project issue tracker ("IsBadDeployment audit").
     if exclude_bad_deployments:
         bad_drops = set(
             deployments.loc[
