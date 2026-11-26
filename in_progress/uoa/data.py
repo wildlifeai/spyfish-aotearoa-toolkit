@@ -5,7 +5,7 @@ Insights dashboard and the ML-vs-Expert comparison both need. They each grew
 their own copies of the paths, the raw-CSV filename regex, the chapter length
 and the label maps, and copies of facts about an external dataset drift.
 
-Dataset shape (see ``claude_docs/uoa_design.md``):
+Dataset shape (see the UoA section of ``design_doc.md``):
 
 * **Expert annotations**, ``hold/uoa/Annotations_CLEANED_v2.csv``: one row per
   6-minute interval per deployment, with per-species ``<Species> MaxN``
