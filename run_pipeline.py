@@ -528,10 +528,7 @@ def _run_ping() -> int:
 
 
 def main() -> None:
-    db = DatabaseManager()
-    runner = StageRunner(STAGES, db)
-
-    parser = runner.build_parser()
+    parser = StageRunner.parser_for(STAGES)
     parser.add_argument(
         "--no-upload",
         action="store_true",
@@ -602,6 +599,8 @@ def main() -> None:
     if args.ping:
         log_header("PING: CONFIG CHECK")
         sys.exit(_run_ping())
+
+    db = DatabaseManager()
 
     def _patch_stage(s):
         if s.flag == "ml" and args.survey:
