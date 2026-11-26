@@ -89,11 +89,12 @@ class StageRunner:
         self.db = db
         self.failed_stages: list[str] = []
 
-    def build_parser(self) -> argparse.ArgumentParser:
+    @staticmethod
+    def parser_for(stages: list[StageSpec]) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
             description="Run the Spyfish pipeline. Runs all steps by default."
         )
-        for stage in self.stages:
+        for stage in stages:
             parser.add_argument(
                 f"--{stage.flag}",
                 action="store_true",
@@ -101,6 +102,9 @@ class StageRunner:
                 dest=stage.flag.replace("-", "_"),
             )
         return parser
+
+    def build_parser(self) -> argparse.ArgumentParser:
+        return self.parser_for(self.stages)
 
     def _is_run_all(self, args: argparse.Namespace) -> bool:
         """True when no stage flag was explicitly set.
