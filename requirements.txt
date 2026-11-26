@@ -7,7 +7,7 @@ exceptiongroup==1.2.2
 iniconfig==2.1.0
 jmespath==1.0.1
 numpy==2.2.4
-opencv-python>=4.10.0
+opencv-python-headless>=4.10.0
 openpyxl>=3.1.5
 packaging==24.2
 pandas==2.2.3
@@ -28,5 +28,5 @@ streamlit==1.50.0
 tomli==2.2.1
 tqdm==4.67.1
 tzdata==2025.1
-ultralytics>=8.3.0
+ultralytics-opencv-headless>=8.3.242
 urllib3==2.3.0
