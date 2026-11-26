@@ -178,10 +178,9 @@ def home():
 
     st.divider()
     st.markdown(
-        "For more info about Spyfish Aotearoa check here: "
-        "https://spyfish.notion.site/overview  \n"
-        "For any issues please write to Kalindi or add your issues here: "
-        "https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues"
+        "Read the [contributor guide](https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/blob/main/CONTRIBUTING.md) "
+        "for setup and local sample data.  \n"
+        "Report problems or request changes in [GitHub issues](https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues)."
     )
 
 

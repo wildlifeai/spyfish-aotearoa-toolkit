@@ -835,7 +835,7 @@ def render_home(ctx: dict) -> None:
     )
     st.caption(
         "Any feedback, issues, or something you want to see on this page? "
-        "Contact us at kalindi@wildlife.ai"
+        "Open a ticket in the [GitHub issue tracker](https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues)."
     )
     st.write("")
 

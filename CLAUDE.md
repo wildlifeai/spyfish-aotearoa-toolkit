@@ -40,8 +40,8 @@ python run_pipeline.py  # runs all steps
 # --test-run        uses is_test_run: true in config
 # --ping            print config summary and exit (connectivity check)
 
-# Streamlit dashboard
-streamlit run "app/🐟_Spyfish_Data_Tools.py"
+# Streamlit dashboard; launch from app/ so Streamlit finds its secrets file
+(cd app && streamlit run "🐟_Spyfish_Data_Tools.py")
 ```
 
 ---

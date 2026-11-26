@@ -43,8 +43,8 @@ python run_pipeline.py --ping     # config + connectivity check
 python run_pipeline.py            # run all default pipeline steps
 python run_pipeline.py --ml       # or run a single step
 
-# Ops dashboard
-streamlit run "app/🐟_Spyfish_Data_Tools.py"
+# Ops dashboard. Launch from app/ so Streamlit finds .streamlit/secrets.toml.
+(cd app && streamlit run "🐟_Spyfish_Data_Tools.py")
 ```
 
 Tests: `pytest tests/` (unit tests need no external services; integration tests
@@ -81,8 +81,9 @@ SLURM scripts just wrap the same `run_pipeline.py` CLI.
 - **[design_doc.md](design_doc.md)**: the full picture: architecture,
   decisions, CLI reference, configuration, module reference.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**: system overview and diagrams.
-- **[Project wiki](https://spyfish.notion.site/overview)**: tutorials and
-  contributor information.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: local setup and sample-data workflow.
+- **[GitHub issues](https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues)**:
+  questions, bug reports, and feature requests.
 
 ## Links
 

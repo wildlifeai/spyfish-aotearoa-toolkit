@@ -12,9 +12,8 @@ import streamlit as st
 st.title("🆘 Error page")
 
 st.error(
-    "**If any tool on this site doesn't work, contact Kalindi immediately.**\n\n"
-    "- **Slack:** message Kalindi\n"
-    "- **Email:** [kalindi@wildlife.ai](mailto:kalindi@wildlife.ai)\n\n"
+    "**If any tool on this site doesn't work, report it in [GitHub issues]("
+    "https://github.com/wildlifeai/Spyfish-Aotearoa-toolkit/issues).**\n\n"
     "Please include what you were doing, which tool/page, the **DropID** if "
     "there is one, and a **screenshot** if you can. This makes things much "
     "faster to fix."
