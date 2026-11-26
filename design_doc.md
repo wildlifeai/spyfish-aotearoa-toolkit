@@ -998,11 +998,11 @@ The Streamlit dashboard and any exported data should be reviewed against these c
 
 ### Credential management
 
-All secrets live in `.env`, loaded at startup via `python-dotenv`. Never committed to git. The `.env_sample` file documents required variables without values.
+All secrets live in `.env`, loaded at startup via `python-dotenv`. Never commit it. Use `.env_sample` as the source of truth for the environment variables required by the pipeline.
 
 Required secrets:
 
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` — S3 access
+- `S3_BUCKET` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` — S3 access
 - `BIIGLE_API_EMAIL` / `BIIGLE_API_TOKEN` — BIIGLE REST API
 - `ZOONIVERSE_USER` / `ZOONIVERSE_PASSWORD` — Panoptes upload
 
@@ -1230,7 +1230,7 @@ pip install -e .
 
 ### Environment variables
 
-Create a `.env` file in the project root (see `.env_sample`):
+Copy `.env_sample` to `.env` in the project root and fill in the placeholders. The sample file is the authoritative list of environment variables; the values below only illustrate the expected format:
 
 ```env
 AWS_ACCESS_KEY_ID=your_aws_key
