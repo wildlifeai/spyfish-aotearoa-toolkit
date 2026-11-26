@@ -32,9 +32,16 @@ independently rather than in one fragile chain.
 
 ## Quick start
 
+Install the AWS CLI before running a pipeline command that uploads results to
+S3. The closing sync uses `aws s3 sync`, while `--no-upload` keeps a local run
+from requiring the CLI or sending files to S3.
+
 ```bash
 pip install -r requirements.txt
 pip install -e .
+
+# Verify that the AWS CLI is available
+aws --version
 
 # Secrets live in .env (never in git): AWS, BIIGLE and Zooniverse credentials
 #: see design_doc.md for the full list.
