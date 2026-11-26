@@ -549,9 +549,15 @@ def main() -> None:
     runner = StageRunner(patched_stages, db)
     runner.run(args)
 
-    # Always run the S3 sync — we want the partial results of whatever did
-    # succeed to be persisted, even if some stage failed.
-    if args.no_upload:
+    # Do not publish partial results after a top-level stage failure. A failed
+    # run can leave local state that is not safe to make authoritative in S3.
+    if runner.failed_stages:
+        logging.warning(
+            "Skipping final S3 sync because these stages failed: %s",
+            ", ".join(runner.failed_stages),
+        )
+        log_header("PIPELINE INCOMPLETE (NOT SYNCED)", character="═")
+    elif args.no_upload:
         logging.info("No-upload set: skipping final S3 sync.")
         log_header("PIPELINE COMPLETE (LOCAL ONLY)", character="═")
     else:
