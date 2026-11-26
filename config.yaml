@@ -209,10 +209,10 @@ paths:
       reserves_csv: "Marine Reserves.csv"
       legacy_experts_csv: "BUV Annotations Legacy Experts.csv"
 
-  # Optional: absolute path to an alternate base dir for media downloads (e.g. /tmp/spyfish).
-  # Use this for a temp/no-backup location when videos are large or ephemeral.
-  # If unset, media resolves to <project_root>/media as before.
-  media_base_dir: /nesi/nobackup/wildlife03546
+  # Optional: absolute path to an alternate base dir for media downloads.
+  # Leave this unset on a laptop so media resolves to <project_root>/media.
+  # NeSI and other HPC users can uncomment and change this in a local config:
+  # media_base_dir: /nesi/nobackup/<allocation>
 
   # Sub-directories (local and S3 suffixes)
   sub_dirs:
