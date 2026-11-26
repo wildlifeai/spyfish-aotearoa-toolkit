@@ -32,7 +32,11 @@ independently rather than in one fragile chain.
 
 ## Quick start
 
+On a laptop without an NVIDIA GPU, install the CPU-only PyTorch wheels first.
+This avoids downloading the CUDA packages that a CPU-only machine cannot use.
+
 ```bash
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 pip install -e .
 
