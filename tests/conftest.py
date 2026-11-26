@@ -172,7 +172,6 @@ zooniverse:
       max_width_px: 1920
 
 orchestrator:
-  is_test_run: true
   log_output: "console"
 
 ffmpeg:

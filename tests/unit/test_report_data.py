@@ -836,7 +836,7 @@ def test_build_context_bad_deployment_toggle():
         protection_status="No protection",
         link_to_marine_reserve="X",
     )
-    # Default: counted. The flag is unreliable (see claude_docs/todo.md),
+    # Default: counted. The flag is unreliable (see the project issue tracker),
     # so the report includes them unless the sidebar toggle says otherwise.
     kept = report_data.build_context(
         dep, ann, None, [], ingested_only=False, source=report_data.ALL_SOURCES

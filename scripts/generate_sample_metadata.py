@@ -4,7 +4,7 @@ Writes a local tree that mirrors the real bucket root, so the whole thing can be
 synced to a test bucket as-is:
 
     process_files/sample_bucket/
-    ├── metadata/sharepoint_lists/   BUV Deployment.csv, BUV Survey Metadata.csv,
+    ├── spyfish_metadata/sharepoint_lists/   BUV Deployment.csv, BUV Survey Metadata.csv,
     │                                BUV Survey Sites.csv, Marine Reserves.csv,
     │                                BUV Species.csv
     └── media/{SurveyID}/{DropID}/{DropID}.mp4

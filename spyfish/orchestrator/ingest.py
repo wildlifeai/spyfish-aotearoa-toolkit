@@ -200,7 +200,7 @@ def _attach_region(sites_df, storage):
         reserves = storage.read_df_from_s3_csv(config.s3_sharepoint_reserves_csv)
         # Values are passed through as-is apart from trimming. The known typo
         # ("Hauraki-Waikato- Taranaki" vs "Hauraki-Waikato-Taranaki") is
-        # deliberately NOT patched here, see claude_docs/todo.md; it is a
+        # deliberately NOT patched here, see the project issue tracker; it is a
         # SharePoint data fix, and papering over it in code would hide it from
         # every other consumer of that list.
         title_to_region = {

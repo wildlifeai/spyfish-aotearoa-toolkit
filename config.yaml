@@ -294,7 +294,7 @@ extraction:
   # and the old binary/multiclass fork was pure complication.
   #
   # Allocation is by marginal information — what an expert label tells us that we
-  # don't already know. See claude_docs/todo.md "Frame selection: one budget,
+  # don't already know. See the project issue tracker "Frame selection: one budget,
   # several buckets" for the measurements behind these numbers.
   frame_strategy:
     per_species_maxn: 2        # Mandatory for counting: no peak frame for a species = no MaxN for it at all
@@ -313,7 +313,7 @@ extraction:
     # is the real price of more frames — not the quota numbers.
     # One knob for review effort: multiplies the per-species and diversity quotas
     # below. 1 = as written. Restores what `frame_multiplier` did until it was
-    # deleted in 2026-05 (see claude_docs/todo.md), minus the spacing half —
+    # deleted in 2026-05 (see the project issue tracker), minus the spacing half —
     # measurement showed quotas, not spacing, are what bind the frame count.
     #
     # Does NOT scale `start_export`: a deployment health check is one look at the
